@@ -41,6 +41,13 @@ class OfflineClient:
             await self.store.save_session(SimpleNamespace(model_dump=lambda **_: session))
 
     async def snapshot(self):
+        if self.scenario == "overflow-events":
+            for index in range(1001):
+                # Match PyMax's dispatcher: callback exceptions do not fail login.
+                try:
+                    await self.event("message", self.msg(str(2000 + index), "during snapshot", "in"))
+                except Exception:
+                    pass
         return (T.Contact(id="1", display_name="Synthetic self"),
                 [T.Contact(id="2", display_name="Synthetic peer")],
                 [T.Conversation(id="10", kind="dm", peer_user_id="2")],
@@ -48,12 +55,15 @@ class OfflineClient:
 
     def msg(self, mid, text, direction="out"):
         return T.Message(id=mid, chat_id="10", direction=direction, sent_at=STAMP,
-                         sender_id="1" if direction == "out" else "2", text=text)
+                         sender_id="1" if direction == "out" else "2", text=text,
+                         ext={"max": {"message_type": "USER", "has_attachments": False}})
 
     async def wait_closed(self):
         await self.closed.wait()
 
     async def close(self):
+        self.store.identity["close_count"] = self.store.identity.get("close_count", 0) + 1
+        self.store.save_identity()
         self.closed.set()
 
     async def recent(self, chat_id, limit):

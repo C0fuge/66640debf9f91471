@@ -133,3 +133,70 @@ def test_actual_qr_models_have_millisecond_expiry_and_no_console_output(capsys):
         assert flow.steps[0][1]["expires_at"].year > 2020
     asyncio.run(run())
     assert capsys.readouterr().out == ""
+
+
+def test_login_buffer_overflow_survives_real_upstream_dispatch_exception_catch(tmp_path, monkeypatch):
+    import pymax
+    from pymax.connection import ConnectionManager
+    from pymax.protocol import Command
+
+    created = []
+
+    class CatchingClient:
+        def __init__(self, *, extra_config, **kwargs):
+            created.append(self)
+            self.handlers = {}
+            self.closed = False
+            self.me = None
+            self._config = SimpleNamespace(device=SimpleNamespace(
+                user_agent=extra_config.generate_web_user_agent()))
+
+        async def _ensure_runtime(self):
+            pass
+
+        def register(self, name):
+            def decorator(callback):
+                self.handlers[name] = callback
+                return callback
+            return decorator
+
+        def on_message(self):
+            return self.register("message")
+
+        def on_message_edit(self):
+            return self.register("edit")
+
+        def on_chat_update(self):
+            return self.register("chat")
+
+        def on_message_delete(self):
+            return self.register("delete")
+
+        async def connect(self):
+            connection = ConnectionManager.__new__(ConnectionManager)
+
+            async def on_event(frame):
+                await self.handlers["message"](raw_message(), self)
+
+            connection.on_event = on_event
+            frame = SimpleNamespace(opcode=Opcode.NOTIF_MESSAGE, cmd=Command.REQUEST, seq=1)
+            for _ in range(1001):
+                # Actual pinned method catches every callback exception and returns.
+                await connection._dispatch_event(frame)
+            self.me = SimpleNamespace(contact=User(id=1))
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(pymax, "WebClient", CatchingClient)
+
+    async def run():
+        store = PrivateState(tmp_path / "state", "a")
+        adapter = PyMaxAdapter(account(Flow([])), store, Settings(30, None), None)
+        with pytest.raises(PluginError, match="login event buffer overflow"):
+            await adapter.connect("qr", True)
+        assert created[0].closed
+        assert adapter.me is None
+        store.release()
+
+    asyncio.run(run())

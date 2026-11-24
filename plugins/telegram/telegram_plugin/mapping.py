@@ -3,6 +3,8 @@ from contact_hub_sdk import errors as rpc
 from contact_hub_sdk import types as dto
 from telethon import types as tl, utils
 
+from .media_info import media_info
+
 
 def identifier(value, field, *, peer=False):
     if not isinstance(value, str) or not 1 <= len(value) <= 20:
@@ -185,6 +187,7 @@ def message(raw):
     return dto.Message(id=str(raw.id), chat_id=peer_id(raw.peer_id), direction="out" if raw.out else "in",
                        sent_at=raw.date, sender_id=sender, text=text, topic_id=sid(topic),
                        entities=entities_from_tl(getattr(raw, "entities", None)) if text is not None else None,
+                       media=media_info(getattr(raw, "media", None)),
                        reply_to=reply, forward_from=forward,
                        grouped_id=sid(getattr(raw, "grouped_id", None)), views=getattr(raw, "views", None),
                        action=service_action(raw, sender, reply_id), mentioned=getattr(raw, "mentioned", None),

@@ -3,7 +3,7 @@ import asyncio
 from contact_hub_sdk import Plugin, errors as rpc, method
 from contact_hub_sdk import types as dto
 
-from . import actions, activity, history, sync
+from . import actions, activity, downloads, history, sync
 from .auth import sign_in
 from .mapping import SEND_ENTITY_TYPES, contact
 from .send import send
@@ -17,6 +17,7 @@ class TelegramPlugin(Plugin):
         "messages.get": True, "edit": True, "edit.caption": True, "delete": True, "delete.for_me": True,
         "forward": True, "forward.drop_author": True, "pin": True, "unpin": True,
         "read_receipts": True, "typing": {"actions": list(activity.TYPING)}, "drafts.sync": True,
+        "media.download": True, "avatars": True,
     }
 
     def __init__(self, factory=make_client):
@@ -196,3 +197,13 @@ class TelegramPlugin(Plugin):
     async def draft(self, account, params):
         with platform_errors():
             await activity.save_draft(self.ready(account), params)
+
+    @method("media.download")
+    async def download(self, account, params):
+        with platform_errors():
+            return await downloads.download(account, self.ready(account), params)
+
+    @method("avatars.download")
+    async def avatar(self, account, params):
+        with platform_errors():
+            return await downloads.avatar(account, self.ready(account), params)

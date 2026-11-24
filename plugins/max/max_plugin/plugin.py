@@ -10,7 +10,7 @@ from typing import Any, Callable
 from contact_hub_sdk import (Account, AuthRequired, InvalidParams, NotSupported, Plugin,
                              PluginError, Unavailable, method)
 from contact_hub_sdk import types as T
-from contact_hub_sdk.wire import to_wire
+from contact_hub_sdk.wire import from_wire, to_wire
 
 from .adapter import PyMaxAdapter
 from .settings import Settings
@@ -37,6 +37,13 @@ def failure(exc: Exception) -> PluginError:
     return PluginError("MAX operation failed; restart sign-in or retry the account")
 
 
+def correlated_confirmation(message: dict, client_id: str) -> dict:
+    """Correlate only an authoritative confirmation with its exact request ID."""
+    ext = dict(message.get("ext") or {})
+    ext["max"] = {**(ext.get("max") or {}), "client_id": client_id}
+    return {**message, "ext": ext}
+
+
 @dataclass
 class Runtime:
     store: PrivateState
@@ -50,6 +57,7 @@ class Runtime:
     live: bool = False
     events: list = field(default_factory=list)
     generation: int = 0
+    fatal: PluginError | None = None
 
 
 class MaxPlugin(Plugin):
@@ -109,11 +117,19 @@ class MaxPlugin(Plugin):
         state: Runtime = account.data["max"]
         if generation != state.generation:
             return
+        if state.fatal is not None:
+            return
         if not state.live:
             if len(state.events) >= 1000:
-                raise PluginError("MAX initial event buffer overflow; restart the account")
+                # PyMax catches callback exceptions, so the owner must observe a
+                # durable failure latch independently of the callback return.
+                state.fatal = PluginError("MAX initial event buffer overflow; restart the account")
+                return
             state.events.append((kind, data))
             return
+        await self._deliver_event(account, kind, data)
+
+    async def _deliver_event(self, account: Account, kind: str, data: Any) -> None:
         if kind == "message":
             await account.messages_upsert([data])
         elif kind == "conversation":
@@ -125,22 +141,34 @@ class MaxPlugin(Plugin):
         state: Runtime = account.data["max"]
         state.generation += 1
         generation = state.generation
+        state.fatal = None
         state.adapter = self.adapter_factory(account, state.store, state.settings,
                             lambda kind, data: self._event(account, kind, data, generation))
         await state.adapter.connect(mode, interactive)
+        self._check_initial_events(state)
         me, contacts, chats, messages = await state.adapter.snapshot()
-        state.ready = True
-        await account.status("connected", me=me)
+        self._check_initial_events(state)
         # Login data is a snapshot, not proof of complete enumeration. Never send
         # conversations.synced, which could delete chats missing from this page.
         for rows, emit in ((contacts, account.contacts_upsert), (chats, account.conversations_upsert),
                            (messages, account.messages_upsert)):
             for offset in range(0, len(rows), 100):
+                self._check_initial_events(state)
                 await emit(rows[offset:offset + 100], ack=True)
+                self._check_initial_events(state)
+        while state.events:
+            self._check_initial_events(state)
+            kind, data = state.events.pop(0)
+            await self._deliver_event(account, kind, data)
+        self._check_initial_events(state)
         state.live = True
-        for kind, data in state.events:
-            await self._event(account, kind, data, generation)
-        state.events.clear()
+        state.ready = True
+        await account.status("connected", me=me)
+
+    @staticmethod
+    def _check_initial_events(state: Runtime) -> None:
+        if state.fatal is not None:
+            raise state.fatal
 
     async def _background(self, account: Account) -> None:
         state: Runtime = account.data["max"]
@@ -299,7 +327,16 @@ class MaxPlugin(Plugin):
                     if previous["digest"] != digest:
                         raise InvalidParams("client_id was already used with another message", field="client_id")
                     if previous["outcome"] == "confirmed":
-                        return {"message": previous["message"]}
+                        # A durable, payload-matching success is authoritative even
+                        # when its original RPC reply was lost. Older journal rows
+                        # gain correlation from this exact keyed retry, never from
+                        # content/time matching against unrelated platform events.
+                        wire = correlated_confirmation(previous["message"], params.client_id)
+                        if wire != previous["message"]:
+                            previous["message"] = wire
+                            state.store.write("sends.json", state.store.ledger)
+                        await account.messages_upsert([from_wire(T.Message, wire)])
+                        return {"message": wire}
                     raise PluginError("Previous MAX send outcome is unknown; automatic retry is unsafe",
                                       code="NETWORK", outcome="unknown", retry_safe=False)
                 if len(state.store.ledger) >= 10000:
@@ -311,6 +348,9 @@ class MaxPlugin(Plugin):
                 wire = to_wire(result)
                 if wire.get("chat_id") != params.chat_id or wire.get("direction") != "out":
                     raise PluginError("MAX did not confirm the outgoing message")
+                if params.client_id is not None:
+                    wire = correlated_confirmation(wire, params.client_id)
+                    result = from_wire(T.Message, wire)
             except asyncio.CancelledError:
                 raise
             except Exception:

@@ -38,6 +38,10 @@ def test_auth_order_accounts_events_send_and_pagination(core_factory, tmp_path):
     assert core.call("auth.cancel", {**A, "flow": "sign_in"}) == {}
     sent = core.call("messages.send", {**A, "chat_id": "10", "text": "**literal**", "client_id": "send-1"})
     assert sent["message"]["text"] == "**literal**"
+    assert sent["message"]["ext"]["max"] == {
+        "message_type": "USER", "has_attachments": False, "client_id": "send-1"}
+    emitted = core.event("messages.upsert", lambda p: p["messages"][0]["id"] == sent["message"]["id"])
+    assert emitted["messages"][0] == sent["message"]
     replay = core.call("messages.send", {**A, "chat_id": "10", "text": "**literal**", "client_id": "send-1"})
     assert replay == sent
     err = core.error("messages.send", {**A, "chat_id": "10", "text": "different", "client_id": "send-1"})
@@ -86,6 +90,9 @@ def test_unknown_send_survives_process_restart_without_retry(core_factory, tmp_p
     again.event("status", state="connected")
     assert again.error("messages.send", params)["data"]["outcome"] == "unknown"
     assert again.call("messages.send", confirmed) == sent
+    replay_event = again.event("messages.upsert", lambda p: p["messages"][0]["id"] == sent["message"]["id"])
+    assert replay_event["messages"][0] == sent["message"]
+    assert replay_event["messages"][0]["ext"]["max"]["client_id"] == "confirmed-once"
     state = json.loads((tmp_path / "accounts/max/state/identity.json").read_text())
     assert state["send_count"] == 2
     assert "synthetic-private-token-do-not-log" not in core.stderr_text + again.stderr_text
@@ -163,11 +170,16 @@ def test_opaque_client_id_empty_unicode_and_absent_are_distinct(core_factory, tm
     sign_in(core)
     params = {**A, "chat_id": "10", "text": "opaque ID"}
     empty = core.call("messages.send", {**params, "client_id": ""})
+    assert empty["message"]["ext"]["max"]["client_id"] == ""
+    emitted = core.event("messages.upsert", lambda p: p["messages"][0]["id"] == empty["message"]["id"])
+    assert emitted["messages"][0] == empty["message"]
     assert core.call("messages.send", {**params, "client_id": ""}) == empty
     # An omitted/null ID has no journal key, and must not alias the empty ID.
     absent = core.call("messages.send", params)
     null = core.call("messages.send", {**params, "client_id": None})
     assert len({empty["message"]["id"], absent["message"]["id"], null["message"]["id"]}) == 3
+    assert "client_id" not in absent["message"]["ext"]["max"]
+    assert "client_id" not in null["message"]["ext"]["max"]
     opaque = "雪🙂" * 300
     unicode_sent = core.call("messages.send", {**params, "client_id": opaque})
     assert core.call("messages.send", {**params, "client_id": opaque}) == unicode_sent
@@ -177,7 +189,31 @@ def test_opaque_client_id_empty_unicode_and_absent_are_distinct(core_factory, tm
     again.start()
     again.event("status", state="connected")
     assert again.call("messages.send", {**params, "client_id": ""}) == empty
+    replay_event = again.event("messages.upsert", lambda p: p["messages"][0]["id"] == empty["message"]["id"])
+    assert replay_event["messages"][0]["ext"]["max"]["client_id"] == ""
     assert again.call("messages.send", {**params, "client_id": opaque}) == unicode_sent
+    assert unicode_sent["message"]["ext"]["max"]["client_id"] == opaque
+    journal = json.loads((tmp_path / "accounts/max/state/sends.json").read_text())
+    assert {row["message"]["ext"]["max"]["client_id"] for row in journal.values()} == {"", opaque}
     state = json.loads((tmp_path / "accounts/max/state/identity.json").read_text())
     assert state["send_count"] == 4
     assert again.shutdown() == 0
+
+
+def test_snapshot_buffer_overflow_is_fatal_even_when_dispatcher_swallows_errors(core_factory, tmp_path):
+    store = PrivateState(tmp_path / "accounts/max/state", "max")
+    store.identity["mode"] = "qr"
+    store.save_identity()
+    store.write("session.json", {"token": "synthetic", "device_id": store.identity["device_id"]})
+    store.release()
+    core = core_factory("overflow-events")
+    core.start()
+    error = core.event("status", state="error")
+    assert "event buffer overflow" in error["detail"]
+    assert not any(event["method"] == "status" and event["params"]["state"] == "connected"
+                   for event in core.all_events)
+    assert not any(event["method"] == "messages.upsert" for event in core.all_events)
+    identity = json.loads((tmp_path / "accounts/max/state/identity.json").read_text())
+    assert identity["close_count"] == 1
+    assert core.error("messages.send", {**A, "chat_id": "10", "text": "must not send"})["data"]["code"] == "UNAVAILABLE"
+    assert core.shutdown() == 0

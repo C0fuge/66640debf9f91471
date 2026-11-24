@@ -7,10 +7,10 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 async fn fixture(mode: &str) -> (App, Thread) {
     let temp = tempfile::tempdir().unwrap();
-    let dir = temp.path().join("plugins/action-fixture");
+    let dir = temp.path().join("plugins/action_fixture");
     std::fs::create_dir_all(&dir).unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/action_plugin.py");
-    let manifest = json!({"id":"action-fixture","name":"Actions fixture","version":"0.0.1","api_version":"1.0.0",
+    let manifest = json!({"id":"action_fixture","name":"Actions fixture","version":"0.0.1","api_version":"1.0.0",
         "entry":["python3","-B","-s",script,mode],"brand_color":"#123456","multi_account":true,"auth_methods":["none"]});
     std::fs::write(dir.join("plugin.json"), manifest.to_string()).unwrap();
     let mut config = CoreConfig::new(temp.path(), Arc::new(MemorySecretStore::new()));
@@ -22,7 +22,7 @@ async fn fixture(mode: &str) -> (App, Thread) {
         config.host.env.insert(key.into(), path.to_string_lossy().into_owned());
     }
     let app = App::open(config, Some(temp)).await.unwrap();
-    let account = app.core.accounts().add(NewAccount::new("action-fixture")).await.unwrap().account_id;
+    let account = app.core.accounts().add(NewAccount::new("action_fixture")).await.unwrap().account_id;
     let key = Thread { account_id: account.clone(), chat_id: "chat".into(), topic_id: None };
     app.read(move |db| {
         let chat = ch_db::insert_conversation(db.conn(), &ConversationRow { account_id: account.clone(), chat_id: "chat".into(), kind: "group".into(), ..Default::default() })?;
@@ -88,7 +88,7 @@ async fn four_actions_commit_and_echo_orders_converge() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_foreign_and_provisional_targets_never_reach_rpc() {
     let (app, thread) = fixture("good").await;
-    let second = app.core.accounts().add(NewAccount::new("action-fixture").no_start()).await.unwrap();
+    let second = app.core.accounts().add(NewAccount::new("action_fixture").no_start()).await.unwrap();
     for target in [Thread { chat_id: "other".into(), ..thread.clone() }, Thread { topic_id: Some("closed".into()), ..thread.clone() }, Thread { account_id: second.account_id, ..thread.clone() }] {
         for (method, args) in [("editText",json!({"thread":target,"messageId":"message","text":"no","entities":[]})),
             ("deleteMessages",json!({"thread":target,"messageIds":["message"],"revoke":true})),

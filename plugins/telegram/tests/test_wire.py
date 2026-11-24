@@ -240,3 +240,23 @@ def test_activity_and_drafts(core):
     core.call("drafts.save", {**p, "draft": {"text": "", "reply_to": "4"}})
     assert core.error("drafts.save", {**p, "topic_id": "4", "draft": {"text": "x"}})["data"]["code"] == "NOT_SUPPORTED"
     assert core.shutdown() == 0
+
+
+def test_media_downloads_and_avatars(core):
+    start(core)
+    p = {"account_id": "a", "chat_id": "17", "message_id": "100", "what": "full", "priority": 3}
+    info = core.call("messages.get", {k: v for k, v in p.items() if k not in ("what", "priority")})["message"]["media"]
+    assert info["kind"] == "document" and info["filename"] == "../../remote.bin"
+    result = core.call("media.download", p)
+    path = Path(result["path"])
+    assert path.is_relative_to(core.tmp / "accounts" / "a" / "cache") and path.read_bytes() == b"fixture"
+    progress = core.event("transfer.progress", where=lambda e: e.get("done_bytes") == 7)
+    assert progress["request_id"] is not None and progress["direction"] == "download"
+    assert core.event("media.ready")["path"] == result["path"]
+    thumb = core.call("media.download", {**p, "message_id": "101", "what": "thumb"})
+    assert thumb["mime"] == "image/jpeg" and Path(thumb["path"]).read_bytes() == b"img"
+    avatar = core.call("avatars.download", {"account_id": "a", "kind": "user", "id": "17", "size": "small"})
+    assert Path(avatar["path"]).read_bytes() == b"avatar"
+    assert core.event("avatar.ready")["path"] == avatar["path"]
+    assert not core.call("avatars.download", {"account_id": "a", "kind": "user", "id": "18"}).get("path")
+    assert core.shutdown() == 0

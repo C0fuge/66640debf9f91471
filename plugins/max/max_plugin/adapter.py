@@ -84,6 +84,7 @@ class PyMaxAdapter:
         self.account, self.store, self.settings, self.event = account, store, settings, event
         self.client: Any = None
         self.me: int | None = None
+        self._fatal: PluginError | None = None
 
     async def connect(self, mode: str, interactive: bool) -> None:
         from pymax import Client, WebClient
@@ -134,9 +135,14 @@ class PyMaxAdapter:
         pending: list[tuple[str, Any]] = []
 
         async def deliver(kind: str, raw: Any) -> None:
+            if self._fatal is not None:
+                return
             if self.me is None:
                 if len(pending) >= 1000:
-                    raise PluginError("MAX login event buffer overflow")
+                    # The upstream connection catches/logs handler errors. Latch
+                    # overflow for the connect owner instead of trusting a raise.
+                    self._fatal = PluginError("MAX login event buffer overflow")
+                    return
                 pending.append((kind, raw))
                 return
             if kind == "message":
@@ -161,6 +167,9 @@ class PyMaxAdapter:
         self.client.on_chat_update()(on_chat)
         self.client.on_message_delete()(on_delete)
         await self.client.connect()
+        if self._fatal is not None:
+            await self.close()
+            raise self._fatal
         if self.client.me is None:
             raise AuthRequired("MAX login returned no profile")
         self.me = self.client.me.contact.id

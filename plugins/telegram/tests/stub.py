@@ -15,6 +15,15 @@ def row(i, peer=PEER, **kwargs):
     return tl.Message(id=i, peer_id=peer, date=NOW + timedelta(seconds=i), message=f"Row {i}", **kwargs)
 
 
+def document(*attributes, mime="application/octet-stream", size=7):
+    return tl.Document(200, 0, b"fixture", NOW, mime, size, 1, list(attributes),
+                       thumbs=[tl.PhotoSize("s", 4, 3, 3)])
+
+
+def photo():
+    return tl.Photo(201, 0, b"fixture", NOW, [tl.PhotoSize("s", 4, 3, 3), tl.PhotoSizeProgressive("x", 40, 30, [4, 7])], 1)
+
+
 class Stub:
     def __init__(self, path, api_id, api_hash, proxy):
         self.session = SQLiteSession(str(path))
@@ -25,6 +34,8 @@ class Stub:
         self.handlers = []
         self.sent = {}
         self.messages = {i: row(i) for i in range(1, 11)}
+        self.messages[100] = row(100, media=tl.MessageMediaDocument(document=document(tl.DocumentAttributeFilename("../../remote.bin"))))
+        self.messages[101] = row(101, media=tl.MessageMediaPhoto(photo=photo(), spoiler=True))
 
     async def connect(self):
         self.attempt += 1
@@ -94,6 +105,18 @@ class Stub:
         if ids == 99:
             return row(99, tl.PeerUser(18))
         return self.messages.get(ids)
+
+    async def download_media(self, message, *, file, thumb, progress_callback):
+        content = b"img" if thumb is not None and getattr(thumb, "type", None) == "s" else b"fixture"
+        file.write(content)
+        await progress_callback(len(content), len(content))
+        return file
+
+    async def download_profile_photo(self, peer, *, file, download_big):
+        if getattr(peer, "user_id", None) == 18:
+            return None
+        file.write(b"avatar")
+        return file
 
     async def iter_messages(self, peer, *, limit, reply_to=None, offset_id=0, offset_date=None, reverse=False, min_id=0, max_id=0):
         ids = list(range(1, 11))
