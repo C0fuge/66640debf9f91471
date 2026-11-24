@@ -21,12 +21,19 @@ try {
   const normal = () => page.locator(".poll-card").filter({ hasText: "Literal <question>" });
   const quiz = () => page.locator(".poll-card").filter({ hasText: "Unanswered quiz" });
   const calls = () => page.evaluate(() => window.pollFixture.calls());
+  async function choose(account) {
+    const accountButton = button(`${account}, Fixture, connected`);
+    await accountButton.click();
+    await page.getByRole("button").filter({ hasText: `${account} chat` }).click();
+    await page.getByRole("heading", { name: `${account} chat`, exact: true }).waitFor();
+    assert.equal(await accountButton.getAttribute("aria-pressed"), "true");
+  }
   async function screenshot(name) {
     if (!screenshotDir) return;
     await mkdir(screenshotDir, { recursive: true });
     await page.screenshot({ path: join(screenshotDir, name), fullPage: true });
   }
-  await page.getByRole("button").filter({ hasText: "Alpha chat" }).click();
+  await choose("Alpha");
   await normal().getByRole("button", { name: "Open poll" }).click();
   await screenshot("poll-panel.png");
   assert.deepEqual(await calls(), [], "opening and rendering never votes or refreshes");
@@ -41,11 +48,11 @@ try {
   assert.equal(await dialog.getByRole("button", { name: "Submit vote", exact: true }).isDisabled(), true);
   assert.equal(await dialog.getByRole("button", { name: "Close poll", exact: true }).isDisabled(), true);
   await dialog.getByRole("button", { name: "Close panel", exact: true }).click();
-  await page.getByRole("button").filter({ hasText: "Beta chat" }).click();
+  await choose("Beta");
   await normal().getByRole("button", { name: "Open poll" }).click();
   assert.equal(await dialog.getByRole("button", { name: "Close poll", exact: true }).isDisabled(), true);
   await dialog.getByRole("button", { name: "Close panel", exact: true }).click();
-  await page.getByRole("button").filter({ hasText: "Alpha chat" }).click();
+  await choose("Alpha");
   await normal().getByRole("button", { name: "Open poll" }).click();
   assert.equal(await dialog.getByRole("button", { name: "Close poll", exact: true }).isDisabled(), true, "account remount cannot release uncertain target");
   assert.deepEqual((await calls()).map(call => call.method), ["refreshPoll", "votePoll"], "switching and reopening never reads or replays automatically");
@@ -73,13 +80,13 @@ try {
   assert.deepEqual(sent[4].params.optionIds, []);
   assert.equal(await page.locator("script").filter({ hasText: "Literal" }).count(), 0);
   assert.equal(await button("Create poll").count(), 0);
-  // A late scoped response cannot replace Beta's panel.
-  await page.getByRole("button").filter({ hasText: "Beta chat" }).click();
+  // A late Beta response cannot replace Alpha's new panel.
+  await choose("Beta");
   await normal().getByRole("button", { name: "Open poll" }).click();
   await page.evaluate(() => window.pollFixture.next("hold"));
   await dialog.getByRole("button", { name: "Refresh poll", exact: true }).click();
   await page.evaluate(() => document.querySelector("dialog").close());
-  await page.getByRole("button").filter({ hasText: "Alpha chat" }).click();
+  await choose("Alpha");
   await quiz().getByRole("button", { name: "Open poll" }).click();
   await page.evaluate(() => window.pollFixture.release());
   await dialog.getByRole("heading", { name: "Unanswered quiz", exact: true }).waitFor();
