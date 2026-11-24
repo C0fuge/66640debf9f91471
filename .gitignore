@@ -17,8 +17,8 @@ venv/
 *.sqlite
 *.sqlite3
 *.session*
-auth.json
-credentials.json
+/auth.json
+/credentials.json
 .codex/
 .cloud-output/
 .cloud-state/
