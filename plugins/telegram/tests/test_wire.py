@@ -286,3 +286,43 @@ def test_file_and_album_upload_wire(core, tmp_path):
     assert core.error("messages.send_file", {**p, "kind": "video"})["data"]["code"] == "NOT_SUPPORTED"
     assert core.error("messages.send_file", {**p, "duration": 3})["data"]["field"] == "duration"
     assert core.shutdown() == 0
+
+
+def test_poll_family_wire_and_account_scope(core):
+    start(core)
+    start(core, name="b")
+    p = {"account_id": "a", "chat_id": "-1000000000008", "topic_id": "42", "reply_to": {"message_id": "7"},
+         "question": "**😀Question**", "options": ["**A**", "B"], "quiz": True, "correct_option": 1,
+         "anonymous": False, "multiple": False, "silent": False, "close_after_seconds": 30,
+         "solution": "😀why", "solution_entities": [{"type": "bold", "offset": 2, "length": 3}]}
+    created = core.call("polls.create", p)["message"]
+    poll = created["poll"]
+    assert poll["question"] == p["question"] and [a["text"] for a in poll["options"]] == p["options"]
+    assert not poll["anonymous"] and poll["quiz"] and created["topic_id"] == "42"
+    assert poll["close_at"] == "2025-01-01T00:00:30.000Z"
+    target = {"account_id": "a", "chat_id": p["chat_id"], "message_id": created["id"]}
+    voted = core.call("polls.vote", {**target, "option_ids": [poll["options"][1]["id"]]})["message"]["poll"]
+    assert voted["options"][1]["chosen"] and voted["options"][1]["correct"]
+    assert voted["solution"] == "😀why" and voted["solution_entities"] == p["solution_entities"]
+    assert core.error("polls.vote", {**target, "account_id": "b", "option_ids": []})["data"]["code"] == "NOT_FOUND"
+    closed = core.call("polls.close", target)["message"]["poll"]
+    assert closed["closed"]
+    assert core.call("polls.close", target)["message"]["poll"]["closed"]
+    assert core.error("polls.vote", {**target, "option_ids": []})["data"]["code"] == "FORBIDDEN"
+    assert core.error("polls.create", {**p, "schedule_at": "2027-01-01T00:00:00Z"})["data"]["code"] == "NOT_SUPPORTED"
+    assert core.error("polls.create", {**p, "reply_to": {"message_id": "7", "quote_text": "Q"}})["data"]["code"] == "NOT_SUPPORTED"
+    assert core.shutdown() == 0
+
+
+def test_poll_retraction_and_uncertain_send_are_truthful(core):
+    start(core)
+    p = {"account_id": "a", "chat_id": "17", "question": "Plain", "options": ["A", "B"], "multiple": True}
+    created = core.call("polls.create", p)["message"]
+    target = {"account_id": "a", "chat_id": "17", "message_id": created["id"]}
+    ids = [option["id"] for option in created["poll"]["options"]]
+    assert all(option["chosen"] for option in core.call("polls.vote", {**target, "option_ids": ids})["message"]["poll"]["options"])
+    assert all(not option["chosen"] for option in core.call("polls.vote", {**target, "option_ids": []})["message"]["poll"]["options"])
+    error = core.error("polls.create", {**p, "question": "explode-poll"})
+    assert error["data"]["code"] == "NETWORK"
+    assert "synthetic-private-poll-error" not in str(error) + core.stderr_text
+    assert core.shutdown() == 0

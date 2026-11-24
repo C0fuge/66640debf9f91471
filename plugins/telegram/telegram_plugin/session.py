@@ -21,7 +21,10 @@ def translated(exc):
     if isinstance(exc, (tg.UnauthorizedError, tg.AuthKeyNotFound, tg.AuthKeyDuplicatedError)):
         return rpc.AuthRequired()
     if isinstance(exc, (tg.ForbiddenError, tg.ChannelPrivateError, tg.ChatAdminRequiredError,
-                        tg.MessageEditTimeExpiredError, tg.PinRestrictedError, tg.UserBannedInChannelError)):
+                        tg.MessageEditTimeExpiredError, tg.PinRestrictedError, tg.UserBannedInChannelError,
+                        tg.MessagePollClosedError, tg.RevoteNotAllowedError)):
+        return rpc.Forbidden()
+    if isinstance(exc, tg.RPCError) and getattr(exc, "message", None) in ("POLL_COUNTRY_RESTRICTED", "POLL_MEMBER_RESTRICTED"):
         return rpc.Forbidden()
     if isinstance(exc, (tg.PeerIdInvalidError, tg.ChannelInvalidError, tg.MsgIdInvalidError, tg.MessageIdInvalidError)):
         return rpc.NotFound()

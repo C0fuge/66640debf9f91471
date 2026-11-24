@@ -3,7 +3,7 @@ import asyncio
 from contact_hub_sdk import Plugin, errors as rpc, method
 from contact_hub_sdk import types as dto
 
-from . import actions, activity, downloads, history, sync, uploads
+from . import actions, activity, downloads, history, polls, sync, uploads
 from .auth import sign_in
 from .mapping import SEND_ENTITY_TYPES, contact
 from .send import send
@@ -20,6 +20,8 @@ class TelegramPlugin(Plugin):
         "media.download": True, "avatars": True,
         "send.file": {"max_bytes": 2 * 1024**3}, "send.as_file": True, "send.spoiler": True,
         "send.voice": True, "send.ttl": True, "send.album": {"max": 10},
+        "polls.create": {"quiz": True, "multiple": True, "anonymous": True, "max_options": polls.MAX_OPTIONS},
+        "polls.vote": True, "polls.close": True,
     }
 
     def __init__(self, factory=make_client):
@@ -134,17 +136,23 @@ class TelegramPlugin(Plugin):
     @method("messages.fetch_recent")
     async def fetch_recent(self, account, params):
         with platform_errors():
-            return await history.recent(self.ready(account), params)
+            result = await history.recent(self.ready(account), params)
+            polls.observe(account, result.messages)
+            return result
 
     @method("history.around")
     async def around(self, account, params):
         with platform_errors():
-            return await history.around(self.ready(account), params)
+            result = await history.around(self.ready(account), params)
+            polls.observe(account, result.messages)
+            return result
 
     @method("history.fill_gap")
     async def gap(self, account, params):
         with platform_errors():
-            return await history.fill_gap(self.ready(account), params)
+            result = await history.fill_gap(self.ready(account), params)
+            polls.observe(account, result.messages)
+            return result
 
     @method("messages.send")
     async def send(self, account, params):
@@ -158,7 +166,9 @@ class TelegramPlugin(Plugin):
     @method("messages.get")
     async def get(self, account, params):
         with platform_errors():
-            return await actions.get(self.ready(account), params)
+            result = await actions.get(self.ready(account), params)
+            polls.observe(account, [result.message])
+            return result
 
     @method("messages.edit")
     async def edit(self, account, params):
@@ -173,7 +183,9 @@ class TelegramPlugin(Plugin):
     @method("messages.forward")
     async def forward(self, account, params):
         with platform_errors():
-            return await actions.forward(self.ready(account), params)
+            result = await actions.forward(self.ready(account), params)
+            polls.observe(account, result.messages)
+            return result
 
     @method("messages.pin")
     async def pin(self, account, params):
@@ -219,3 +231,18 @@ class TelegramPlugin(Plugin):
     async def send_album(self, account, params):
         with platform_errors():
             return await uploads.send_album(account, self.ready(account), params)
+
+    @method("polls.create")
+    async def create_poll(self, account, params):
+        with platform_errors():
+            return await polls.create(account, self.ready(account), params)
+
+    @method("polls.vote")
+    async def vote_poll(self, account, params):
+        with platform_errors():
+            return await polls.vote(account, self.ready(account), params)
+
+    @method("polls.close")
+    async def close_poll(self, account, params):
+        with platform_errors():
+            return await polls.close(account, self.ready(account), params)

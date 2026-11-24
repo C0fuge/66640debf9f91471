@@ -1,6 +1,8 @@
 """Initial snapshots and sparse live events."""
 from telethon import events, functions, types as tl
 
+from . import polls
+
 from .mapping import contact, conversation, draft, message, peer_id, sid
 
 
@@ -20,6 +22,7 @@ async def dialogs(account, client, include_archived=True):
             continue
         batch.append(conversation(dialog))
         if dialog.message and (preview := message(dialog.message)):
+            polls.observe(account, [preview])
             previews.append(preview)
         if len(batch) == 32:
             await account.conversations_upsert(batch, ack=True)
@@ -40,8 +43,10 @@ async def sync_all(account, client):
         await account.contacts_upsert(users[offset:offset + 100], ack=True)
 
 
-async def raw_update(account, update):
-    if isinstance(update, (tl.UpdateDeleteMessages, tl.UpdateDeleteChannelMessages)):
+async def raw_update(account, update, client=None):
+    if isinstance(update, tl.UpdateMessagePoll) and client is not None:
+        await polls.refresh_live(account, client, update)
+    elif isinstance(update, (tl.UpdateDeleteMessages, tl.UpdateDeleteChannelMessages)):
         chat = peer_id(tl.PeerChannel(update.channel_id)) if isinstance(update, tl.UpdateDeleteChannelMessages) else None
         await account.messages_deleted([str(i) for i in update.messages], chat_id=chat)
     elif isinstance(update, tl.UpdateDraftMessage):
@@ -63,14 +68,16 @@ async def raw_update(account, update):
 def bind_updates(account, client):
     async def new(event):
         if item := message(event.message):
+            polls.observe(account, [item])
             await account.messages_upsert([item])
 
     async def edited(event):
         if item := message(event.message):
+            polls.observe(account, [item])
             await account.message_edited(item)
 
     async def raw(event):
-        await raw_update(account, event)
+        await raw_update(account, event, client)
 
     client.add_event_handler(new, events.NewMessage())
     client.add_event_handler(edited, events.MessageEdited())

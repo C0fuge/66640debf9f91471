@@ -19,8 +19,8 @@ Two jobs run independently on disposable Ubuntu 24.04 runners:
   UI is built first because Tauri embeds its output. GTK/WebKit/D-Bus development
   packages are installed for the Linux desktop build.
 
-Verified snapshot `7b949fc` passed UI28, Python SDK48, fake8, MAX18, Telegram44,
-Rust workspace189 and core without default features113 tests. Each run's logs
+Verified snapshot `3655669` passed UI32, Python SDK48, fake8, MAX45, Telegram44,
+Rust workspace192 and core without default features113 tests. Each run's logs
 are authoritative; counts may grow with new tests. See CLOUD_HANDOFF.md for the
 linked run and the explicit partial-platform limitations.
 

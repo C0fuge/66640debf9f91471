@@ -4,6 +4,7 @@ from contact_hub_sdk import types as dto
 from telethon import types as tl, utils
 
 from .media_info import media_info
+from .poll_info import poll_info
 
 
 def identifier(value, field, *, peer=False):
@@ -191,6 +192,7 @@ def message(raw):
                        sent_at=raw.date, sender_id=sender, text=text, topic_id=sid(topic),
                        entities=entities_from_tl(getattr(raw, "entities", None)) if text is not None else None,
                        media=media_info(getattr(raw, "media", None)),
+                       poll=poll_info(getattr(raw, "media", None), entities_from_tl),
                        reply_to=reply, forward_from=forward,
                        grouped_id=sid(getattr(raw, "grouped_id", None)), views=getattr(raw, "views", None),
                        action=service_action(raw, sender, reply_id), mentioned=getattr(raw, "mentioned", None),

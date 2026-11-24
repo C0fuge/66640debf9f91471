@@ -1,5 +1,6 @@
 """Only the transport boundary is replaced. Requests, updates and sessions are real TL types."""
 import asyncio
+import copy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -34,6 +35,7 @@ class Stub:
         self.handlers = []
         self.sent = {}
         self.uploaded, self.stored_media = {}, {}
+        self.poll_solutions = {}
         self.messages = {i: row(i) for i in range(1, 11)}
         self.messages[100] = row(100, media=tl.MessageMediaDocument(document=document(tl.DocumentAttributeFilename("../../remote.bin"))))
         self.messages[101] = row(101, media=tl.MessageMediaPhoto(photo=photo(), spoiler=True))
@@ -151,6 +153,43 @@ class Stub:
     async def __call__(self, req):
         if isinstance(req, functions.contacts.GetContactsRequest):
             return tl.contacts.Contacts([tl.Contact(17, True)], 1, [USER])
+        if isinstance(req, functions.messages.SendMediaRequest) and isinstance(req.media, tl.InputMediaPoll):
+            if req.media.poll.question.text == "explode-poll":
+                raise OSError("synthetic-private-poll-error")
+            mid = 200 + len(self.messages)
+            poll = copy.deepcopy(req.media.poll)
+            poll.id, poll.hash = 700 + mid, 900 + mid
+            if poll.close_period is not None:
+                poll.close_date, poll.close_period = NOW + timedelta(seconds=poll.close_period), None
+            result = tl.PollResults(results=[tl.PollAnswerVoters(a.option, voters=0, recent_voters=[]) for a in poll.answers], total_voters=0)
+            self.poll_solutions[poll.id] = (req.media.correct_answers, req.media.solution, req.media.solution_entities)
+            peer = tl.PeerUser(req.peer.user_id) if isinstance(req.peer, tl.InputPeerUser) else tl.PeerChannel(req.peer.channel_id)
+            header = tl.MessageReplyHeader(reply_to_msg_id=req.reply_to.reply_to_msg_id, reply_to_top_id=req.reply_to.top_msg_id,
+                                           forum_topic=True) if req.reply_to else None
+            item = row(mid, peer, out=True, media=tl.MessageMediaPoll(poll, result), reply_to=header, silent=req.silent)
+            item.message = ""
+            item.date = NOW
+            self.messages[mid] = item
+            return tl.Updates([tl.UpdateMessageID(mid, req.random_id), tl.UpdateNewMessage(item, 1, 1)], [], [], NOW, 1)
+        if isinstance(req, functions.messages.SendVoteRequest):
+            raw = self.messages[req.msg_id]
+            poll = raw.media.poll
+            correct, solution, entities = self.poll_solutions.get(poll.id, (None, None, None))
+            raw.media.results = tl.PollResults(results=[tl.PollAnswerVoters(a.option,
+                chosen=True if a.option in req.options else None, voters=int(a.option in req.options), recent_voters=[],
+                correct=True if correct is not None and index in correct else None) for index, a in enumerate(poll.answers)],
+                total_voters=int(bool(req.options)), solution=solution, solution_entities=entities)
+            return tl.Updates([tl.UpdateMessagePoll(poll.id, raw.media.results, poll=poll, peer=raw.peer_id, msg_id=raw.id)], [], [], NOW, 1)
+        if isinstance(req, functions.messages.GetPollResultsRequest):
+            raw = self.messages[req.msg_id]
+            return tl.Updates([tl.UpdateMessagePoll(raw.media.poll.id, raw.media.results, poll=raw.media.poll,
+                                                  peer=raw.peer_id, msg_id=raw.id)], [], [], NOW, 1)
+        if isinstance(req, functions.messages.EditMessageRequest) and isinstance(req.media, tl.InputMediaPoll):
+            raw = self.messages[req.id]
+            assert req.media.poll.id == raw.media.poll.id and req.media.poll.closed
+            raw.media.poll = copy.deepcopy(req.media.poll)
+            return tl.Updates([tl.UpdateMessagePoll(raw.media.poll.id, raw.media.results, poll=raw.media.poll,
+                                                  peer=raw.peer_id, msg_id=raw.id)], [], [], NOW, 1)
         if isinstance(req, functions.messages.UploadMediaRequest):
             value = self.media_value(req.media)
             attachment = value.photo if isinstance(value, tl.MessageMediaPhoto) else value.document

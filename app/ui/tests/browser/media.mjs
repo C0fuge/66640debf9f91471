@@ -1,7 +1,9 @@
 // Run remotely from app/ui with playwright-core available: node tests/browser/media.mjs.
 // Real App/ThreadPane, synthetic metadata only; no native picker, files or accounts.
 import assert from "node:assert/strict";
+import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { join, resolve } from "node:path";
 import { createServer } from "vite";
 const { chromium } = createRequire(import.meta.url)("playwright-core");
 const server = await createServer({ server: { host: "127.0.0.1", port: 53176, strictPort: false, open: false } });
@@ -10,6 +12,12 @@ try {
   await server.listen();
   browser = await chromium.launch({ executablePath: process.env.CH_CHROMIUM, headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
+  const capture = async name => {
+    if (!process.env.CH_SCREENSHOT_DIR) return;
+    const directory = resolve(process.env.CH_SCREENSHOT_DIR);
+    await mkdir(directory, { recursive: true });
+    await page.screenshot({ path: join(directory, name), fullPage: true });
+  };
   const errors = [];
   page.on("pageerror", error => errors.push(error.name + ": " + error.message));
   await page.route("**/src/main.tsx", route => route.fulfill({ contentType: "text/javascript", body: 'import "/tests/browser/mediaFixture.tsx";' }));
@@ -38,6 +46,7 @@ try {
   assert.equal(await reveal(bubble("Pending caption")).count(), 0);
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const beforeReveal = await page.evaluate(() => window.mediaFixture.requests());
+  await capture("attachment-metadata-hidden.png");
   await reveal(first()).focus();
   await page.keyboard.press("Enter");
   await page.getByText("Alpha secret <img src=x onerror=fixture>.txt", { exact: true }).waitFor();
@@ -46,6 +55,7 @@ try {
   assert.equal((await body()).includes("Second hidden name"), false);
   assert.equal(await page.locator(".thread-attachment img, .thread-attachment svg, .thread-attachment a").count(), 0);
   assert.deepEqual(await page.evaluate(() => window.mediaFixture.requests()), beforeReveal, "reveal is local and performs no request");
+  await capture("attachment-metadata-revealed.png");
   await page.evaluate(() => window.mediaFixture.changeAttachment("Alpha"));
   await reveal(first()).waitFor();
   assert.equal((await body()).includes("Alpha replaced secret"), false, "an edited attachment requires another reveal");
