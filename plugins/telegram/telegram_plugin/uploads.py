@@ -38,12 +38,26 @@ def local_file(path):
         fd = os.open(selected, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         raise rpc.InvalidParams("The selected file cannot be opened.", field="path") from None
-    with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(stream.fileno())
+    try:
+        info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
             raise rpc.InvalidParams("Select a nonempty regular file.", field="path")
         if info.st_size > MAX_BYTES:
             raise rpc.NotSupported("The selected file exceeds the upload size limit.", capability="send.file")
+        try:
+            stream = os.fdopen(fd, "rb")
+        except OSError:
+            raise rpc.InvalidParams("The selected file cannot be opened.", field="path") from None
+    except BaseException:
+        # fdopen can fail before a stream has taken ownership (for example,
+        # an allocation or descriptor error). Close our descriptor in every
+        # validation/wrapping failure, including cancellation-like exceptions.
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    with stream:
         yield stream, info.st_size, selected.name
 
 

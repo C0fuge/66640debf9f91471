@@ -1,4 +1,6 @@
 import asyncio
+import errno
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -137,3 +139,34 @@ def test_extensionless_document_preserves_display_name(tmp_path):
         assert value.upload_file.await_args.kwargs["file_name"] == "README.bin"
         assert media.attributes[0].file_name == "README"
     asyncio.run(exercise())
+
+
+def test_local_file_closes_rejected_and_unwrapped_descriptors(tmp_path, monkeypatch):
+    selected = tmp_path / "fixture.bin"
+    selected.write_bytes(b"fixture")
+    opened = []
+    original_open = os.open
+    def track_open(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+    monkeypatch.setattr(uploads.os, "open", track_open)
+    for path in (tmp_path, tmp_path / "empty"):
+        if path != tmp_path:
+            path.touch()
+        with pytest.raises(rpc.InvalidParams):
+            with uploads.local_file(str(path)):
+                pytest.fail("Rejected path reached the caller.")
+        with pytest.raises(OSError) as closed:
+            os.fstat(opened[-1])
+        assert closed.value.errno == errno.EBADF
+    def wrapping_failure(*args, **kwargs):
+        raise OSError(errno.EIO, "synthetic-private-path")
+    monkeypatch.setattr(uploads.os, "fdopen", wrapping_failure)
+    with pytest.raises(rpc.InvalidParams) as invalid:
+        with uploads.local_file(str(selected)):
+            pytest.fail("Failed stream reached the caller.")
+    assert "synthetic-private-path" not in str(invalid.value)
+    with pytest.raises(OSError) as closed:
+        os.fstat(opened[-1])
+    assert closed.value.errno == errno.EBADF
