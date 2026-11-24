@@ -33,6 +33,8 @@ def conversation(chat: Any, me: int) -> T.Conversation:
 
 
 def message(raw: Any, me: int, chat_id: int | None = None) -> T.Message:
+    if chat_id is not None and raw.chat_id is not None and raw.chat_id != chat_id:
+        raise PluginError("MAX message conversation contradicts its parent conversation")
     chat = raw.chat_id if raw.chat_id is not None else chat_id
     if chat is None:
         raise PluginError("MAX message has no conversation identity")

@@ -15,6 +15,7 @@ from typing import Any
 from contact_hub_sdk import AuthRequired, PluginError
 
 from . import mapping
+from .discovery import drain_chat_pages, marker
 
 
 class InteractiveAuth:
@@ -80,17 +81,21 @@ class InteractiveAuth:
 
 
 class PyMaxAdapter:
-    def __init__(self, account: Any, store: Any, settings: Any, event: Any):
+    def __init__(self, account: Any, store: Any, settings: Any, event: Any, *, sleep=asyncio.sleep):
         self.account, self.store, self.settings, self.event = account, store, settings, event
         self.client: Any = None
         self.me: int | None = None
         self._fatal: PluginError | None = None
+        self._sleep = sleep
+        self._login_observed = asyncio.Event()
+        self._chat_marker: int | None = None
 
     async def connect(self, mode: str, interactive: bool) -> None:
         from pymax import Client, WebClient
         from pymax.config import ExtraConfig
         from pymax.api.session.payloads import MobileUserAgentPayload
         from pymax.types.domain.sync import SyncOverrides
+        from pymax.protocol import Command, Opcode
         session = await self.store.load_session()
         if session:
             self.account.plugin._redact.add(session.token)
@@ -162,6 +167,25 @@ class PyMaxAdapter:
         async def on_delete(raw: Any, client: Any) -> None:
             await deliver("deleted", raw)
 
+        async def on_raw(frame: Any, client: Any) -> None:
+            # Public pinned hook receives matched response frames too. App.start
+            # consumes the LOGIN model but otherwise discards this metadata.
+            if frame.opcode != Opcode.LOGIN or frame.cmd != Command.RESPONSE:
+                return
+            if self._login_observed.is_set():
+                self._fatal = PluginError("MAX returned duplicate LOGIN discovery metadata")
+                return
+            if not isinstance(frame.payload, dict):
+                self._fatal = PluginError("MAX returned invalid LOGIN discovery metadata")
+            elif "chatMarker" in frame.payload:
+                try:
+                    self._chat_marker = marker(frame.payload["chatMarker"])
+                except PluginError as exc:
+                    self._fatal = exc
+            # Absent is explicitly unknown. It must not be changed into zero.
+            self._login_observed.set()
+
+        self.client.on_raw()(on_raw)
         self.client.on_message()(on_message)
         self.client.on_message_edit()(on_message)
         self.client.on_chat_update()(on_chat)
@@ -169,6 +193,12 @@ class PyMaxAdapter:
         await self.client.connect()
         if self._fatal is not None:
             await self.close()
+            raise self._fatal
+        try:
+            await asyncio.wait_for(self._login_observed.wait(), timeout=self.settings.request_timeout)
+        except TimeoutError:
+            raise PluginError("MAX LOGIN discovery metadata was not observed") from None
+        if self._fatal is not None:
             raise self._fatal
         if self.client.me is None:
             raise AuthRequired("MAX login returned no profile")
@@ -179,10 +209,19 @@ class PyMaxAdapter:
     async def snapshot(self) -> tuple[Any, list, list, list]:
         me = mapping.contact(self.client.me.contact)
         contacts = [mapping.contact(u) for u in self.client.contacts if u is not None]
-        chats = [mapping.conversation(c, self.me) for c in self.client.chats or []]
-        messages = [mapping.message(m, self.me, cid) for cid, rows in (self.client.messages or {}).items()
-                    for m in rows if m.sender is not None]
-        return me, contacts, chats, messages
+        raw_chats = await drain_chat_pages(self.client._app.invoke, list(self.client.chats or []),
+                                           self._chat_marker, sleep=self._sleep)
+        if self._fatal is not None:
+            raise self._fatal
+        chats = [mapping.conversation(chat, self.me) for chat in raw_chats]
+        messages = {(str(cid), str(raw.id)): mapping.message(raw, self.me, cid)
+                    for cid, rows in (self.client.messages or {}).items() for raw in rows
+                    if raw.sender is not None}
+        for chat in raw_chats:
+            raw = chat.last_message
+            if raw is not None and raw.sender is not None:
+                messages[(str(chat.id), str(raw.id))] = mapping.message(raw, self.me, chat.id)
+        return me, contacts, chats, list(messages.values())
 
     async def wait_closed(self) -> None:
         await self.client._connection.wait_closed()

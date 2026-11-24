@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { ChatSummary, CoreClient, HistoryItem, HistoryPage, Message, PluginSummary, ThreadPaneProps } from "../core";
+import type { ChatSummary, CoreClient, HistoryItem, HistoryPage, Message, PluginSummary, ThreadKey, ThreadPaneProps } from "../core";
 import { distinctItems, historyKey, messageDate, pageSize, prependPage } from "./thread/history";
 import { RichText } from "./thread/RichText";
 import { watchLocalHistory } from "./thread/historySignal";
@@ -8,6 +8,7 @@ import { failureCode, failureText, threadId } from "./thread/shared";
 import { useAccountReads } from "./thread/useAccountReads";
 import { actionSession, type MessageAction } from "./thread/actions";
 import { MessageActionButtons, MessageActionDialog, type ActionSelection } from "./thread/MessageActionDialog";
+import { AttachmentSummary } from "./thread/AttachmentSummary";
 import "./thread.css";
 
 function chatKind(kind: string) {
@@ -19,19 +20,19 @@ function chatKind(kind: string) {
   }
 }
 
-function Bubble({ message, date, showSender, client, plugin, disabled, select }: {
-  message: Message; date: ReturnType<typeof messageDate>; showSender: boolean;
+function Bubble({ thread, message, date, showSender, client, plugin, disabled, select }: {
+  thread: ThreadKey; message: Message; date: ReturnType<typeof messageDate>; showSender: boolean;
   client: CoreClient; plugin?: PluginSummary | null; disabled: boolean; select: (action: ActionSelection) => void;
 }) {
   const sender = message.direction === "out" ? "You" : message.senderName;
   return <article className={'thread-bubble thread-bubble-' + message.direction} aria-label={sender || "Incoming message"}>
     {showSender && sender && <div className="thread-sender" dir="auto">{sender}</div>}
     {message.deleted ? <span className="thread-secondary">Deleted message</span> : <>
-      {message.mediaKind && <div className="thread-media">{message.mediaKind} attachment</div>}
+      <AttachmentSummary thread={thread} message={message} />
       {message.text && <div className="thread-message-body" dir="auto">
         <RichText text={message.text} entities={message.entities} />
       </div>}
-      {!message.mediaKind && !message.text && <span className="thread-secondary">Empty message</span>}
+      {!message.mediaKind && !message.attachment && !message.text && <span className="thread-secondary">Empty message</span>}
     </>}
     <footer className="thread-message-meta">
       {message.isPinned && !message.deleted && <span>Pinned</span>}
@@ -252,7 +253,7 @@ function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: Ch
                 : row.item.kind === "gap" ? <button type="button" className="thread-page-button" disabled={reads.busy}
                   onClick={() => { if (row.item.kind === "gap") fillGap(row.item.gapId); }}>Load missing messages</button>
                 : <>{row.day && <div className="thread-day">{row.day}</div>}
-                  <Bubble message={row.item.message} date={row.date} showSender={row.showSender} client={client} plugin={plugin}
+                  <Bubble thread={thread} message={row.item.message} date={row.date} showSender={row.showSender} client={client} plugin={plugin}
                     disabled={reads.busy || !reads.subscribed || actionBusy || reloadRequired} select={setAction} /></>}
             </div>;
           })}

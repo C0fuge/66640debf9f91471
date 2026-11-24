@@ -3,6 +3,8 @@
 Current execution instructions: [AGENTS.md](../AGENTS.md),
 [cloud task queue](../.github/cloud-tasks.md), and [cloud progress](cloud-progress.md).
 Product requirements: [REBUILD_PROMPT.md](REBUILD_PROMPT.md).
+Latest verified source, test counts and workflow link:
+[CLOUD_HANDOFF.md](CLOUD_HANDOFF.md). A later source must pass its own gates.
 
 | Phase | Scope | Snapshot status |
 |---|---|---|
@@ -10,8 +12,8 @@ Product requirements: [REBUILD_PROMPT.md](REBUILD_PROMPT.md).
 | 1b | Python/Rust SDKs, fake plugin, templates, tutorial | implemented and tested |
 | 2 | Rust DB, ingest, plugin host, services, outbox, search/history, CLI | implemented and tested |
 | 3 | Tauri/React text demo on the fake plugin | implemented and tested |
-| 4 | Telegram parity and matching UI | partial foundation, generic auth and rich text |
-| 5/6 | MAX, then WhatsApp according to current product priority | not implemented |
+| 4 | Telegram parity and matching UI | partial27-handler plugin, generic auth, rich text and four message actions |
+| 5/6 | MAX, then WhatsApp according to current product priority | secure partial MAX auth/text foundation; WhatsApp pending |
 | 7 | Themes, settings, notifications, lock, backup, packaging, i18n | largely pending |
 | 8 | Safe legacy import and verified switch-over | pending; no real data in cloud |
 

@@ -39,7 +39,7 @@ host; pytest execution belongs to CI. No real-server behavior has been verified.
 | Session storage | Custom PyMax `StoreProtocol`; atomic private JSON, directory 0700/files 0600, durable fsync, no symlink/hardlink session reads | Session tokens are stored unencrypted in the private directory, like the upstream SQLite session |
 | Device identity | Persist device ID, instance ID, selected phone/QR transport and generated user agent before connection; preserve session sync markers and rotated token | No device/transport migration UI |
 | Auth | Generic SDK phone, code, optional server-requested password challenge (three attempts), QR link/expiry/poll/confirmation; cancel/restart and rejected-input steps; no console providers | Existing accounts only; no registration, logout/settings for 2FA, email recovery or imported sessions |
-| Initial data | Emit contacts, conversations and text messages actually returned by login; buffer live events until the snapshot is published | No claim that login enumerates every chat/contact; no `conversations.synced` deletion/reconciliation signal |
+| Initial data | Emit login contacts/chats/messages and additional validated chat pages seeded by a present LOGIN `chatMarker`; buffer live events until discovery finishes | Absent login marker remains unknown/partial; no `conversations.synced` deletion/reconciliation signal or claim of exhaustive membership |
 | Live data | New/edited message upserts, chat updates, scoped message deletions | No durable event replay, read/presence/reaction/contact-change projection or gap closing |
 | Text send | One literal-text request using pinned payload models; basic same-chat reply; confirm only the returned outgoing platform message; emit the confirmed upsert | Media, entities, silent/scheduled/topic/comment/effect sends are not advertised |
 | Local send journal | A supplied `client_id` binds to the exact chat/text/reply payload. Confirmed retries return and re-emit the stored message. Authoritative results/upserts preserve the exact ID in `ext.max.client_id`, including an empty ID. Pending/unknown retries fail without sending again, across restart | Does **not** claim server deduplication or exactly-once delivery. No `client_id` means no durable local replay protection. Journal is capped at 10,000 entries; every private state file has a 64 MiB limit. New keyed sends are refused when full |
@@ -57,6 +57,29 @@ The library's raw logger is suppressed independently of the core log level,
 because upstream debug frames can contain tokens and message text. Errors exposed
 to the core are fixed descriptions, with no raw API exception payloads. Stdout is
 reserved for SDK JSON-RPC frames.
+
+## Bounded chat discovery
+
+The pinned public `on_raw` hook observes LOGIN response metadata that `App.start`
+does not expose through `client.chats`. A present integer `chatMarker` seeds
+command-53 requests. The adapter follows each exact returned marker, with a
+cancellable two-second pause before each request. Explicit zero makes no request;
+absent LOGIN marker remains unknown and preserves the original partial upserts.
+Present null/string/bool/float markers, missing/invalid page fields, invalid chat
+models, repeated/cyclic cursors, or budget exhaustion fail startup. Markers have
+no invented monotonic direction. Budgets are 128 pages, 10,000 received chat rows
+(including login and duplicates), and 300 seconds; these are local safety limits.
+No partially drained result is published as a successful discovery. A fatal live
+event-buffer overflow cancels pending discovery, and account stop owns its tasks.
+
+This behavior is grounded in the actual request/ack schema and page-drain call
+sites of the [public MAX web bundle](https://web.max.ru/_app/immutable/chunks/D0OzoqHp.js)
+captured 2026-11-25 Moscow, SHA-256
+`3d300974d8508a3674a5f56e4be618249fb4dea8661044398fbc96f91b32a181`.
+Only original adapter logic is included. A terminal marker proves that this page
+chain ended; it does not establish deletion-authoritative full snapshot semantics.
+No `chat.sync` capability or `conversations.synced` event is added. Required
+message-history continuation remains explicitly unsupported.
 
 ## Send uncertainty
 

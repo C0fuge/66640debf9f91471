@@ -217,3 +217,20 @@ def test_snapshot_buffer_overflow_is_fatal_even_when_dispatcher_swallows_errors(
     assert identity["close_count"] == 1
     assert core.error("messages.send", {**A, "chat_id": "10", "text": "must not send"})["data"]["code"] == "UNAVAILABLE"
     assert core.shutdown() == 0
+
+
+def test_event_overflow_cancels_owned_pending_discovery(core_factory, tmp_path):
+    store = PrivateState(tmp_path / "accounts/max/state", "max")
+    store.identity["mode"] = "qr"
+    store.save_identity()
+    store.write("session.json", {"token": "synthetic", "device_id": store.identity["device_id"]})
+    store.release()
+    core = core_factory("overflow-pending-discovery")
+    core.start()
+    core.event("status", state="error")
+    identity = json.loads((tmp_path / "accounts/max/state/identity.json").read_text())
+    assert identity["snapshot_cancelled"] is True and identity["close_count"] == 1
+    assert not any(event["method"] == "status" and event["params"]["state"] == "connected"
+                   for event in core.all_events)
+    assert core.call("ping") == {}
+    assert core.shutdown() == 0

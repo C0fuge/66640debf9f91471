@@ -58,6 +58,7 @@ class Runtime:
     events: list = field(default_factory=list)
     generation: int = 0
     fatal: PluginError | None = None
+    fatal_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class MaxPlugin(Plugin):
@@ -124,6 +125,7 @@ class MaxPlugin(Plugin):
                 # PyMax catches callback exceptions, so the owner must observe a
                 # durable failure latch independently of the callback return.
                 state.fatal = PluginError("MAX initial event buffer overflow; restart the account")
+                state.fatal_event.set()
                 return
             state.events.append((kind, data))
             return
@@ -142,11 +144,12 @@ class MaxPlugin(Plugin):
         state.generation += 1
         generation = state.generation
         state.fatal = None
+        state.fatal_event.clear()
         state.adapter = self.adapter_factory(account, state.store, state.settings,
                             lambda kind, data: self._event(account, kind, data, generation))
         await state.adapter.connect(mode, interactive)
         self._check_initial_events(state)
-        me, contacts, chats, messages = await state.adapter.snapshot()
+        me, contacts, chats, messages = await self._snapshot(state)
         self._check_initial_events(state)
         # Login data is a snapshot, not proof of complete enumeration. Never send
         # conversations.synced, which could delete chats missing from this page.
@@ -164,6 +167,21 @@ class MaxPlugin(Plugin):
         state.live = True
         state.ready = True
         await account.status("connected", me=me)
+
+    async def _snapshot(self, state: Runtime) -> tuple:
+        # Discovery now contains paced server reads. Keep them owned by this
+        # account task, and cancel immediately on the latched callback overflow.
+        snapshot = asyncio.create_task(state.adapter.snapshot())
+        overflow = asyncio.create_task(state.fatal_event.wait())
+        try:
+            await asyncio.wait({snapshot, overflow}, return_when=asyncio.FIRST_COMPLETED)
+            self._check_initial_events(state)
+            return await snapshot
+        finally:
+            for task in (snapshot, overflow):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(snapshot, overflow, return_exceptions=True)
 
     @staticmethod
     def _check_initial_events(state: Runtime) -> None:

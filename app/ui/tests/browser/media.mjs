@@ -1,0 +1,79 @@
+// Run remotely from app/ui with playwright-core available: node tests/browser/media.mjs.
+// Real App/ThreadPane, synthetic metadata only; no native picker, files or accounts.
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { createServer } from "vite";
+const { chromium } = createRequire(import.meta.url)("playwright-core");
+const server = await createServer({ server: { host: "127.0.0.1", port: 53176, strictPort: false, open: false } });
+let browser;
+try {
+  await server.listen();
+  browser = await chromium.launch({ executablePath: process.env.CH_CHROMIUM, headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.name + ": " + error.message));
+  await page.route("**/src/main.tsx", route => route.fulfill({ contentType: "text/javascript", body: 'import "/tests/browser/mediaFixture.tsx";' }));
+  await page.goto(server.resolvedUrls.local[0]);
+  const choose = async account => {
+    await page.getByRole("button", { name: `${account}, Fixture, connected`, exact: true }).click();
+    await page.getByRole("button").filter({ hasText: `${account} media chat` }).click();
+    await page.getByRole("heading", { name: `${account} media chat`, exact: true }).waitFor();
+    await page.getByText("Voice caption", { exact: true }).waitFor();
+  };
+  const bubble = caption => page.getByRole("article").filter({ hasText: caption });
+  const first = () => bubble("First spoiler caption");
+  const second = () => bubble("Second spoiler caption");
+  const reveal = row => row.getByRole("button", { name: "Reveal attachment details", exact: true });
+  const body = () => page.locator("body").textContent();
+  await choose("Alpha");
+  assert.match(await bubble("Photo caption").textContent(), /photo\.jpg.*image\/jpeg.*2,048 bytes.*640 × 480 px/s);
+  assert.match(await bubble("Voice caption").textContent(), /Voice message.*audio\/ogg.*1:05/s);
+  assert.equal((await body()).includes("Alpha secret"), false);
+  assert.equal((await body()).includes("Second hidden name"), false);
+  assert.equal((await body()).includes("Deleted hidden"), false);
+  assert.equal((await body()).includes("Local upload private"), false);
+  assert.equal((await body()).includes("Local hidden MIME"), false);
+  assert.equal((await body()).includes("Deleted caption"), false);
+  await page.getByText("Pending caption", { exact: true }).waitFor();
+  assert.equal(await reveal(bubble("Pending caption")).count(), 0);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const beforeReveal = await page.evaluate(() => window.mediaFixture.requests());
+  await reveal(first()).focus();
+  await page.keyboard.press("Enter");
+  await page.getByText("Alpha secret <img src=x onerror=fixture>.txt", { exact: true }).waitFor();
+  assert.match(await first().textContent(), /First spoiler caption/);
+  assert.match(await first().textContent(), /9,007,199,254,740,993 bytes/);
+  assert.equal((await body()).includes("Second hidden name"), false);
+  assert.equal(await page.locator(".thread-attachment img, .thread-attachment svg, .thread-attachment a").count(), 0);
+  assert.deepEqual(await page.evaluate(() => window.mediaFixture.requests()), beforeReveal, "reveal is local and performs no request");
+  await page.evaluate(() => window.mediaFixture.changeAttachment("Alpha"));
+  await reveal(first()).waitFor();
+  assert.equal((await body()).includes("Alpha replaced secret"), false, "an edited attachment requires another reveal");
+  await reveal(first()).click();
+  await page.getByText("Alpha replaced secret", { exact: true }).waitFor();
+
+  const bubbles = page.locator(".thread-bubble");
+  const left = await bubbles.evaluateAll(rows => rows.map(row => Math.round(row.getBoundingClientRect().left)));
+  assert.equal(new Set(left).size, 1, "both directions remain left aligned");
+  const colours = await bubbles.evaluateAll(rows => rows.map(row => getComputedStyle(row).backgroundColor));
+  await page.evaluate(() => document.documentElement.style.setProperty("--accent", "rgb(230, 20, 40)"));
+  assert.deepEqual(await bubbles.evaluateAll(rows => rows.map(row => getComputedStyle(row).backgroundColor)), colours, "accent changes do not recolour bubbles");
+
+  await choose("Beta"); // Same row/message/chat/topic IDs, different account.
+  assert.equal((await body()).includes("Alpha replaced secret"), false);
+  assert.equal((await body()).includes("Beta secret"), false);
+  await reveal(first()).click();
+  await page.getByText("Beta secret <img src=x onerror=fixture>.txt", { exact: true }).waitFor();
+  assert.equal((await body()).includes("Second hidden name"), false);
+  await choose("Alpha");
+  assert.equal((await body()).includes("Alpha replaced secret"), false);
+  await reveal(second()).click();
+  await page.getByText("Second hidden name", { exact: true }).waitFor();
+  assert.equal((await body()).includes("Alpha replaced secret"), false);
+  assert.equal(await reveal(first()).count(), 1);
+  assert.deepEqual(errors, []);
+  console.log("Attachment metadata and scoped spoiler reveal passed Chromium checks.");
+} finally {
+  await browser?.close();
+  await server.close();
+}

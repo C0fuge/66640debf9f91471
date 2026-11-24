@@ -12,3 +12,4 @@ mkdir -p "$CH_SCREENSHOT_DIR"
 cd app/ui
 node tests/browser/accounts.mjs
 node tests/browser/actions.mjs
+node tests/browser/media.mjs

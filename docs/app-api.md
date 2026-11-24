@@ -24,6 +24,24 @@ DTO member names use camelCase. Required nullable members are present with JSON 
 - `CoreChange` is an invalidation. Subscribe before initial reads. Inventory events invalidate inventory. Account events invalidate that account's inventory row, auth, settings, chats, visible history, search and outbox. Reset invalidates every active snapshot. The bridge watches both the core bus and outbox subscription. Unknown scope or receiver lag on either stream produces reset. A reconnect also emits reset after the new listener is installed. Group redundant invalidations, discard stale responses when the selection changes, and re-read once more if a change arrived during a read. A notification causes a cached latest read, never an automatic platform refresh. Other visible history windows may be discarded and reopened at latest on reset. Separate calls have no shared transaction.
 - Run synchronous DB, outbox and search work off UI threads. Chat rows, search hits and outbox items come from the core. The UI never generates demo records or speculative echo rows.
 
+## Attachment metadata view
+
+ADR 0005 adds optional `Message.attachment: Attachment | null` alongside the existing
+`mediaKind` fallback. The eight fields are `kind`, nullable `name`, `mime`, `bytes`,
+`width`, `height`, `durationSeconds`, and `hasSpoiler`. Byte counts are exact unsigned
+decimal strings; numeric dimensions/duration above JavaScript's safe integer range
+become null. Unknown and absent values stay unknown rather than receiving guesses.
+Only confirmed stored media receives the projection; deleted messages, `local:` IDs
+and unconfirmed sending/failed echoes receive null. No paths, URLs, cache flags,
+platform extensions or upload source locations are projected.
+
+The thread renders metadata as escaped text with the existing caption. Spoilers
+withhold metadata from the DOM until a local reveal for the exact account, chat,
+topic, row, message ID and attachment metadata. A changed attachment requires a new
+reveal; switching conversations can reset reveals. Deleted/provisional messages
+never reveal metadata, and old `mediaKind`-only messages keep a generic summary.
+This view adds no operations, network fetches or file/upload controls.
+
 ## Sends
 
 `enqueueText` validates a nonblank body and thread ownership, checks known posting restrictions and delegates to `Outbox::enqueue(SendText)`. Preserve the original text. An empty entity list is omitted when constructing the plugin request. Formatted sends require `send.entities`. Keep the original draft until acceptance. An ambiguous transport error requires reloading outbox and history before another user-initiated send.

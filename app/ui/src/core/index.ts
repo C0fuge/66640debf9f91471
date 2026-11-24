@@ -65,6 +65,17 @@ export interface TextEntity extends Utf16Span {
   collapsed?: boolean;
 }
 
+export interface Attachment {
+  kind: string;
+  name: string | null;
+  mime: string | null;
+  bytes: string | null;
+  width: number | null;
+  height: number | null;
+  durationSeconds: number | null;
+  hasSpoiler: boolean;
+}
+
 export interface Message {
   rowKey: string;
   messageId: string;
@@ -75,6 +86,7 @@ export interface Message {
   text: string | null;
   entities: TextEntity[];
   mediaKind: string | null;
+  attachment?: Attachment | null;
   edited: boolean;
   deleted: boolean;
   delivery: string | null;

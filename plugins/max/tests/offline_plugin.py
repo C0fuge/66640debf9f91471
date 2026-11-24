@@ -41,13 +41,19 @@ class OfflineClient:
             await self.store.save_session(SimpleNamespace(model_dump=lambda **_: session))
 
     async def snapshot(self):
-        if self.scenario == "overflow-events":
+        if self.scenario in {"overflow-events", "overflow-pending-discovery"}:
             for index in range(1001):
                 # Match PyMax's dispatcher: callback exceptions do not fail login.
                 try:
                     await self.event("message", self.msg(str(2000 + index), "during snapshot", "in"))
                 except Exception:
                     pass
+            if self.scenario == "overflow-pending-discovery":
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    self.store.identity["snapshot_cancelled"] = True
+                    self.store.save_identity()
         return (T.Contact(id="1", display_name="Synthetic self"),
                 [T.Contact(id="2", display_name="Synthetic peer")],
                 [T.Conversation(id="10", kind="dm", peer_user_id="2")],

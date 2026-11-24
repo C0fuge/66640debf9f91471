@@ -32,6 +32,16 @@ def test_actual_models_map_without_guessing_absent_sender():
         mapping.message(raw_message().model_copy(update={"sender": None}), 1)
 
 
+def test_known_parent_chat_is_validated_and_missing_identity_uses_parent():
+    raw = raw_message()
+    with pytest.raises(PluginError, match="contradicts its parent conversation"):
+        mapping.message(raw, 1, 99)
+    missing = raw.model_copy(update={"chat_id": None})
+    assert mapping.message(missing, 1, 41).chat_id == "41"
+    # A callback without a parent uses the message's own explicit identity.
+    assert mapping.message(raw, 1).chat_id == "10"
+
+
 def test_literal_text_send_uses_one_pinned_payload_and_no_markdown_parser(tmp_path):
     async def run():
         store = PrivateState(tmp_path / "state", "a")
@@ -159,6 +169,9 @@ def test_login_buffer_overflow_survives_real_upstream_dispatch_exception_catch(t
                 self.handlers[name] = callback
                 return callback
             return decorator
+
+        def on_raw(self):
+            return self.register("raw")
 
         def on_message(self):
             return self.register("message")
