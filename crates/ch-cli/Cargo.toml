@@ -1,0 +1,21 @@
+[package]
+name = "ch-cli"
+version = "0.1.0"
+description = "The `ch` command: plugin new, plugin test, import-legacy"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ch"
+path = "src/main.rs"
+
+[dependencies]
+ch-conformance = { path = "../ch-conformance" }
+ch-protocol = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["process", "fs"] }
+
+tempfile = { workspace = true }

@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/stickers.json",
+  "title": "Sticker, GIF and custom emoji methods",
+  "$defs": {
+    "StickersResult": {
+      "type": "object",
+      "required": ["stickers"],
+      "properties": { "stickers": { "type": "array", "items": { "$ref": "../dto/sticker.json#/$defs/Sticker" } } },
+      "additionalProperties": true
+    },
+    "PacksResult": {
+      "type": "object",
+      "required": ["packs"],
+      "properties": { "packs": { "type": "array", "items": { "$ref": "../dto/sticker.json#/$defs/StickerPack" } } },
+      "additionalProperties": true
+    },
+    "PackResult": {
+      "type": "object",
+      "required": ["pack", "stickers"],
+      "properties": {
+        "pack": { "$ref": "../dto/sticker.json#/$defs/StickerPack" },
+        "stickers": { "type": "array", "items": { "$ref": "../dto/sticker.json#/$defs/Sticker" } }
+      },
+      "additionalProperties": true
+    },
+    "AccountLimitParams": {
+      "type": "object",
+      "required": ["account_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "limit": { "anyOf": [ { "$ref": "../common.json#/$defs/Limit" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "PackParams": {
+      "type": "object",
+      "required": ["account_id", "pack_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "pack_id": { "$ref": "../common.json#/$defs/Id" }
+      },
+      "additionalProperties": true
+    },
+    "StickerParams": {
+      "type": "object",
+      "required": ["account_id", "sticker_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "sticker_id": { "$ref": "../common.json#/$defs/Id" }
+      },
+      "additionalProperties": true
+    },
+    "SendItemParams": {
+      "description": "Shared by stickers.send and gifs.send; the item id field differs.",
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "reply_to": { "anyOf": [ { "$ref": "common.json#/$defs/ReplyTarget" }, { "type": "null" } ] },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "silent": { "type": ["boolean", "null"] },
+        "schedule_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+
+    "stickers.recent.params": { "$ref": "#/$defs/AccountLimitParams" },
+    "stickers.recent.result": { "$ref": "#/$defs/StickersResult" },
+    "stickers.favorites.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "stickers.favorites.result": { "$ref": "#/$defs/StickersResult" },
+    "stickers.packs.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "stickers.packs.result": { "$ref": "#/$defs/PacksResult" },
+    "stickers.pack.params": { "$ref": "#/$defs/PackParams" },
+    "stickers.pack.result": { "$ref": "#/$defs/PackResult" },
+    "stickers.search.params": {
+      "type": "object",
+      "required": ["account_id", "query"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "query": { "type": "string" },
+        "limit": { "anyOf": [ { "$ref": "../common.json#/$defs/Limit" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "stickers.search.result": { "$ref": "#/$defs/PacksResult" },
+    "stickers.install.params": {
+      "type": "object",
+      "required": ["account_id", "pack_id", "installed"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "pack_id": { "$ref": "../common.json#/$defs/Id" },
+        "installed": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "stickers.install.result": { "$ref": "../common.json#/$defs/Empty" },
+    "stickers.set_favorite.params": {
+      "type": "object",
+      "required": ["account_id", "sticker_id", "favorite"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "sticker_id": { "$ref": "../common.json#/$defs/Id" },
+        "favorite": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "stickers.set_favorite.result": { "$ref": "../common.json#/$defs/Empty" },
+    "stickers.thumb.params": { "$ref": "#/$defs/StickerParams" },
+    "stickers.thumb.result": { "$ref": "common.json#/$defs/PathResult" },
+    "stickers.clip.params": { "$ref": "#/$defs/StickerParams" },
+    "stickers.clip.result": { "$ref": "common.json#/$defs/PathResult" },
+    "stickers.send.params": {
+      "allOf": [ { "$ref": "#/$defs/SendItemParams" } ],
+      "required": ["sticker_id"],
+      "properties": { "sticker_id": { "$ref": "../common.json#/$defs/Id" } }
+    },
+    "stickers.send.result": { "$ref": "common.json#/$defs/MessageResult" },
+
+    "gifs.list.params": { "$ref": "#/$defs/AccountLimitParams" },
+    "GifsResult": {
+      "type": "object",
+      "required": ["gifs"],
+      "properties": {
+        "gifs": { "type": "array", "items": { "$ref": "../dto/sticker.json#/$defs/Gif" } },
+        "next_cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "gifs.list.result": { "$ref": "#/$defs/GifsResult" },
+    "gifs.search.params": {
+      "type": "object",
+      "required": ["account_id", "query"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "query": { "type": "string" },
+        "limit": { "anyOf": [ { "$ref": "../common.json#/$defs/Limit" }, { "type": "null" } ] },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "gifs.search.result": { "$ref": "#/$defs/GifsResult" },
+    "GifParams": {
+      "type": "object",
+      "required": ["account_id", "gif_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "gif_id": { "$ref": "../common.json#/$defs/Id" }
+      },
+      "additionalProperties": true
+    },
+    "gifs.thumb.params": { "$ref": "#/$defs/GifParams" },
+    "gifs.thumb.result": { "$ref": "common.json#/$defs/PathResult" },
+    "gifs.clip.params": { "$ref": "#/$defs/GifParams" },
+    "gifs.clip.result": { "$ref": "common.json#/$defs/PathResult" },
+    "gifs.send.params": {
+      "allOf": [ { "$ref": "#/$defs/SendItemParams" } ],
+      "required": ["gif_id"],
+      "properties": { "gif_id": { "$ref": "../common.json#/$defs/Id" } }
+    },
+    "gifs.send.result": { "$ref": "common.json#/$defs/MessageResult" },
+
+    "emoji.custom_files.params": {
+      "type": "object",
+      "required": ["account_id", "ids"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "ids": { "$ref": "../common.json#/$defs/IdList" }
+      },
+      "additionalProperties": true
+    },
+    "emoji.custom_files.result": {
+      "type": "object",
+      "required": ["files"],
+      "properties": {
+        "files": { "description": "id -> path; missing keys are unavailable.", "type": "object", "additionalProperties": { "$ref": "../common.json#/$defs/Path" } }
+      },
+      "additionalProperties": true
+    },
+    "emoji.packs.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "emoji.packs.result": { "$ref": "#/$defs/PacksResult" },
+    "emoji.pack.params": { "$ref": "#/$defs/PackParams" },
+    "emoji.pack.result": { "$ref": "#/$defs/PackResult" },
+    "emoji.animated.params": {
+      "type": "object",
+      "required": ["account_id", "emoji"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "emoji": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "emoji.animated.result": { "$ref": "common.json#/$defs/PathResult" }
+  }
+}

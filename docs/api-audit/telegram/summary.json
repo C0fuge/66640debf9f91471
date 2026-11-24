@@ -1,0 +1,32 @@
+{
+  "audit_date": "2026-11-24",
+  "telethon": "1.46.0",
+  "layer": 233,
+  "raw_functions": 877,
+  "update_constructors": 176,
+  "update_envelopes": 7,
+  "official_documents": 946,
+  "official_documents_unavailable": 114,
+  "function_dispositions": {
+    "legitimate-internal": 21,
+    "implemented-subset": 10,
+    "contract-gap-or-parity-review": 553,
+    "frozen-method-unimplemented": 142,
+    "undocumented-review": 84,
+    "legitimate-bot-only-exclusion": 30,
+    "internal-or-review": 30,
+    "legitimate-mobile-only-exclusion": 7
+  },
+  "update_dispositions": {
+    "implemented-sparse-event": 16,
+    "sdk-envelope": 7,
+    "frozen-event-unimplemented": 24,
+    "event-contract-gap-or-review": 136
+  },
+  "feature_families": 98,
+  "frozen_registry_methods": 121,
+  "frozen_implemented": 14,
+  "frozen_pending": 105,
+  "frozen_host_services": 2,
+  "ast_id_matches": 1060
+}

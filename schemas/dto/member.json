@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/member.json",
+  "title": "Member and JoinRequest",
+  "$defs": {
+    "MemberRole": { "type": "string", "enum": ["owner", "admin", "member", "restricted", "banned", "left"] },
+    "Member": {
+      "type": "object",
+      "required": ["user", "role"],
+      "properties": {
+        "user": { "$ref": "contact.json#/$defs/Contact" },
+        "role": { "$ref": "#/$defs/MemberRole" },
+        "rank": { "description": "Custom admin title.", "type": ["string", "null"] },
+        "joined_at": { "anyOf": [{ "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" }] },
+        "invited_by": { "anyOf": [{ "$ref": "../common.json#/$defs/Id" }, { "type": "null" }] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    },
+    "JoinRequest": {
+      "type": "object",
+      "required": ["user"],
+      "properties": {
+        "user": { "$ref": "contact.json#/$defs/Contact" },
+        "requested_at": { "anyOf": [{ "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" }] },
+        "about": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    }
+  }
+}

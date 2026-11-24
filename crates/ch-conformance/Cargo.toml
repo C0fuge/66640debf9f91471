@@ -1,0 +1,19 @@
+[package]
+name = "ch-conformance"
+version = "0.1.0"
+description = "Contact Hub plugin conformance suite (`ch plugin test`)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ch-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonschema = { workspace = true }
+tokio = { workspace = true, features = ["process", "fs"] }
+tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

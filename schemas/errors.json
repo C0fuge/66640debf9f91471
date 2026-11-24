@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/errors.json",
+  "title": "Contact Hub plugin API: errors",
+  "description": "JSON-RPC error objects carry a numeric code and a string data.code; the mapping is fixed for known codes and both are open to values added by later minor versions. See docs/plugin-api.md section 13.",
+  "$defs": {
+    "KnownErrorCode": {
+      "description": "The string error codes this version of the API defines, in table order (section 13).",
+      "type": "string",
+      "enum": [
+        "PARSE_ERROR",
+        "INVALID_REQUEST",
+        "METHOD_NOT_FOUND",
+        "INVALID_PARAMS",
+        "INTERNAL",
+        "CANCELLED",
+        "NOT_SUPPORTED",
+        "AUTH_REQUIRED",
+        "FLOOD_WAIT",
+        "NOT_FOUND",
+        "FORBIDDEN",
+        "NETWORK",
+        "TIMEOUT",
+        "UNKNOWN_ACCOUNT",
+        "UNAVAILABLE"
+      ]
+    },
+    "ErrorCode": {
+      "description": "The string error code in error.data.code. Open: a code this version does not know (added by a later minor version) still validates; receivers treat it as INTERNAL and keep the string for logs. Emitters only use KnownErrorCode values.",
+      "anyOf": [
+        { "$ref": "#/$defs/KnownErrorCode" },
+        { "type": "string", "minLength": 1 }
+      ]
+    },
+    "KnownNumericCode": {
+      "description": "The JSON-RPC numeric codes this version defines. Fixed mapping: PARSE_ERROR -32700, INVALID_REQUEST -32600, METHOD_NOT_FOUND -32601, INVALID_PARAMS -32602, INTERNAL -32603, CANCELLED -32800, NOT_SUPPORTED -32001, AUTH_REQUIRED -32002, FLOOD_WAIT -32003, NOT_FOUND -32004, FORBIDDEN -32005, NETWORK -32006, TIMEOUT -32007, UNKNOWN_ACCOUNT -32008, UNAVAILABLE -32009.",
+      "type": "integer",
+      "enum": [-32700, -32600, -32601, -32602, -32603, -32800, -32001, -32002, -32003, -32004, -32005, -32006, -32007, -32008, -32009]
+    },
+    "NumericCode": {
+      "description": "The JSON-RPC numeric code. Open like ErrorCode: an unknown integer validates and is treated as INTERNAL unless data.code is known (data.code is authoritative).",
+      "anyOf": [
+        { "$ref": "#/$defs/KnownNumericCode" },
+        { "type": "integer" }
+      ]
+    },
+    "ErrorData": {
+      "type": "object",
+      "required": ["code"],
+      "properties": {
+        "code": { "$ref": "#/$defs/ErrorCode" },
+        "seconds": {
+          "description": "FLOOD_WAIT: how long to wait before retrying.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "capability": {
+          "description": "NOT_SUPPORTED: the capability that would be needed.",
+          "type": "string"
+        },
+        "field": {
+          "description": "INVALID_PARAMS: the offending parameter, dotted path.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "NOT_FOUND: what was not found (chat, message, user, ...).",
+          "type": "string"
+        },
+        "reason": {
+          "description": "FORBIDDEN: a machine-readable reason (too_old, no_rights, premium_required, blocked, ...).",
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "code": { "const": "FLOOD_WAIT" } } },
+          "then": { "required": ["seconds"] }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "ErrorObject": {
+      "type": "object",
+      "required": ["code", "message", "data"],
+      "properties": {
+        "code": { "$ref": "#/$defs/NumericCode" },
+        "message": { "type": "string" },
+        "data": { "$ref": "#/$defs/ErrorData" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/privacy.json",
+  "title": "PrivacyRule",
+  "$defs": {
+    "PrivacyValue": { "type": "string", "enum": ["everybody", "contacts", "nobody"] },
+    "PrivacyRule": {
+      "type": "object",
+      "required": ["key", "label", "value", "choices"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "label": { "type": "string" },
+        "value": { "$ref": "#/$defs/PrivacyValue" },
+        "choices": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PrivacyValue" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

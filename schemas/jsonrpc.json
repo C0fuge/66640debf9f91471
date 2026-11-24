@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/jsonrpc.json",
+  "title": "JSON-RPC 2.0 envelope as used by the Contact Hub plugin API",
+  "description": "One of these per NDJSON line. Batch arrays are not supported. See docs/plugin-api.md section 2.3.",
+  "$defs": {
+    "RequestId": {
+      "description": "A request id: integer or string, never null. The core uses integers.",
+      "oneOf": [
+        { "type": "integer" },
+        { "type": "string", "minLength": 1 }
+      ]
+    },
+    "MethodName": {
+      "description": "Lowercase dotted method name, including the x-<plugin-id>. vendor namespace from section 12.3, or the reserved $/cancelRequest.",
+      "type": "string",
+      "pattern": "^(\\$/[A-Za-z]+|(x-[a-z][a-z0-9_]{1,31}\\.)?[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*)$"
+    },
+    "Params": {
+      "description": "Parameters are always a JSON object (named parameters).",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "Request": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "method": { "$ref": "#/$defs/MethodName" },
+        "params": { "$ref": "#/$defs/Params" }
+      },
+      "additionalProperties": true
+    },
+    "Notification": {
+      "type": "object",
+      "required": ["jsonrpc", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "$ref": "#/$defs/MethodName" },
+        "params": { "$ref": "#/$defs/Params" }
+      },
+      "not": { "required": ["id"] },
+      "additionalProperties": true
+    },
+    "SuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "result": { "type": "object", "additionalProperties": true }
+      },
+      "not": { "required": ["error"] },
+      "additionalProperties": true
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": {
+          "description": "Null only when the request id could not be read (PARSE_ERROR, INVALID_REQUEST).",
+          "oneOf": [ { "$ref": "#/$defs/RequestId" }, { "type": "null" } ]
+        },
+        "error": { "$ref": "errors.json#/$defs/ErrorObject" }
+      },
+      "not": { "required": ["result"] },
+      "additionalProperties": true
+    },
+    "Message": {
+      "description": "Any one frame.",
+      "oneOf": [
+        { "$ref": "#/$defs/Request" },
+        { "$ref": "#/$defs/Notification" },
+        { "$ref": "#/$defs/SuccessResponse" },
+        { "$ref": "#/$defs/ErrorResponse" }
+      ]
+    },
+    "CancelParams": {
+      "description": "Params of the $/cancelRequest notification.",
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/RequestId" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,34 @@
+[package]
+name = "ch-core"
+version = "0.1.0"
+description = "Contact Hub core: ingest, plugin host, services, search, outbox"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ch-protocol = { workspace = true }
+ch-db = { path = "../ch-db" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "fs"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+libc = { workspace = true }
+jsonschema = { workspace = true }
+keyring = { workspace = true, optional = true }
+
+[features]
+default = ["keyring"]
+# The real OS keyring backend (Secret Service over D-Bus on Linux). Off = `KeyringSecretStore::open` refuses.
+keyring = ["dep:keyring"]
+
+[dev-dependencies]
+ch-plugin-sdk = { path = "../ch-plugin-sdk" }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["process", "fs", "test-util"] }

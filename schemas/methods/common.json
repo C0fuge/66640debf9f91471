@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/common.json",
+  "title": "Shared request/result fragments",
+  "$defs": {
+    "ReplyTarget": {
+      "description": "reply_to on sending methods. quote_* need the quote_reply capability.",
+      "type": "object",
+      "required": ["message_id"],
+      "properties": {
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "quote_text": { "type": ["string", "null"] },
+        "quote_offset": { "description": "UTF-16 units into the replied message.", "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "MessageResult": {
+      "type": "object",
+      "required": ["message"],
+      "properties": { "message": { "$ref": "../dto/message.json#/$defs/Message" } },
+      "additionalProperties": true
+    },
+    "OptionalMessageResult": {
+      "description": "message is present when the platform echoed the changed message.",
+      "type": "object",
+      "properties": { "message": { "anyOf": [ { "$ref": "../dto/message.json#/$defs/Message" }, { "type": "null" } ] } },
+      "additionalProperties": true
+    },
+    "MessagesResult": {
+      "type": "object",
+      "required": ["messages"],
+      "properties": { "messages": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Message" } } },
+      "additionalProperties": true
+    },
+    "PagedMessagesResult": {
+      "type": "object",
+      "required": ["messages"],
+      "properties": {
+        "messages": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Message" } },
+        "next_cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "MessageIdsResult": {
+      "type": "object",
+      "required": ["message_ids"],
+      "properties": { "message_ids": { "$ref": "../common.json#/$defs/IdList" } },
+      "additionalProperties": true
+    },
+    "PathResult": {
+      "type": "object",
+      "properties": { "path": { "type": ["string", "null"] } },
+      "additionalProperties": true
+    },
+    "AccountParams": {
+      "description": "A request that takes only account_id.",
+      "type": "object",
+      "required": ["account_id"],
+      "properties": { "account_id": { "$ref": "../common.json#/$defs/AccountId" } },
+      "additionalProperties": true
+    },
+    "ChatParams": {
+      "description": "A request that takes account_id and chat_id.",
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" }
+      },
+      "additionalProperties": true
+    },
+    "ChatTopicParams": {
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "ChatMessageParams": {
+      "description": "A request that addresses one message.",
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" }
+      },
+      "additionalProperties": true
+    },
+    "ChatMessagesParams": {
+      "description": "A request that addresses several messages of one chat.",
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_ids"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_ids": { "$ref": "../common.json#/$defs/IdList" }
+      },
+      "additionalProperties": true
+    },
+    "ChatUserParams": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "user_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" }
+      },
+      "additionalProperties": true
+    },
+    "UserParams": {
+      "type": "object",
+      "required": ["account_id", "user_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" }
+      },
+      "additionalProperties": true
+    },
+    "ChatTopicPagedParams": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "limit": { "$ref": "../common.json#/$defs/Limit" },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "ChatTopicLimitParams": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "limit": { "$ref": "../common.json#/$defs/Limit" }
+      },
+      "additionalProperties": true
+    },
+    "SendOptions": {
+      "description": "Options shared by every sending method; each is gated by its capability.",
+      "type": "object",
+      "properties": {
+        "reply_to": { "anyOf": [ { "$ref": "#/$defs/ReplyTarget" }, { "type": "null" } ] },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "silent": { "type": ["boolean", "null"] },
+        "schedule_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] }
+      }
+    }
+  }
+}

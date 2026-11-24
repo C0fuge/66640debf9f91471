@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "message": {
+      "id": "1190",
+      "chat_id": "4421",
+      "direction": "out",
+      "sent_at": "2026-10-19T14:04:01.000Z",
+      "sender_id": "100",
+      "text": "On my way",
+      "reply_to": {
+        "message_id": "1189"
+      },
+      "delivery": "sent",
+      "silent": true,
+      "ext": {
+        "discord": {
+          "client_id": "c-1a2b"
+        }
+      }
+    }
+  }
+}

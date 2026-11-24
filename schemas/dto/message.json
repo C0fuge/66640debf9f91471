@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/message.json",
+  "title": "Message and its parts",
+  "$defs": {
+    "Direction": { "type": "string", "enum": ["in", "out"] },
+    "Delivery": { "type": "string", "enum": ["sending", "sent", "delivered", "read", "failed"] },
+    "EntityType": {
+      "type": "string",
+      "enum": [
+        "bold", "italic", "underline", "strike", "spoiler", "code", "pre", "blockquote",
+        "url", "text_url", "mention", "mention_name", "hashtag", "cashtag", "bot_command",
+        "email", "phone", "custom_emoji", "bank_card"
+      ]
+    },
+    "Entity": {
+      "description": "A formatting span over the message text. offset and length are UTF-16 code units.",
+      "type": "object",
+      "required": ["type", "offset", "length"],
+      "properties": {
+        "type": { "$ref": "#/$defs/EntityType" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "length": { "type": "integer", "minimum": 0 },
+        "url": { "type": ["string", "null"] },
+        "user_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "language": { "type": ["string", "null"] },
+        "custom_emoji_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "collapsed": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "MediaKind": {
+      "type": "string",
+      "enum": ["photo", "video", "gif", "sticker", "voice", "video_note", "music", "document", "other"]
+    },
+    "StickerFormat": { "type": "string", "enum": ["static", "animated", "video"] },
+    "StickerRef": {
+      "type": "object",
+      "required": ["format"],
+      "properties": {
+        "emoji": { "type": ["string", "null"] },
+        "pack_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "format": { "$ref": "#/$defs/StickerFormat" }
+      },
+      "additionalProperties": true
+    },
+    "Media": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/MediaKind" },
+        "mime": { "type": ["string", "null"] },
+        "bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "filename": { "type": ["string", "null"] },
+        "width": { "type": ["integer", "null"], "minimum": 0 },
+        "height": { "type": ["integer", "null"], "minimum": 0 },
+        "duration": { "description": "Seconds.", "type": ["integer", "null"], "minimum": 0 },
+        "thumb_path": { "type": ["string", "null"] },
+        "path": { "type": ["string", "null"] },
+        "waveform": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 31 } },
+        "title": { "type": ["string", "null"] },
+        "performer": { "type": ["string", "null"] },
+        "has_spoiler": { "type": "boolean", "default": false },
+        "sticker": { "anyOf": [ { "$ref": "#/$defs/StickerRef" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "ReplyRef": {
+      "type": "object",
+      "required": ["message_id"],
+      "properties": {
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "chat_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "quote_text": { "type": ["string", "null"] },
+        "quote_entities": { "type": "array", "items": { "$ref": "#/$defs/Entity" } },
+        "quote_offset": { "type": ["integer", "null"], "minimum": 0 },
+        "sender_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "preview": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "ForwardInfo": {
+      "type": "object",
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "sender_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "chat_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "message_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "signature": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "ReactionKey": {
+      "description": "Exactly one of emoji, custom_emoji_id, paid.",
+      "type": "object",
+      "oneOf": [
+        { "required": ["emoji"], "properties": { "emoji": { "type": "string", "minLength": 1 } } },
+        { "required": ["custom_emoji_id"], "properties": { "custom_emoji_id": { "$ref": "../common.json#/$defs/Id" } } },
+        { "required": ["paid"], "properties": { "paid": { "const": true } } }
+      ],
+      "additionalProperties": true
+    },
+    "Reaction": {
+      "type": "object",
+      "required": ["key", "count", "mine"],
+      "properties": {
+        "key": { "$ref": "#/$defs/ReactionKey" },
+        "count": { "type": "integer", "minimum": 0 },
+        "mine": { "type": "boolean" },
+        "my_count": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "Reactor": {
+      "type": "object",
+      "required": ["user_id", "key"],
+      "properties": {
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "key": { "$ref": "#/$defs/ReactionKey" },
+        "name": { "type": ["string", "null"] },
+        "at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "unread": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "PollOption": {
+      "type": "object",
+      "required": ["id", "text"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "text": { "type": "string" },
+        "votes": { "type": ["integer", "null"], "minimum": 0 },
+        "chosen": { "type": ["boolean", "null"] },
+        "correct": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "Poll": {
+      "type": "object",
+      "required": ["question", "options"],
+      "properties": {
+        "id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "question": { "type": "string" },
+        "options": { "type": "array", "items": { "$ref": "#/$defs/PollOption" } },
+        "total_voters": { "type": ["integer", "null"], "minimum": 0 },
+        "closed": { "type": "boolean", "default": false },
+        "multiple": { "type": "boolean", "default": false },
+        "quiz": { "type": "boolean", "default": false },
+        "anonymous": { "type": "boolean", "default": false },
+        "solution": { "type": ["string", "null"] },
+        "solution_entities": { "type": "array", "items": { "$ref": "#/$defs/Entity" } },
+        "close_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "Location": {
+      "type": "object",
+      "required": ["lat", "lon"],
+      "properties": {
+        "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+        "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+        "title": { "type": ["string", "null"] },
+        "address": { "type": ["string", "null"] },
+        "live": { "type": "boolean", "default": false },
+        "live_until": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "heading": { "type": ["integer", "null"], "minimum": 0, "maximum": 360 },
+        "accuracy": { "type": ["number", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "ContactCard": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "phone": { "type": ["string", "null"] },
+        "user_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "vcard": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "Dice": {
+      "type": "object",
+      "required": ["emoticon", "value"],
+      "properties": {
+        "emoticon": { "type": "string", "minLength": 1 },
+        "value": { "description": "0 while still rolling.", "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "LinkPreview": {
+      "type": "object",
+      "properties": {
+        "url": { "type": ["string", "null"] },
+        "site": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] },
+        "thumb_path": { "type": ["string", "null"] },
+        "media": { "anyOf": [ { "$ref": "#/$defs/Media" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "InlineButtonKind": {
+      "type": "string",
+      "enum": ["callback", "url", "login_url", "switch_inline", "web_app", "buy", "other"]
+    },
+    "InlineButton": {
+      "type": "object",
+      "required": ["text", "kind"],
+      "properties": {
+        "text": { "type": "string" },
+        "kind": { "$ref": "#/$defs/InlineButtonKind" },
+        "data": { "description": "Opaque; echoed in bots.press_button.", "type": ["string", "null"] },
+        "url": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "ServiceActionKind": {
+      "type": "string",
+      "enum": [
+        "joined", "left", "pinned", "title_changed", "photo_changed", "photo_removed", "created",
+        "call", "ttl_changed", "topic_created", "topic_edited", "history_cleared", "contact_joined",
+        "screenshot", "other"
+      ]
+    },
+    "ServiceAction": {
+      "description": "A platform-generated timeline entry. Its presence makes the message a service message.",
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/ServiceActionKind" },
+        "actor_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "target_ids": { "$ref": "../common.json#/$defs/IdList" },
+        "title": { "type": ["string", "null"] },
+        "message_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "video": { "type": ["boolean", "null"] },
+        "missed": { "type": ["boolean", "null"] },
+        "text": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "Message": {
+      "description": "One message as the platform reports it. docs/plugin-api.md section 9.3. Merge-updated: absent or null = unchanged (also for arrays, section 8.4); creation defaults are edited false and is_scheduled false.",
+      "type": "object",
+      "required": ["id", "chat_id", "direction", "sent_at"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "direction": { "$ref": "#/$defs/Direction" },
+        "sent_at": { "$ref": "../common.json#/$defs/Timestamp" },
+        "sender_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "sender_name": { "type": ["string", "null"] },
+        "sender_title": { "type": ["string", "null"] },
+        "text": { "type": ["string", "null"] },
+        "entities": { "type": "array", "items": { "$ref": "#/$defs/Entity" } },
+        "media": { "anyOf": [ { "$ref": "#/$defs/Media" }, { "type": "null" } ] },
+        "reply_to": { "anyOf": [ { "$ref": "#/$defs/ReplyRef" }, { "type": "null" } ] },
+        "forward_from": { "anyOf": [ { "$ref": "#/$defs/ForwardInfo" }, { "type": "null" } ] },
+        "grouped_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "reactions": { "type": "array", "items": { "$ref": "#/$defs/Reaction" } },
+        "reactors": { "type": "array", "items": { "$ref": "#/$defs/Reactor" } },
+        "poll": { "anyOf": [ { "$ref": "#/$defs/Poll" }, { "type": "null" } ] },
+        "location": { "anyOf": [ { "$ref": "#/$defs/Location" }, { "type": "null" } ] },
+        "contact_card": { "anyOf": [ { "$ref": "#/$defs/ContactCard" }, { "type": "null" } ] },
+        "dice": { "anyOf": [ { "$ref": "#/$defs/Dice" }, { "type": "null" } ] },
+        "link_preview": { "anyOf": [ { "$ref": "#/$defs/LinkPreview" }, { "type": "null" } ] },
+        "buttons": { "type": "array", "items": { "type": "array", "items": { "$ref": "#/$defs/InlineButton" } } },
+        "views": { "type": ["integer", "null"], "minimum": 0 },
+        "replies_count": { "type": ["integer", "null"], "minimum": 0 },
+        "replies_chat_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "effect_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "action": { "anyOf": [ { "$ref": "#/$defs/ServiceAction" }, { "type": "null" } ] },
+        "mentioned": { "type": ["boolean", "null"] },
+        "edited": { "description": "On create: false.", "type": ["boolean", "null"] },
+        "edited_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "delivery": { "anyOf": [ { "$ref": "#/$defs/Delivery" }, { "type": "null" } ] },
+        "read_by": { "$ref": "../common.json#/$defs/IdList" },
+        "is_scheduled": { "description": "On create: false; sent_at is then the fire time.", "type": ["boolean", "null"] },
+        "is_pinned": { "type": ["boolean", "null"] },
+        "silent": { "type": ["boolean", "null"] },
+        "ttl_seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "via_bot_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

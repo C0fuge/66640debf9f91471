@@ -1,0 +1,21 @@
+{
+  "snapshot": "2026-11-24",
+  "package": "maxapi-python==2.5.0",
+  "import_name": "pymax",
+  "upstream_commit": "c4cb917d354a1179be625925530d72c8aaa969ff",
+  "inventory_definitions": 260,
+  "service_definitions": 111,
+  "opcodes": 179,
+  "opcode_status": {
+    "internal_reference": 1,
+    "enum_only_unknown": 99,
+    "request_wrapped": 69,
+    "typed_event": 10
+  },
+  "contract_methods": 119,
+  "wrapper_candidates": 57,
+  "python_files_compared": 188,
+  "distribution_differences": [],
+  "implementation": "MAX plugin absent",
+  "live_checks": false
+}

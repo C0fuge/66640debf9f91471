@@ -1,0 +1,18 @@
+[package]
+name = "ch-db"
+version = "0.1.0"
+description = "Contact Hub storage: SQLite schema, migrations and queries"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ch-protocol = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

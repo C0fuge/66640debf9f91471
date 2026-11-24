@@ -1,0 +1,6 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"api_version":"1.0.0","core_version":"dev","plugin_dir":".","locale":"en-US","log_level":"info"}}
+{"jsonrpc":"2.0","id":2,"method":"account.start","params":{"account_id":"parrot","settings":{},"secrets":{"session":"x"},"state_dir":"/tmp/parrot/state","cache_dir":"/tmp/parrot/cache","ghost":false,"auto_download":{"photos":false,"videos_max_bytes":0,"files_max_bytes":0,"voice":false}}}
+{"jsonrpc":"2.0","id":3,"method":"messages.fetch_recent","params":{"account_id":"parrot","chat_id":"polly","limit":2}}
+{"jsonrpc":"2.0","id":4,"method":"messages.send","params":{"account_id":"parrot","chat_id":"polly","text":"hello"}}
+{"jsonrpc":"2.0","id":5,"method":"messages.send","params":{"account_id":"parrot","chat_id":"polly","text":"later","schedule_at":"2027-01-01T00:00:00.000Z"}}
+{"jsonrpc":"2.0","id":6,"method":"shutdown"}

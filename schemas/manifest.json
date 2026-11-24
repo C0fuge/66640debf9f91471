@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/manifest.json",
+  "title": "Contact Hub plugin manifest (plugin.json)",
+  "description": "See docs/plugin-api.md section 3.2. Unknown fields are ignored.",
+  "type": "object",
+  "required": ["id", "name", "version", "api_version", "entry", "brand_color", "multi_account", "auth_methods"],
+  "properties": {
+    "id": {
+      "description": "The platform id. Lowercase, starts with a letter, 2-32 chars. Immutable once published.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{1,31}$"
+    },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "$ref": "common.json#/$defs/Semver" },
+    "api_version": { "$ref": "common.json#/$defs/Semver" },
+    "entry": {
+      "description": "argv to spawn. entry[0] starting with ./ is resolved against the plugin directory.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "icon": { "type": "string" },
+    "brand_color": { "$ref": "common.json#/$defs/Color" },
+    "multi_account": { "type": "boolean" },
+    "auth_methods": {
+      "description": "Known values: phone_code, password_2fa, qr, email_code, token, oauth, username_password, none. Others are shown verbatim.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "settings_schema": {
+      "description": "JSON Schema (draft 2020-12) for the per-account settings form. String properties may carry x-secret: true.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "description": { "type": "string" },
+    "homepage": { "type": "string", "format": "uri" },
+    "author": { "type": "string" },
+    "license": { "type": "string" },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "AuthMethod": {
+      "description": "Registry of well-known auth method names.",
+      "type": "string",
+      "enum": ["phone_code", "password_2fa", "qr", "email_code", "token", "oauth", "username_password", "none"]
+    }
+  }
+}

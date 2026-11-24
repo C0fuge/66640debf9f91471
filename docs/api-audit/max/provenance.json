@@ -1,0 +1,60 @@
+{
+  "snapshot_date": "2026-11-24",
+  "primary_urls": {
+    "pypi": "https://pypi.org/pypi/maxapi-python/2.5.0/json",
+    "tag": "https://api.github.com/repos/MaxApiTeam/PyMax/git/ref/tags/v2.5.0",
+    "source_archive": "https://api.github.com/repos/MaxApiTeam/PyMax/tarball/c4cb917d354a1179be625925530d72c8aaa969ff",
+    "official_bot_api": "https://dev.max.ru/docs-api",
+    "v1_models": "https://raw.githubusercontent.com/MaxApiTeam/PyMax/v1.2.5/src/pymax/models.py",
+    "v1_crud": "https://raw.githubusercontent.com/MaxApiTeam/PyMax/v1.2.5/src/pymax/crud.py"
+  },
+  "commit": "c4cb917d354a1179be625925530d72c8aaa969ff",
+  "package": {
+    "name": "maxapi-python",
+    "version": "2.5.0",
+    "requires_python": ">=3.10",
+    "license": "MIT",
+    "artifacts": [
+      {
+        "filename": "maxapi_python-2.5.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/35/ee/4d2f076da9849a45804d888252008a343be33d591960a4d9423a0fb6f649/maxapi_python-2.5.0-py3-none-any.whl",
+        "sha256": "20dcf9bfe658fd75434cc370f12c6a0114d85ee109309789c19174710cb8f479",
+        "upload_time": "2026-10-25T18:35:41.483045Z"
+      },
+      {
+        "filename": "maxapi_python-2.5.0.tar.gz",
+        "url": "https://files.pythonhosted.org/packages/83/33/2cdfec83e03bbc8df65666f51ffe64cbcb8d802b9845538faddbce59c007/maxapi_python-2.5.0.tar.gz",
+        "sha256": "e0e49707434e64d2befa7199b932005100b7608f82fd4457bbd638205fe41dd7",
+        "upload_time": "2026-10-25T18:35:42.553290Z"
+      }
+    ]
+  },
+  "client_effective_names": 114,
+  "inputs": [
+    {
+      "path": "CH/docs/REBUILD_PROMPT.md",
+      "sha256": "89cb85affb07030200fb80786065cf48e1d31bb6536eb4494e99c1f3b3982cf5"
+    },
+    {
+      "path": "CH/docs/plugin-api.md",
+      "sha256": "4ca7ab4b007ea942135e862a5acc029107aa5f0ef1e66d29686e14e6045df240"
+    },
+    {
+      "path": "CH/schemas/methods/registry.json",
+      "sha256": "11a94025633e2c7c329750a55658b570bea77f3222c7a5a5d88f54df1198cce4"
+    },
+    {
+      "path": "CH/schemas/capabilities.json",
+      "sha256": "d1030ed6829c4bee489c604627e1f6334c73d815148b00fbd0c5f6cc4877136d"
+    },
+    {
+      "path": "CH-notes/api-inventory/max-surface.tsv",
+      "sha256": "f6682832e1baf3e33410fe3a3102dffc111e01e5f6339c4dafd92f78a02aa0f8"
+    },
+    {
+      "path": "CH-notes/reuse-integration-plan-2026-11-24.md",
+      "sha256": "7d137528c60dff4b1fd2c3be5a7aea6137f324119070743f2711ce627b93db6a"
+    }
+  ],
+  "CH_head": "b729310c8be71d8bdd80652f021663dde42035fd"
+}

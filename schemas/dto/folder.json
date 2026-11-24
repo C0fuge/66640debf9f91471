@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/folder.json",
+  "title": "Folder and FolderRules",
+  "$defs": {
+    "FolderIncludeKind": { "type": "string", "enum": ["contacts", "non_contacts", "groups", "channels", "bots"] },
+    "FolderRules": {
+      "description": "A chat is in the folder when it is in chat_ids or its kind is in include_kinds, and it is not excluded.",
+      "type": "object",
+      "properties": {
+        "include_kinds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FolderIncludeKind" },
+          "uniqueItems": true,
+          "default": []
+        },
+        "exclude_muted": { "type": "boolean", "default": false },
+        "exclude_read": { "type": "boolean", "default": false },
+        "exclude_archived": { "type": "boolean", "default": false },
+        "exclude_chat_ids": { "$ref": "../common.json#/$defs/IdList" },
+        "pinned_chat_ids": {
+          "description": "The folder's own pin order, top first.",
+          "$ref": "../common.json#/$defs/IdList"
+        }
+      },
+      "additionalProperties": true
+    },
+    "Folder": {
+      "type": "object",
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "title": { "type": "string" },
+        "emoticon": { "type": ["string", "null"] },
+        "position": { "type": ["integer", "null"], "minimum": 0 },
+        "chat_ids": { "$ref": "../common.json#/$defs/IdList" },
+        "rules": { "anyOf": [{ "$ref": "#/$defs/FolderRules" }, { "type": "null" }] },
+        "is_shared": { "type": "boolean", "default": false },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

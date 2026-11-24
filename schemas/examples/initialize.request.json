@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "api_version": "1.0.0",
+    "core_version": "0.1.0",
+    "plugin_dir": "/home/user/.local/share/contact-hub-ng/plugins/discord",
+    "locale": "ru-RU",
+    "log_level": "info"
+  }
+}

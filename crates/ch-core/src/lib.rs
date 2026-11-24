@@ -1,0 +1,9 @@
+//! Contact Hub core: ingest, plugin host, services, search, outbox.
+
+pub mod history;
+pub mod host;
+pub mod ingest;
+pub mod outbox;
+pub mod runtime;
+pub mod search;
+pub mod secrets;

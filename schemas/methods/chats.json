@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/chats.json",
+  "title": "Chat and folder methods",
+  "$defs": {
+    "chats.sync.params": {
+      "type": "object",
+      "required": ["account_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "include_archived": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "chats.sync.result": { "$ref": "../common.json#/$defs/Empty" },
+    "chats.set_flags.params": {
+      "description": "Only present fields are changed; each is gated by chat.pin / chat.mute / chat.archive / chat.mark_unread.",
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "pinned": { "type": ["boolean", "null"] },
+        "muted": { "type": ["boolean", "null"] },
+        "mute_until": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "archived": { "type": ["boolean", "null"] },
+        "marked_unread": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "chats.set_flags.result": { "$ref": "../common.json#/$defs/Empty" },
+    "chats.clear_history.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "revoke": { "type": ["boolean", "null"] },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "chats.clear_history.result": { "$ref": "../common.json#/$defs/Empty" },
+    "chats.leave.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "delete": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "chats.leave.result": { "$ref": "../common.json#/$defs/Empty" },
+    "chats.set_auto_delete.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "seconds"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "seconds": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "chats.set_auto_delete.result": { "$ref": "../common.json#/$defs/Empty" },
+    "chats.reorder_pinned.params": {
+      "type": "object",
+      "required": ["account_id", "chat_ids"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_ids": { "description": "Top first.", "$ref": "../common.json#/$defs/IdList" },
+        "folder_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "chats.reorder_pinned.result": { "$ref": "../common.json#/$defs/Empty" },
+
+    "folders.list.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "folders.list.result": {
+      "type": "object",
+      "required": ["folders"],
+      "properties": { "folders": { "type": "array", "items": { "$ref": "../dto/folder.json#/$defs/Folder" } } },
+      "additionalProperties": true
+    },
+    "folders.create.params": {
+      "type": "object",
+      "required": ["account_id", "title", "chat_ids"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "title": { "type": "string", "minLength": 1 },
+        "emoticon": { "type": ["string", "null"] },
+        "chat_ids": { "$ref": "../common.json#/$defs/IdList" },
+        "rules": { "anyOf": [ { "$ref": "../dto/folder.json#/$defs/FolderRules" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "folders.create.result": {
+      "type": "object",
+      "required": ["folder"],
+      "properties": { "folder": { "$ref": "../dto/folder.json#/$defs/Folder" } },
+      "additionalProperties": true
+    },
+    "folders.rename.params": {
+      "type": "object",
+      "required": ["account_id", "folder_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "folder_id": { "$ref": "../common.json#/$defs/Id" },
+        "title": { "type": ["string", "null"] },
+        "emoticon": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "folders.rename.result": { "$ref": "../common.json#/$defs/Empty" },
+    "folders.delete.params": {
+      "type": "object",
+      "required": ["account_id", "folder_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "folder_id": { "$ref": "../common.json#/$defs/Id" }
+      },
+      "additionalProperties": true
+    },
+    "folders.delete.result": { "$ref": "../common.json#/$defs/Empty" },
+    "folders.set_chats.params": {
+      "type": "object",
+      "required": ["account_id", "folder_id", "add", "remove"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "folder_id": { "$ref": "../common.json#/$defs/Id" },
+        "add": { "$ref": "../common.json#/$defs/IdList" },
+        "remove": { "$ref": "../common.json#/$defs/IdList" }
+      },
+      "additionalProperties": true
+    },
+    "folders.set_chats.result": { "$ref": "../common.json#/$defs/Empty" },
+    "folders.set_rules.params": {
+      "type": "object",
+      "required": ["account_id", "folder_id", "rules"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "folder_id": { "$ref": "../common.json#/$defs/Id" },
+        "rules": { "$ref": "../dto/folder.json#/$defs/FolderRules" }
+      },
+      "additionalProperties": true
+    },
+    "folders.set_rules.result": { "$ref": "../common.json#/$defs/Empty" }
+  }
+}

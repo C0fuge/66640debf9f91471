@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/bots.json",
+  "title": "Bot methods",
+  "$defs": {
+    "BotCommand": {
+      "type": "object",
+      "required": ["command", "description"],
+      "properties": {
+        "command": { "description": "Without the slash.", "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "bots.commands.params": {
+      "type": "object",
+      "required": ["account_id", "bot_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "bot_id": { "$ref": "../common.json#/$defs/Id" },
+        "chat_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "bots.commands.result": {
+      "type": "object",
+      "required": ["commands"],
+      "properties": { "commands": { "type": "array", "items": { "$ref": "#/$defs/BotCommand" } } },
+      "additionalProperties": true
+    },
+    "bots.press_button.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id", "button", "row", "column"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "button": { "$ref": "../dto/message.json#/$defs/InlineButton" },
+        "row": { "type": "integer", "minimum": 0 },
+        "column": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "bots.press_button.result": {
+      "type": "object",
+      "properties": {
+        "text": { "description": "A toast to show.", "type": ["string", "null"] },
+        "url": { "description": "A URL to open.", "type": ["string", "null"] },
+        "message": { "anyOf": [ { "$ref": "../dto/message.json#/$defs/Message" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    }
+  }
+}

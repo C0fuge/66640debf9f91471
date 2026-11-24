@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/draft.json",
+  "title": "Draft",
+  "$defs": {
+    "Draft": {
+      "description": "An unsent draft. Empty text means no draft.",
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string" },
+        "entities": { "type": "array", "items": { "$ref": "message.json#/$defs/Entity" } },
+        "reply_to": { "anyOf": [{ "$ref": "../common.json#/$defs/Id" }, { "type": "null" }] },
+        "updated_at": { "anyOf": [{ "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" }] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "method": "auth.step",
+  "params": {
+    "account_id": "discord",
+    "step": {
+      "flow": "sign_in",
+      "step_id": "3",
+      "kind": "code",
+      "title": "Enter the code",
+      "hint": "We sent a code to the app on your other device.",
+      "placeholder": "12345",
+      "can_resend": true,
+      "expires_at": "2026-10-19T14:08:27.000Z",
+      "min_length": 5,
+      "max_length": 5,
+      "error": null
+    }
+  }
+}

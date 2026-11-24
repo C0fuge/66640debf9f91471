@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/core.json",
+  "title": "Requests from plugin to core",
+  "description": "Implemented by the core. See docs/plugin-api.md section 12.",
+  "$defs": {
+    "secrets.set.params": {
+      "type": "object",
+      "required": ["account_id", "key", "value"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "key": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$" },
+        "value": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "secrets.set.result": { "$ref": "../common.json#/$defs/Empty" },
+    "secrets.delete.params": {
+      "type": "object",
+      "required": ["account_id", "key"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "key": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$" }
+      },
+      "additionalProperties": true
+    },
+    "secrets.delete.result": { "$ref": "../common.json#/$defs/Empty" }
+  }
+}

@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/groups.json",
+  "title": "Group and member methods",
+  "$defs": {
+    "GroupKind": { "type": "string", "enum": ["group", "channel"] },
+    "group.create.params": {
+      "type": "object",
+      "required": ["account_id", "title", "user_ids"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "title": { "type": "string", "minLength": 1 },
+        "user_ids": { "$ref": "../common.json#/$defs/IdList" },
+        "kind": { "anyOf": [ { "$ref": "#/$defs/GroupKind" }, { "type": "null" } ] },
+        "about": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "group.create.result": {
+      "type": "object",
+      "required": ["chat_id"],
+      "properties": { "chat_id": { "$ref": "../common.json#/$defs/Id" } },
+      "additionalProperties": true
+    },
+    "group.join_by_link.params": {
+      "type": "object",
+      "required": ["account_id", "link"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "link": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "group.join_by_link.result": {
+      "type": "object",
+      "required": ["pending"],
+      "properties": {
+        "chat_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "pending": { "description": "A join request was filed instead of joining.", "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "group.invite_link.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "revoke": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "group.invite_link.result": {
+      "type": "object",
+      "required": ["link"],
+      "properties": { "link": { "type": "string", "minLength": 1 } },
+      "additionalProperties": true
+    },
+    "group.edit_title.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "title"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "title": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "group.edit_title.result": { "$ref": "../common.json#/$defs/Empty" },
+    "group.edit_about.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "about"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "about": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "group.edit_about.result": { "$ref": "../common.json#/$defs/Empty" },
+    "group.edit_photo.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "path": { "description": "Absent = remove the photo.", "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "group.edit_photo.result": { "$ref": "../common.json#/$defs/Empty" },
+    "group.set_permissions.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "permissions"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "permissions": { "type": "object", "additionalProperties": { "type": "boolean" } }
+      },
+      "additionalProperties": true
+    },
+    "group.set_permissions.result": { "$ref": "../common.json#/$defs/Empty" },
+    "group.set_slow_mode.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "seconds"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "seconds": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "group.set_slow_mode.result": { "$ref": "../common.json#/$defs/Empty" },
+
+    "MemberFilter": { "type": "string", "enum": ["all", "admins", "banned", "restricted", "bots"] },
+    "members.list.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "query": { "description": "Needs members.search.", "type": ["string", "null"] },
+        "filter": { "anyOf": [ { "$ref": "#/$defs/MemberFilter" }, { "type": "null" } ] },
+        "limit": { "$ref": "../common.json#/$defs/Limit" },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "members.list.result": {
+      "type": "object",
+      "required": ["members"],
+      "properties": {
+        "members": { "type": "array", "items": { "$ref": "../dto/member.json#/$defs/Member" } },
+        "next_cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] },
+        "total": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "members.ban.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "user_id", "banned"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "banned": { "type": "boolean" },
+        "until": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "members.ban.result": { "$ref": "../common.json#/$defs/Empty" },
+    "members.set_admin.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "user_id", "admin"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "admin": { "type": "boolean" },
+        "rank": { "type": ["string", "null"] },
+        "rights": { "anyOf": [ { "type": "object", "additionalProperties": { "type": "boolean" } }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "members.set_admin.result": { "$ref": "../common.json#/$defs/Empty" },
+    "members.invite.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "user_ids"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "user_ids": { "$ref": "../common.json#/$defs/IdList" }
+      },
+      "additionalProperties": true
+    },
+    "members.invite.result": {
+      "type": "object",
+      "required": ["failed"],
+      "properties": { "failed": { "description": "Users who could not be added.", "$ref": "../common.json#/$defs/IdList" } },
+      "additionalProperties": true
+    },
+    "join_requests.list.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "limit": { "$ref": "../common.json#/$defs/Limit" },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "join_requests.list.result": {
+      "type": "object",
+      "required": ["requests"],
+      "properties": {
+        "requests": { "type": "array", "items": { "$ref": "../dto/member.json#/$defs/JoinRequest" } },
+        "next_cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "join_requests.answer.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "user_id", "approve"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "approve": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "join_requests.answer.result": { "$ref": "../common.json#/$defs/Empty" }
+  }
+}

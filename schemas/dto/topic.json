@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/topic.json",
+  "title": "Topic",
+  "$defs": {
+    "Topic": {
+      "description": "A forum topic inside a group. Merge-updated like Conversation: absent or null = unchanged; creation defaults are is_general/pinned/closed/hidden false and unread_* 0.",
+      "type": "object",
+      "required": ["id", "chat_id", "title"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "title": { "type": "string" },
+        "icon_emoji": { "type": ["string", "null"] },
+        "icon_custom_emoji_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "icon_color": { "description": "24-bit RGB.", "type": ["integer", "null"], "minimum": 0, "maximum": 16777215 },
+        "is_general": { "description": "On create: false.", "type": ["boolean", "null"] },
+        "unread_count": { "description": "On create: 0.", "type": ["integer", "null"], "minimum": 0 },
+        "unread_mentions": { "description": "On create: 0.", "type": ["integer", "null"], "minimum": 0 },
+        "unread_reactions": { "description": "On create: 0.", "type": ["integer", "null"], "minimum": 0 },
+        "pinned": { "description": "On create: false.", "type": ["boolean", "null"] },
+        "closed": { "description": "On create: false.", "type": ["boolean", "null"] },
+        "hidden": { "description": "On create: false.", "type": ["boolean", "null"] },
+        "last_message_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "last_message_preview": { "type": ["string", "null"] },
+        "draft": { "anyOf": [ { "$ref": "draft.json#/$defs/Draft" }, { "type": "null" } ] },
+        "read_inbox_max_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

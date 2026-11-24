@@ -1,0 +1,63 @@
+.thread-composer {
+  flex: none;
+  min-width: 0;
+  padding: 9px clamp(10px, 2vw, 20px) 12px;
+  background: var(--surface);
+  color: var(--text);
+  border-top: 1px solid var(--border);
+}
+.composer-form { display: flex; align-items: flex-end; gap: 9px; }
+.composer-form textarea {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  min-height: 38px;
+  max-height: min(24vh, 150px);
+  padding: 8px 10px;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: .93rem;
+  resize: none;
+  box-sizing: border-box;
+}
+.composer-form textarea::placeholder { color: var(--muted); }
+.thread-composer button {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 4px 8px;
+  font: inherit;
+  font-size: .8rem;
+  cursor: pointer;
+}
+.thread-composer .composer-send {
+  min-height: 38px;
+  padding: 6px 15px;
+  background: var(--accent);
+  color: var(--accent-ink, #15211e);
+  border-color: transparent;
+  font-weight: 650;
+}
+.thread-composer button:disabled { opacity: .55; cursor: default; }
+.thread-composer .composer-disclosure { padding-inline: 0; border: 0; color: var(--muted); }
+.composer-outbox { margin-bottom: 4px; }
+.composer-outbox-list {
+  max-height: min(22vh, 160px);
+  overflow: auto;
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+  font-size: .8rem;
+}
+.composer-outbox-list li { border-top: 1px solid var(--border); padding: 5px 0; }
+.composer-outbox-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.composer-item-label { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.composer-item-label small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-warning, .composer-status { margin-block: 4px 8px; font-size: .83rem; line-height: 1.4; }
+.composer-warning > div { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 4px; }
+.composer-warning > button { margin-inline: 6px; }

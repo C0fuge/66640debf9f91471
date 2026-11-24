@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/reactions.json",
+  "title": "Reaction methods",
+  "$defs": {
+    "reactions.available.params": {
+      "type": "object",
+      "required": ["account_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "reactions.available.result": {
+      "type": "object",
+      "required": ["allow_custom"],
+      "properties": {
+        "reactions": {
+          "description": "Absent = any emoji; [] = none allowed here.",
+          "type": ["array", "null"],
+          "items": { "$ref": "../dto/message.json#/$defs/ReactionKey" }
+        },
+        "allow_custom": { "type": "boolean" },
+        "max_per_message": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "reactions.set.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id", "reactions"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "reactions": { "description": "The full new set; [] clears.", "type": "array", "items": { "$ref": "../dto/message.json#/$defs/ReactionKey" } },
+        "big": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "reactions.set.result": { "$ref": "common.json#/$defs/OptionalMessageResult" },
+    "reactions.paid.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id", "count"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "count": { "type": "integer", "minimum": 1 },
+        "anonymous": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "reactions.paid.result": { "$ref": "common.json#/$defs/OptionalMessageResult" },
+    "reactions.paid_balance.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "reactions.paid_balance.result": {
+      "type": "object",
+      "properties": {
+        "balance": { "type": ["integer", "null"], "minimum": 0 },
+        "currency": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "reactions.who.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "key": { "anyOf": [ { "$ref": "../dto/message.json#/$defs/ReactionKey" }, { "type": "null" } ] },
+        "limit": { "$ref": "../common.json#/$defs/Limit" },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "reactions.who.result": {
+      "type": "object",
+      "required": ["reactors"],
+      "properties": {
+        "reactors": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Reactor" } },
+        "next_cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "reactions.effect.params": {
+      "type": "object",
+      "required": ["account_id", "key"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "key": { "$ref": "../dto/message.json#/$defs/ReactionKey" }
+      },
+      "additionalProperties": true
+    },
+    "reactions.effect.result": { "$ref": "common.json#/$defs/PathResult" },
+    "reactions.list_unread.params": { "$ref": "common.json#/$defs/ChatTopicLimitParams" },
+    "reactions.list_unread.result": { "$ref": "common.json#/$defs/MessageIdsResult" },
+    "reactions.read.params": { "$ref": "common.json#/$defs/ChatTopicParams" },
+    "reactions.read.result": { "$ref": "../common.json#/$defs/Empty" }
+  }
+}

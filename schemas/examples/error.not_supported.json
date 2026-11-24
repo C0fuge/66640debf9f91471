@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "error": {
+    "code": -32001,
+    "message": "schedule_at needs send.schedule",
+    "data": {
+      "code": "NOT_SUPPORTED",
+      "capability": "send.schedule"
+    }
+  }
+}

@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/registry.json",
+  "title": "Method registry",
+  "description": "Every method with its direction, its schema file and the capability that gates it (or 'required'). Mirrored by ch_protocol::METHODS; the conformance suite and the host read this. Also lists the events (section 10) and the reserved cancel notification.",
+  "type": "object",
+  "required": ["api_version", "default_timeout_seconds", "methods", "events"],
+  "$defs": {
+    "GatedParam": {
+      "type": "object",
+      "required": ["param", "capability"],
+      "properties": {
+        "param": {
+          "description": "Dotted path into params; a '[]' segment means every element of that array (reactions[].custom_emoji_id).",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\[\\])?(\\.[a-z][a-z0-9_]*(\\[\\])?)*$"
+        },
+        "capability": { "$ref": "../capabilities.json#/$defs/CapabilityKey" },
+        "equals": {
+          "description": "When present, the parameter only needs the capability when its value equals this (kind = \"voice\", revoke = false). Otherwise any present non-null value needs it.",
+          "type": ["string", "boolean"]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "api_version": { "const": "1.0.0" },
+    "methods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "direction", "schema", "capability"],
+        "properties": {
+          "name": { "$ref": "../jsonrpc.json#/$defs/MethodName" },
+          "direction": { "type": "string", "enum": ["core_to_plugin", "plugin_to_core"] },
+          "schema": { "type": "string" },
+          "capability": {
+            "description": "A capability key, or 'required'.",
+            "oneOf": [ { "const": "required" }, { "$ref": "../capabilities.json#/$defs/CapabilityKey" } ]
+          },
+          "timeout_seconds": { "description": "Request timeout; absent = the registry's default_timeout_seconds.", "type": "integer", "minimum": 1 },
+          "progress": { "description": "Emits transfer.progress and resets its timeout on each.", "type": "boolean" },
+          "gated_params": {
+            "description": "Parameters of this method that need a capability beyond the method's own (spec 14.2). The receiver answers NOT_SUPPORTED (data.capability = the key) when such a parameter is present (not absent, not null) and the capability is not declared. Both SDKs and the core enforce from this table.",
+            "type": "array",
+            "items": { "$ref": "#/$defs/GatedParam" }
+          }
+        }
+      }
+    },
+    "default_timeout_seconds": {
+      "description": "Timeout for every request without timeout_seconds, in both directions: core -> plugin rows that omit it, plugin -> core requests (secrets.*) and events sent as requests (spec 12).",
+      "type": "integer",
+      "minimum": 1
+    },
+    "events": { "type": "array", "items": { "$ref": "../events.json#/$defs/EventName" } },
+    "cancel": { "const": "$/cancelRequest" }
+  },
+  "api_version": "1.0.0",
+  "default_timeout_seconds": 60,
+  "cancel": "$/cancelRequest",
+  "events": [
+    "status", "conversations.upsert", "conversations.synced", "messages.upsert", "messages.deleted",
+    "message.edited", "reaction.changed", "contacts.upsert", "folders.synced", "topics.upsert",
+    "read.outbox", "read.inbox", "presence", "draft.changed", "avatar.ready", "media.ready",
+    "transfer.progress", "auth.step"
+  ],
+  "methods": [
+    { "name": "initialize", "direction": "core_to_plugin", "schema": "lifecycle.json", "capability": "required", "timeout_seconds": 30 },
+    { "name": "shutdown", "direction": "core_to_plugin", "schema": "lifecycle.json", "capability": "required", "timeout_seconds": 10 },
+    { "name": "ping", "direction": "core_to_plugin", "schema": "lifecycle.json", "capability": "required", "timeout_seconds": 10 },
+    { "name": "account.start", "direction": "core_to_plugin", "schema": "lifecycle.json", "capability": "required", "timeout_seconds": 30 },
+    { "name": "account.stop", "direction": "core_to_plugin", "schema": "lifecycle.json", "capability": "required", "timeout_seconds": 30 },
+
+    { "name": "auth.begin", "direction": "core_to_plugin", "schema": "auth.json", "capability": "auth.interactive" },
+    { "name": "auth.submit", "direction": "core_to_plugin", "schema": "auth.json", "capability": "auth.interactive" },
+    { "name": "auth.cancel", "direction": "core_to_plugin", "schema": "auth.json", "capability": "auth.interactive" },
+
+    { "name": "messages.fetch_recent", "direction": "core_to_plugin", "schema": "messages.json", "capability": "required", "timeout_seconds": 120 },
+    { "name": "messages.get", "direction": "core_to_plugin", "schema": "messages.json", "capability": "messages.get" },
+    { "name": "messages.send", "direction": "core_to_plugin", "schema": "messages.json", "capability": "required",
+      "gated_params": [
+        {"param": "entities", "capability": "send.entities"},
+        {"param": "reply_to.quote_text", "capability": "quote_reply"},
+        {"param": "reply_to.quote_offset", "capability": "quote_reply"},
+        {"param": "comment_to", "capability": "comments.send"},
+        {"param": "silent", "capability": "send.silent"},
+        {"param": "schedule_at", "capability": "send.schedule"},
+        {"param": "no_webpage", "capability": "send.no_webpage"},
+        {"param": "effect_id", "capability": "send.effects"}
+      ] },
+    { "name": "messages.send_file", "direction": "core_to_plugin", "schema": "messages.json", "capability": "send.file", "timeout_seconds": 600, "progress": true,
+      "gated_params": [
+        {"param": "entities", "capability": "send.entities"},
+        {"param": "reply_to.quote_text", "capability": "quote_reply"},
+        {"param": "reply_to.quote_offset", "capability": "quote_reply"},
+        {"param": "as_file", "capability": "send.as_file"},
+        {"param": "spoiler", "capability": "send.spoiler"},
+        {"param": "kind", "capability": "send.voice", "equals": "voice"},
+        {"param": "kind", "capability": "send.video_note", "equals": "video_note"},
+        {"param": "silent", "capability": "send.silent"},
+        {"param": "schedule_at", "capability": "send.schedule"},
+        {"param": "ttl_seconds", "capability": "send.ttl"}
+      ] },
+    { "name": "messages.send_album", "direction": "core_to_plugin", "schema": "messages.json", "capability": "send.album", "timeout_seconds": 600, "progress": true,
+      "gated_params": [
+        {"param": "items[].entities", "capability": "send.entities"},
+        {"param": "items[].spoiler", "capability": "send.spoiler"},
+        {"param": "items[].as_file", "capability": "send.as_file"},
+        {"param": "entities", "capability": "send.entities"},
+        {"param": "reply_to.quote_text", "capability": "quote_reply"},
+        {"param": "reply_to.quote_offset", "capability": "quote_reply"},
+        {"param": "silent", "capability": "send.silent"},
+        {"param": "schedule_at", "capability": "send.schedule"}
+      ] },
+    { "name": "messages.edit", "direction": "core_to_plugin", "schema": "messages.json", "capability": "edit",
+      "gated_params": [
+        {"param": "entities", "capability": "send.entities"},
+        {"param": "path", "capability": "edit.media"}
+      ] },
+    { "name": "messages.delete", "direction": "core_to_plugin", "schema": "messages.json", "capability": "delete",
+      "gated_params": [
+        {"param": "revoke", "capability": "delete.for_me", "equals": false}
+      ] },
+    { "name": "messages.forward", "direction": "core_to_plugin", "schema": "messages.json", "capability": "forward",
+      "gated_params": [
+        {"param": "drop_author", "capability": "forward.drop_author"},
+        {"param": "silent", "capability": "send.silent"},
+        {"param": "schedule_at", "capability": "send.schedule"}
+      ] },
+    { "name": "messages.pin", "direction": "core_to_plugin", "schema": "messages.json", "capability": "pin" },
+    { "name": "messages.unpin", "direction": "core_to_plugin", "schema": "messages.json", "capability": "unpin" },
+    { "name": "messages.seen_by", "direction": "core_to_plugin", "schema": "messages.json", "capability": "seen_by" },
+    { "name": "messages.translate", "direction": "core_to_plugin", "schema": "messages.json", "capability": "translate" },
+    { "name": "messages.transcribe", "direction": "core_to_plugin", "schema": "messages.json", "capability": "transcribe" },
+
+    { "name": "history.around", "direction": "core_to_plugin", "schema": "history.json", "capability": "history.jump_to_date", "timeout_seconds": 120 },
+    { "name": "history.fill_gap", "direction": "core_to_plugin", "schema": "history.json", "capability": "history.fill_gap", "timeout_seconds": 120 },
+
+    { "name": "media.download", "direction": "core_to_plugin", "schema": "media.json", "capability": "media.download", "timeout_seconds": 600, "progress": true },
+    { "name": "media.search", "direction": "core_to_plugin", "schema": "media.json", "capability": "media.search", "timeout_seconds": 120 },
+    { "name": "avatars.download", "direction": "core_to_plugin", "schema": "media.json", "capability": "avatars" },
+
+    { "name": "reactions.available", "direction": "core_to_plugin", "schema": "reactions.json", "capability": "reactions.set" },
+    { "name": "reactions.set", "direction": "core_to_plugin", "schema": "reactions.json", "capability": "reactions.set",
+      "gated_params": [
+        {"param": "reactions[].custom_emoji_id", "capability": "reactions.custom"}
+      ] },
+    { "name": "reactions.paid", "direction": "core_to_plugin", "schema": "reactions.json", "capability": "paid.react" },
+    { "name": "reactions.paid_balance", "direction": "core_to_plugin", "schema": "reactions.json", "capability": "paid.react" },
+    { "name": "reactions.who", "direction": "core_to_plugin", "schema": "reactions.json", "capability": "reactions.who" },
+    { "name": "reactions.effect", "direction": "core_to_plugin", "schema": "reactions.json", "capability": "reactions.effects" },
+    { "name": "reactions.list_unread", "direction": "core_to_plugin", "schema": "reactions.json", "capability": "reactions.unread" },
+    { "name": "reactions.read", "direction": "core_to_plugin", "schema": "reactions.json", "capability": "reactions.unread" },
+
+    { "name": "polls.create", "direction": "core_to_plugin", "schema": "polls.json", "capability": "polls.create",
+      "gated_params": [
+        {"param": "reply_to.quote_text", "capability": "quote_reply"},
+        {"param": "reply_to.quote_offset", "capability": "quote_reply"},
+        {"param": "silent", "capability": "send.silent"},
+        {"param": "schedule_at", "capability": "send.schedule"}
+      ] },
+    { "name": "polls.vote", "direction": "core_to_plugin", "schema": "polls.json", "capability": "polls.vote" },
+    { "name": "polls.close", "direction": "core_to_plugin", "schema": "polls.json", "capability": "polls.close" },
+
+    { "name": "bots.commands", "direction": "core_to_plugin", "schema": "bots.json", "capability": "bots.commands" },
+    { "name": "bots.press_button", "direction": "core_to_plugin", "schema": "bots.json", "capability": "bots.buttons" },
+
+    { "name": "read.send_receipt", "direction": "core_to_plugin", "schema": "read.json", "capability": "read_receipts" },
+    { "name": "typing.send", "direction": "core_to_plugin", "schema": "read.json", "capability": "typing" },
+    { "name": "mentions.list_unread", "direction": "core_to_plugin", "schema": "read.json", "capability": "mentions.unread" },
+    { "name": "mentions.read", "direction": "core_to_plugin", "schema": "read.json", "capability": "mentions.unread" },
+    { "name": "pins.list", "direction": "core_to_plugin", "schema": "read.json", "capability": "pins.list" },
+
+    { "name": "drafts.save", "direction": "core_to_plugin", "schema": "drafts.json", "capability": "drafts.sync" },
+    { "name": "scheduled.list", "direction": "core_to_plugin", "schema": "drafts.json", "capability": "scheduled" },
+    { "name": "scheduled.edit", "direction": "core_to_plugin", "schema": "drafts.json", "capability": "scheduled.edit" },
+    { "name": "scheduled.delete", "direction": "core_to_plugin", "schema": "drafts.json", "capability": "scheduled" },
+    { "name": "scheduled.send_now", "direction": "core_to_plugin", "schema": "drafts.json", "capability": "scheduled" },
+
+    { "name": "replies.list", "direction": "core_to_plugin", "schema": "threads.json", "capability": "replies.list", "timeout_seconds": 120 },
+    { "name": "topics.list", "direction": "core_to_plugin", "schema": "threads.json", "capability": "topics" },
+    { "name": "topics.create", "direction": "core_to_plugin", "schema": "threads.json", "capability": "topics.manage" },
+    { "name": "topics.edit", "direction": "core_to_plugin", "schema": "threads.json", "capability": "topics.manage" },
+    { "name": "topics.pin", "direction": "core_to_plugin", "schema": "threads.json", "capability": "topics.pin" },
+
+    { "name": "chats.sync", "direction": "core_to_plugin", "schema": "chats.json", "capability": "chat.sync", "timeout_seconds": 120 },
+    { "name": "chats.set_flags", "direction": "core_to_plugin", "schema": "chats.json", "capability": "chat.flags",
+      "gated_params": [
+        {"param": "pinned", "capability": "chat.pin"},
+        {"param": "muted", "capability": "chat.mute"},
+        {"param": "mute_until", "capability": "chat.mute"},
+        {"param": "archived", "capability": "chat.archive"},
+        {"param": "marked_unread", "capability": "chat.mark_unread"}
+      ] },
+    { "name": "chats.clear_history", "direction": "core_to_plugin", "schema": "chats.json", "capability": "chat.clear" },
+    { "name": "chats.leave", "direction": "core_to_plugin", "schema": "chats.json", "capability": "chat.leave" },
+    { "name": "chats.set_auto_delete", "direction": "core_to_plugin", "schema": "chats.json", "capability": "auto_delete" },
+    { "name": "chats.reorder_pinned", "direction": "core_to_plugin", "schema": "chats.json", "capability": "chat.reorder_pinned" },
+    { "name": "folders.list", "direction": "core_to_plugin", "schema": "chats.json", "capability": "folders" },
+    { "name": "folders.create", "direction": "core_to_plugin", "schema": "chats.json", "capability": "folders.manage" },
+    { "name": "folders.rename", "direction": "core_to_plugin", "schema": "chats.json", "capability": "folders.manage" },
+    { "name": "folders.delete", "direction": "core_to_plugin", "schema": "chats.json", "capability": "folders.manage" },
+    { "name": "folders.set_chats", "direction": "core_to_plugin", "schema": "chats.json", "capability": "folders.edit" },
+    { "name": "folders.set_rules", "direction": "core_to_plugin", "schema": "chats.json", "capability": "folders.rules" },
+
+    { "name": "group.create", "direction": "core_to_plugin", "schema": "groups.json", "capability": "group.create" },
+    { "name": "group.join_by_link", "direction": "core_to_plugin", "schema": "groups.json", "capability": "group.join_by_link" },
+    { "name": "group.invite_link", "direction": "core_to_plugin", "schema": "groups.json", "capability": "group.invite_link" },
+    { "name": "group.edit_title", "direction": "core_to_plugin", "schema": "groups.json", "capability": "group.edit" },
+    { "name": "group.edit_about", "direction": "core_to_plugin", "schema": "groups.json", "capability": "group.edit" },
+    { "name": "group.edit_photo", "direction": "core_to_plugin", "schema": "groups.json", "capability": "group.photo", "timeout_seconds": 600, "progress": true },
+    { "name": "group.set_permissions", "direction": "core_to_plugin", "schema": "groups.json", "capability": "group.permissions" },
+    { "name": "group.set_slow_mode", "direction": "core_to_plugin", "schema": "groups.json", "capability": "group.slow_mode" },
+    { "name": "members.list", "direction": "core_to_plugin", "schema": "groups.json", "capability": "members", "timeout_seconds": 120,
+      "gated_params": [
+        {"param": "query", "capability": "members.search"}
+      ] },
+    { "name": "members.ban", "direction": "core_to_plugin", "schema": "groups.json", "capability": "members.ban" },
+    { "name": "members.set_admin", "direction": "core_to_plugin", "schema": "groups.json", "capability": "members.admin" },
+    { "name": "members.invite", "direction": "core_to_plugin", "schema": "groups.json", "capability": "members.invite" },
+    { "name": "join_requests.list", "direction": "core_to_plugin", "schema": "groups.json", "capability": "join_requests" },
+    { "name": "join_requests.answer", "direction": "core_to_plugin", "schema": "groups.json", "capability": "join_requests" },
+
+    { "name": "lookup.username", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "lookup.username" },
+    { "name": "lookup.phone", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "lookup.phone" },
+    { "name": "contacts.list", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "contacts.list" },
+    { "name": "contacts.set", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "contacts.edit" },
+    { "name": "contacts.info", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "contacts.info" },
+    { "name": "contacts.common_chats", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "common_chats" },
+    { "name": "blocked.list", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "blocked" },
+    { "name": "blocked.set", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "blocked" },
+    { "name": "profile.get", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "profile" },
+    { "name": "profile.update", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "profile.edit", "timeout_seconds": 600, "progress": true },
+    { "name": "profile.photos", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "profile.photos" },
+    { "name": "stories.list", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "stories" },
+    { "name": "privacy.get", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "privacy" },
+    { "name": "privacy.set", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "privacy" },
+    { "name": "two_factor.get", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "two_factor" },
+    { "name": "two_factor.set", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "two_factor" },
+    { "name": "sessions.list", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "sessions" },
+    { "name": "sessions.terminate", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "sessions" },
+    { "name": "ghost.apply", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "ghost_mode" },
+    { "name": "account.sign_out", "direction": "core_to_plugin", "schema": "contacts.json", "capability": "sign_out" },
+
+    { "name": "stickers.recent", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers" },
+    { "name": "stickers.favorites", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers.favorites" },
+    { "name": "stickers.packs", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers" },
+    { "name": "stickers.pack", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers" },
+    { "name": "stickers.search", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers.search" },
+    { "name": "stickers.install", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers.manage" },
+    { "name": "stickers.set_favorite", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers.favorites" },
+    { "name": "stickers.thumb", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers" },
+    { "name": "stickers.clip", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers.play" },
+    { "name": "stickers.send", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "stickers.send" },
+    { "name": "gifs.list", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "gifs" },
+    { "name": "gifs.search", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "gifs.search" },
+    { "name": "gifs.thumb", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "gifs" },
+    { "name": "gifs.clip", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "gifs" },
+    { "name": "gifs.send", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "gifs.send" },
+    { "name": "emoji.custom_files", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "custom_emoji" },
+    { "name": "emoji.packs", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "custom_emoji" },
+    { "name": "emoji.pack", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "custom_emoji" },
+    { "name": "emoji.animated", "direction": "core_to_plugin", "schema": "stickers.json", "capability": "emoji.animated" },
+
+    { "name": "secrets.set", "direction": "plugin_to_core", "schema": "core.json", "capability": "required" },
+    { "name": "secrets.delete", "direction": "plugin_to_core", "schema": "core.json", "capability": "required" }
+  ]
+}

@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/messages.json",
+  "title": "Message methods",
+  "$defs": {
+    "messages.fetch_recent.params": {
+      "description": "Required. Newest page, or the page before cursor.",
+      "type": "object",
+      "required": ["account_id", "chat_id", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "limit": { "$ref": "../common.json#/$defs/Limit" },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "messages.fetch_recent.result": { "$ref": "common.json#/$defs/PagedMessagesResult" },
+
+    "messages.get.params": { "$ref": "common.json#/$defs/ChatMessageParams" },
+    "messages.get.result": { "$ref": "common.json#/$defs/OptionalMessageResult" },
+
+    "messages.send.params": {
+      "description": "Required method; the optional fields are each gated by a capability.",
+      "type": "object",
+      "required": ["account_id", "chat_id", "text"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "text": { "type": "string" },
+        "entities": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Entity" } },
+        "reply_to": { "anyOf": [ { "$ref": "common.json#/$defs/ReplyTarget" }, { "type": "null" } ] },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "comment_to": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "silent": { "type": ["boolean", "null"] },
+        "schedule_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "no_webpage": { "type": ["boolean", "null"] },
+        "effect_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "client_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "messages.send.result": { "$ref": "common.json#/$defs/MessageResult" },
+
+    "FileKind": { "type": "string", "enum": ["auto", "voice", "video_note", "photo", "video", "document"] },
+    "messages.send_file.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "path"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "path": { "$ref": "../common.json#/$defs/Path" },
+        "caption": { "type": ["string", "null"] },
+        "entities": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Entity" } },
+        "reply_to": { "anyOf": [ { "$ref": "common.json#/$defs/ReplyTarget" }, { "type": "null" } ] },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "as_file": { "type": ["boolean", "null"] },
+        "spoiler": { "type": ["boolean", "null"] },
+        "kind": { "anyOf": [ { "$ref": "#/$defs/FileKind" }, { "type": "null" } ] },
+        "silent": { "type": ["boolean", "null"] },
+        "schedule_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "ttl_seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "mime": { "type": ["string", "null"] },
+        "filename": { "type": ["string", "null"] },
+        "duration": { "type": ["integer", "null"], "minimum": 0 },
+        "waveform": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 31 } }
+      },
+      "additionalProperties": true
+    },
+    "messages.send_file.result": { "$ref": "common.json#/$defs/MessageResult" },
+
+    "AlbumItem": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "$ref": "../common.json#/$defs/Path" },
+        "caption": { "type": ["string", "null"] },
+        "entities": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Entity" } },
+        "spoiler": { "type": ["boolean", "null"] },
+        "as_file": { "type": ["boolean", "null"] },
+        "kind": { "anyOf": [ { "$ref": "#/$defs/FileKind" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "messages.send_album.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "items"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "items": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/AlbumItem" } },
+        "caption": { "type": ["string", "null"] },
+        "entities": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Entity" } },
+        "reply_to": { "anyOf": [ { "$ref": "common.json#/$defs/ReplyTarget" }, { "type": "null" } ] },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "silent": { "type": ["boolean", "null"] },
+        "schedule_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "messages.send_album.result": { "$ref": "common.json#/$defs/MessagesResult" },
+
+    "messages.edit.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "text": { "type": ["string", "null"] },
+        "entities": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Entity" } },
+        "path": { "description": "edit.media: replace the media with this file.", "type": ["string", "null"] },
+        "no_webpage": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "messages.edit.result": { "$ref": "common.json#/$defs/MessageResult" },
+
+    "messages.delete.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_ids", "revoke"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_ids": { "$ref": "../common.json#/$defs/IdList" },
+        "revoke": { "description": "true = for everyone (delete); false = only for me (delete.for_me).", "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "messages.delete.result": { "$ref": "../common.json#/$defs/Empty" },
+
+    "messages.forward.params": {
+      "type": "object",
+      "required": ["account_id", "from_chat_id", "message_ids", "to_chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "from_chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_ids": { "$ref": "../common.json#/$defs/IdList" },
+        "to_chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "drop_author": { "type": ["boolean", "null"] },
+        "drop_captions": { "type": ["boolean", "null"] },
+        "silent": { "type": ["boolean", "null"] },
+        "schedule_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "messages.forward.result": { "$ref": "common.json#/$defs/MessagesResult" },
+
+    "messages.pin.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "silent": { "type": ["boolean", "null"] },
+        "for_me_only": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "messages.pin.result": { "$ref": "../common.json#/$defs/Empty" },
+
+    "messages.unpin.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "description": "Absent = unpin all.", "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "messages.unpin.result": { "$ref": "../common.json#/$defs/Empty" },
+
+    "SeenByEntry": {
+      "type": "object",
+      "required": ["user_id"],
+      "properties": {
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "name": { "type": ["string", "null"] },
+        "at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "messages.seen_by.params": { "$ref": "common.json#/$defs/ChatMessageParams" },
+    "messages.seen_by.result": {
+      "type": "object",
+      "required": ["users"],
+      "properties": { "users": { "type": "array", "items": { "$ref": "#/$defs/SeenByEntry" } } },
+      "additionalProperties": true
+    },
+
+    "messages.translate.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id", "to_language"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "to_language": { "description": "BCP 47.", "type": "string", "minLength": 2 }
+      },
+      "additionalProperties": true
+    },
+    "messages.translate.result": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string" },
+        "entities": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Entity" } },
+        "from_language": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+
+    "messages.transcribe.params": { "$ref": "common.json#/$defs/ChatMessageParams" },
+    "messages.transcribe.result": {
+      "type": "object",
+      "required": ["text", "pending"],
+      "properties": {
+        "text": { "type": "string" },
+        "pending": { "description": "true: still being worked on; call again later.", "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

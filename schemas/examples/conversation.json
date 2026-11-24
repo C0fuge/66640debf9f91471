@@ -1,0 +1,33 @@
+{
+  "id": "4421",
+  "kind": "group",
+  "title": "Weekend plans",
+  "archived": false,
+  "muted": true,
+  "pinned": true,
+  "pin_order": 0,
+  "folder_ids": [
+    "f1"
+  ],
+  "unread_count": 3,
+  "unread_mentions": 1,
+  "unread_reactions": 0,
+  "read_inbox_max_id": "1186",
+  "last_message_at": "2026-10-19T14:03:27.512Z",
+  "is_self_chat": false,
+  "member_count": 12,
+  "can_post": true,
+  "is_forum": false,
+  "draft": {
+    "text": ""
+  },
+  "permissions": {
+    "send_messages": true,
+    "pin_messages": false
+  },
+  "ext": {
+    "discord": {
+      "guild_id": "99"
+    }
+  }
+}

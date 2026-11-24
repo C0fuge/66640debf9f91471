@@ -1,0 +1,1640 @@
+//! One task per plugin: spawn, `initialize`, ping, outgoing requests with timeouts and
+//! cancellation, incoming events and requests, crash detection, restart with backoff and the
+//! crash-loop cap, graceful `shutdown` (spec §4, §12, §16).
+//!
+//! Structure while a process is up:
+//! - the **supervisor loop** (this task) serves commands from the [`super::HostHandle`],
+//!   sends pings, sweeps request deadlines and watches the child;
+//! - a **reader task** parses stdout frames: it resolves pending requests (and applies the
+//!   account transitions that ride on lifecycle replies, in stream order), answers plugin
+//!   requests, and pushes events into a bounded queue — stalling on stdout when it is full;
+//! - a **writer task** owns stdin;
+//! - a **delivery task** (one per plugin, outliving restarts so order is kept) feeds the
+//!   [`EventSink`] and acknowledges events that were sent as requests;
+//! - a **stderr task** forwards the plugin's log lines.
+
+use std::collections::{BTreeMap, HashMap};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use ch_protocol::events::{AccountState, Event};
+use ch_protocol::jsonrpc::{CANCEL_METHOD, CancelParams, Envelope, Request, RequestId, Response};
+use ch_protocol::methods::{AccountStartParams, InitializeParams, InitializeResult};
+use ch_protocol::{Empty, ErrorCode, ErrorObject};
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace, warn};
+
+use super::config::HostConfig;
+use super::error::HostError;
+use super::settings::fill_defaults;
+use super::sink::{EventSink, SecretStore};
+use super::state::{AccountInfo, AccountPhase, AccountSpec, PluginInfo, PluginState, StateChange};
+use super::transport::{Frame, FrameError, FrameReader, encode};
+
+// ---------------------------------------------------------------------------------------
+// Host-wide registry (shared by the handle, the supervisors and their readers)
+// ---------------------------------------------------------------------------------------
+
+pub(crate) struct AccountRecord {
+    pub info: AccountInfo,
+    pub spec: AccountSpec,
+}
+
+pub(crate) struct PluginEntry {
+    pub info: PluginInfo,
+    pub state: PluginState,
+    pub accounts: BTreeMap<String, AccountRecord>,
+    /// Present while a supervisor task runs for this plugin.
+    pub cmd: Option<mpsc::Sender<Command>>,
+}
+
+pub(crate) struct Registry {
+    pub plugins: Mutex<BTreeMap<String, PluginEntry>>,
+    pub changes: broadcast::Sender<StateChange>,
+}
+
+impl Registry {
+    pub fn new() -> Self {
+        Self {
+            plugins: Mutex::new(BTreeMap::new()),
+            changes: broadcast::channel(1024).0,
+        }
+    }
+
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, PluginEntry>> {
+        self.plugins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn set_plugin_state(&self, plugin_id: &str, state: PluginState) {
+        {
+            let mut g = self.lock();
+            let Some(e) = g.get_mut(plugin_id) else {
+                return;
+            };
+            if e.state == state {
+                return;
+            }
+            e.state = state.clone();
+        }
+        let _ = self.changes.send(StateChange::Plugin {
+            plugin_id: plugin_id.to_owned(),
+            state,
+        });
+    }
+
+    pub fn plugin_state(&self, plugin_id: &str) -> Option<PluginState> {
+        self.lock().get(plugin_id).map(|e| e.state.clone())
+    }
+
+    /// Mutate (creating if needed) one account record and broadcast the result.
+    pub fn update_account(
+        &self,
+        plugin_id: &str,
+        account_id: &str,
+        f: impl FnOnce(&mut AccountRecord),
+    ) -> Option<AccountInfo> {
+        let info = {
+            let mut g = self.lock();
+            let e = g.get_mut(plugin_id)?;
+            let rec = e
+                .accounts
+                .entry(account_id.to_owned())
+                .or_insert_with(|| AccountRecord {
+                    info: AccountInfo::new(plugin_id, account_id),
+                    spec: AccountSpec::default(),
+                });
+            let before = rec.info.clone();
+            f(rec);
+            if rec.info == before {
+                return Some(before);
+            }
+            rec.info.clone()
+        };
+        let _ = self.changes.send(StateChange::Account(info.clone()));
+        Some(info)
+    }
+
+    pub fn account_phase(&self, plugin_id: &str, account_id: &str) -> Option<AccountPhase> {
+        self.lock()
+            .get(plugin_id)?
+            .accounts
+            .get(account_id)
+            .map(|r| r.info.phase)
+    }
+
+    /// Every account on the plugin: `(id, wanted, phase)`.
+    fn accounts_of(&self, plugin_id: &str) -> Vec<(String, bool, AccountPhase)> {
+        self.lock()
+            .get(plugin_id)
+            .map(|e| {
+                e.accounts
+                    .values()
+                    .map(|r| (r.info.account_id.clone(), r.info.wanted, r.info.phase))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn account_spec(&self, plugin_id: &str, account_id: &str) -> Option<AccountSpec> {
+        self.lock()
+            .get(plugin_id)?
+            .accounts
+            .get(account_id)
+            .map(|r| r.spec.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Commands from the handle
+// ---------------------------------------------------------------------------------------
+
+pub(crate) enum Command {
+    StartAccount {
+        account_id: String,
+        spec: AccountSpec,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    },
+    StopAccount {
+        account_id: String,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    },
+    Call {
+        request_id: Option<Arc<std::sync::OnceLock<i64>>>,
+        method: String,
+        params: Value,
+        cancel: Option<CancellationToken>,
+        reply: oneshot::Sender<Result<Value, HostError>>,
+    },
+    /// Graceful stop; the supervisor task ends afterwards.
+    Shutdown { reply: oneshot::Sender<()> },
+    /// From `Failed`/`Incompatible`/`Restarting`: try again now with a fresh failure count.
+    /// From `Running`: graceful stop, then start again.
+    Restart { reply: oneshot::Sender<()> },
+}
+
+// ---------------------------------------------------------------------------------------
+// Connection state shared by the supervisor loop and the reader task
+// ---------------------------------------------------------------------------------------
+
+enum PendingKind {
+    Initialize,
+    Ping,
+    Shutdown,
+    AccountStart(String),
+    AccountStop(String),
+    Call,
+}
+
+struct Pending {
+    kind: PendingKind,
+    method: &'static str,
+    deadline: Instant,
+    timeout: Duration,
+    reply: oneshot::Sender<Result<Value, ErrorObject>>,
+    /// Dropped with the entry; a cancel watcher ends when it sees the drop.
+    _done: Option<oneshot::Sender<()>>,
+}
+
+enum Out {
+    Frame(Vec<u8>),
+    /// Close stdin and end the writer.
+    Close,
+}
+
+// Delayed transfer events can survive a plugin restart in the delivery queue.
+static NEXT_REQUEST_ID: AtomicI64 = AtomicI64::new(1);
+
+struct Conn {
+    plugin_id: String,
+    pending: Mutex<HashMap<i64, Pending>>,
+    writer: mpsc::Sender<Out>,
+    /// Pings missed in a row (reset by every pong).
+    ping_misses: AtomicU32,
+    /// The reader is blocked on the full event queue; pings are not counted meanwhile.
+    stalled: AtomicBool,
+    /// Set once the handshake succeeded; events before it are a protocol slip, logged.
+    initialized: AtomicBool,
+}
+
+impl Conn {
+    fn pending(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Pending>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Queue a frame. `false` when the writer is gone or its queue is full (the plugin has
+    /// stopped reading stdin, §2.4).
+    fn send_frame(&self, frame: Vec<u8>) -> bool {
+        match self.writer.try_send(Out::Frame(frame)) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(plugin = %self.plugin_id, "write queue full: plugin is not reading stdin");
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+
+    fn send_json<T: serde::Serialize>(&self, msg: &T) -> bool {
+        match encode(msg) {
+            Ok(f) => self.send_frame(f),
+            Err(e) => {
+                error!(plugin = %self.plugin_id, "cannot encode frame: {e}");
+                false
+            }
+        }
+    }
+
+    /// Answer a plugin request. Notifications (`id` = `None`) get nothing (§2.3); use
+    /// [`Conn::reject_frame`] for frames whose id could not be read.
+    fn respond(&self, id: Option<RequestId>, result: Result<Value, ErrorObject>) {
+        let Some(id) = id else { return };
+        let resp = match result {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, e),
+        };
+        self.send_json(&resp);
+    }
+
+    /// `INVALID_REQUEST` for a frame that is not a JSON-RPC message, with `id: null` when
+    /// no id could be read (§2.2).
+    fn reject_frame(&self, id: Option<RequestId>, reason: String) {
+        self.send_json(&Response::<Value>::err(
+            id,
+            ErrorObject::new(ErrorCode::InvalidRequest, reason),
+        ));
+    }
+
+    fn send_cancel(&self, id: i64) {
+        self.send_json(&CancelParams::notification(id));
+    }
+
+    /// Register and send a request. Returns the id and the reply receiver, or `None` when
+    /// the frame could not be queued (the caller treats the connection as dead).
+    fn request(
+        &self,
+        kind: PendingKind,
+        method: &'static str,
+        params: Value,
+        timeout: Duration,
+        cancel: Option<CancellationToken>,
+        conn: &Arc<Conn>,
+    ) -> Option<(i64, oneshot::Receiver<Result<Value, ErrorObject>>)> {
+        let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let frame = encode(&Request::new(id, method, params)).ok()?;
+        self.pending().insert(
+            id,
+            Pending {
+                kind,
+                method,
+                deadline: Instant::now() + timeout,
+                timeout,
+                reply: tx,
+                _done: Some(done_tx),
+            },
+        );
+        if !self.send_frame(frame) {
+            self.pending().remove(&id);
+            return None;
+        }
+        if let Some(token) = cancel {
+            let conn = Arc::clone(conn);
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        if conn.pending().contains_key(&id) {
+                            debug!(plugin = %conn.plugin_id, id, "caller cancelled; sending $/cancelRequest");
+                            conn.send_cancel(id);
+                        }
+                    }
+                    _ = done_rx => {}
+                }
+            });
+        }
+        Some((id, rx))
+    }
+
+    /// Fail every pending request (process died).
+    fn fail_all(&self, registry: &Registry, reason: &str) {
+        let drained: Vec<(i64, Pending)> = self.pending().drain().collect();
+        for (_, p) in drained {
+            match &p.kind {
+                PendingKind::AccountStart(acc) => {
+                    registry.update_account(&self.plugin_id, acc, |r| {
+                        r.info.phase = AccountPhase::Stopped;
+                        r.info.state = AccountState::Disconnected;
+                        r.info.detail = Some(reason.to_owned());
+                    });
+                }
+                PendingKind::AccountStop(acc) => {
+                    registry.update_account(&self.plugin_id, acc, |r| {
+                        r.info.phase = AccountPhase::Stopped;
+                        r.info.state = AccountState::Disconnected;
+                        r.info.wanted = false;
+                    });
+                }
+                _ => {}
+            }
+            let _ = p
+                .reply
+                .send(Err(ErrorObject::new(ErrorCode::Internal, reason)));
+        }
+    }
+}
+
+/// One queued event on its way to the sink.
+struct Delivery {
+    event: Event,
+    /// Answer this id after delivery (the event was sent as a request).
+    ack: Option<(RequestId, Arc<Conn>)>,
+}
+
+// ---------------------------------------------------------------------------------------
+// The supervisor
+// ---------------------------------------------------------------------------------------
+
+pub(crate) struct Supervisor {
+    pub plugin_id: String,
+    pub info: PluginInfo,
+    pub config: Arc<HostConfig>,
+    pub registry: Arc<Registry>,
+    pub sink: Arc<dyn EventSink>,
+    pub secrets: Arc<dyn SecretStore>,
+    pub rx: mpsc::Receiver<Command>,
+    pub failures: u32,
+    /// The last failure, for `Restarting`/`Failed`.
+    pub last_failure: String,
+}
+
+type QueuedStart = (String, AccountSpec, oneshot::Sender<Result<(), HostError>>);
+
+enum Outcome {
+    /// `shutdown`/disable finished; the task ends and then answers the caller.
+    Shutdown(Option<oneshot::Sender<()>>),
+    /// Manual restart requested; try again with a fresh counter.
+    Restart,
+    /// Another major version.
+    Incompatible(String),
+    /// Crash, hang or protocol error.
+    Failed(String),
+}
+
+/// What the loop decided to do with a command received while no process can serve it.
+enum Idle {
+    Shutdown(oneshot::Sender<()>),
+    /// Manual restart: fresh failure count.
+    Restart(oneshot::Sender<()>),
+    /// The backoff elapsed: next attempt, count kept.
+    Timer,
+}
+
+impl Supervisor {
+    pub async fn run(mut self) {
+        let (deliver_tx, deliver_rx) = mpsc::channel::<Delivery>(self.config.event_queue);
+        let delivery = tokio::spawn(delivery_loop(
+            self.plugin_id.clone(),
+            Arc::clone(&self.sink),
+            deliver_rx,
+        ));
+        let shutdown_reply: Option<oneshot::Sender<()>> = loop {
+            self.registry
+                .set_plugin_state(&self.plugin_id, PluginState::Starting);
+            let idle = match self.run_process(&deliver_tx).await {
+                Outcome::Shutdown(reply) => break reply,
+                Outcome::Restart => {
+                    self.failures = 0;
+                    continue;
+                }
+                Outcome::Incompatible(api_version) => {
+                    warn!(plugin = %self.plugin_id, %api_version, "incompatible API major version");
+                    self.park_accounts("plugin speaks an incompatible API version");
+                    self.registry.set_plugin_state(
+                        &self.plugin_id,
+                        PluginState::Incompatible { api_version },
+                    );
+                    self.wait_idle(None).await
+                }
+                Outcome::Failed(reason) => {
+                    self.failures += 1;
+                    self.last_failure = reason.clone();
+                    self.park_accounts(&format!("plugin restarting: {reason}"));
+                    if self.failures >= self.config.max_failures {
+                        error!(plugin = %self.plugin_id, failures = self.failures, "giving up: {reason}");
+                        self.registry
+                            .set_plugin_state(&self.plugin_id, PluginState::Failed { reason });
+                        self.wait_idle(None).await
+                    } else {
+                        let delay = self.config.backoff(self.failures);
+                        warn!(plugin = %self.plugin_id, failures = self.failures, ?delay, "restarting: {reason}");
+                        self.registry.set_plugin_state(
+                            &self.plugin_id,
+                            PluginState::Restarting {
+                                failures: self.failures,
+                                delay,
+                                reason,
+                            },
+                        );
+                        self.wait_idle(Some(delay)).await
+                    }
+                }
+            };
+            match idle {
+                Idle::Shutdown(reply) => break Some(reply),
+                Idle::Restart(reply) => {
+                    self.failures = 0;
+                    let _ = reply.send(());
+                }
+                Idle::Timer => {}
+            }
+        };
+        self.park_accounts("plugin stopped");
+        {
+            let mut g = self.registry.lock();
+            if let Some(e) = g.get_mut(&self.plugin_id) {
+                e.cmd = None;
+                for r in e.accounts.values_mut() {
+                    r.info.wanted = false;
+                }
+            }
+        }
+        self.registry
+            .set_plugin_state(&self.plugin_id, PluginState::Stopped);
+        drop(deliver_tx);
+        let _ = delivery.await;
+        info!(plugin = %self.plugin_id, "supervisor ended");
+        if let Some(reply) = shutdown_reply {
+            let _ = reply.send(());
+        }
+    }
+
+    /// Every account to `Stopped`/`disconnected`; `wanted` is kept so a restart resumes them.
+    fn park_accounts(&self, detail: &str) {
+        for (id, _, phase) in self.registry.accounts_of(&self.plugin_id) {
+            if phase != AccountPhase::Stopped {
+                self.registry.update_account(&self.plugin_id, &id, |r| {
+                    r.info.phase = AccountPhase::Stopped;
+                    r.info.state = AccountState::Disconnected;
+                    r.info.reconnecting = false;
+                    r.info.detail = Some(detail.to_owned());
+                });
+            }
+        }
+    }
+
+    /// Serve commands while no process runs. With a delay, returns `Restart` (no reply) when
+    /// the delay elapses; without one, waits for `Shutdown`/`Restart`.
+    async fn wait_idle(&mut self, delay: Option<Duration>) -> Idle {
+        let sleep = tokio::time::sleep(delay.unwrap_or(Duration::from_secs(1 << 30)));
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                () = &mut sleep, if delay.is_some() => return Idle::Timer,
+                cmd = self.rx.recv() => {
+                    let Some(cmd) = cmd else {
+                        let (tx, _rx) = oneshot::channel();
+                        return Idle::Shutdown(tx);
+                    };
+                    match cmd {
+                        Command::Shutdown { reply } => return Idle::Shutdown(reply),
+                        Command::Restart { reply } => return Idle::Restart(reply),
+                        Command::StartAccount { account_id, spec, reply } => {
+                            // Remember the wish; the account starts after the restart.
+                            let r = self.remember_start(&account_id, spec, delay.is_some());
+                            let _ = reply.send(r);
+                        }
+                        Command::StopAccount { account_id, reply } => {
+                            self.registry.update_account(&self.plugin_id, &account_id, |r| {
+                                r.info.wanted = false;
+                                r.info.phase = AccountPhase::Stopped;
+                                r.info.state = AccountState::Disconnected;
+                            });
+                            let _ = reply.send(Ok(()));
+                        }
+                        Command::Call { reply, .. } => {
+                            let _ = reply.send(Err(self.not_running()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn not_running(&self) -> HostError {
+        HostError::PluginNotRunning {
+            plugin_id: self.plugin_id.clone(),
+            state: self
+                .registry
+                .plugin_state(&self.plugin_id)
+                .unwrap_or(PluginState::Stopped),
+        }
+    }
+
+    /// Record a start wish while the process is down. Accepted while a restart is pending
+    /// (the account resumes with the plugin); refused when the plugin has given up.
+    fn remember_start(
+        &self,
+        account_id: &str,
+        spec: AccountSpec,
+        will_restart: bool,
+    ) -> Result<(), HostError> {
+        if !will_restart {
+            return Err(self.not_running());
+        }
+        self.check_single_account(account_id)?;
+        self.registry
+            .update_account(&self.plugin_id, account_id, |r| {
+                r.spec = spec;
+                r.info.wanted = true;
+                r.info.detail = Some("waiting for the plugin to restart".to_owned());
+            });
+        Ok(())
+    }
+
+    fn check_single_account(&self, account_id: &str) -> Result<(), HostError> {
+        let multi = self.info.manifest.as_ref().is_some_and(|m| m.multi_account);
+        if multi {
+            return Ok(());
+        }
+        let other =
+            self.registry
+                .accounts_of(&self.plugin_id)
+                .into_iter()
+                .any(|(id, wanted, phase)| {
+                    id != account_id && (wanted || phase != AccountPhase::Stopped)
+                });
+        if other {
+            Err(HostError::SingleAccount(self.plugin_id.clone()))
+        } else {
+            Ok(())
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
+    // One process lifetime
+    // -----------------------------------------------------------------------------------
+
+    async fn run_process(&mut self, deliver_tx: &mpsc::Sender<Delivery>) -> Outcome {
+        let Some(exe) = self.info.executable.clone() else {
+            return Outcome::Failed("entry[0] is not installed".into());
+        };
+        let Some(manifest) = self.info.manifest.clone() else {
+            return Outcome::Failed("manifest is invalid".into());
+        };
+
+        let mut cmd = tokio::process::Command::new(&exe);
+        cmd.args(&manifest.entry[1..])
+            .current_dir(&self.info.dir)
+            .envs(&self.config.env)
+            .envs(manifest.env.clone().unwrap_or_default())
+            .env(ch_protocol::env::PLUGIN_ID, &self.plugin_id)
+            .env(ch_protocol::env::API_VERSION, ch_protocol::API_VERSION)
+            .env(ch_protocol::env::LOG_LEVEL, self.config.log_level.as_str())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => return Outcome::Failed(format!("spawn {}: {e}", exe.display())),
+        };
+        info!(plugin = %self.plugin_id, pid = child.id(), "spawned {}", exe.display());
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+
+        let (writer_tx, writer_rx) = mpsc::channel::<Out>(self.config.write_queue);
+        let writer = tokio::spawn(writer_loop(stdin, writer_rx));
+        let stderr_task = tokio::spawn(stderr_loop(
+            self.plugin_id.clone(),
+            stderr,
+            self.config.plugin_log_path(&self.plugin_id),
+            self.config.stderr_lines_per_sec,
+        ));
+        let conn = Arc::new(Conn {
+            plugin_id: self.plugin_id.clone(),
+            pending: Mutex::new(HashMap::new()),
+            writer: writer_tx,
+            ping_misses: AtomicU32::new(0),
+            stalled: AtomicBool::new(false),
+            initialized: AtomicBool::new(false),
+        });
+        let reader = tokio::spawn(reader_loop(
+            Arc::clone(&conn),
+            stdout,
+            Arc::clone(&self.registry),
+            Arc::clone(&self.secrets),
+            deliver_tx.clone(),
+        ));
+
+        let mut proc = Process {
+            child,
+            conn: Arc::clone(&conn),
+            reader: Some(reader),
+            writer,
+            stderr_task,
+        };
+
+        let outcome = self.serve(&mut proc).await;
+
+        // Whatever happened, make sure the process is gone and the tasks are over.
+        proc.finish(&self.config, &self.registry, &self.plugin_id)
+            .await;
+        outcome
+    }
+
+    async fn serve(&mut self, proc: &mut Process) -> Outcome {
+        let conn = Arc::clone(&proc.conn);
+        // ---- handshake ----
+        let init_params = InitializeParams {
+            api_version: ch_protocol::API_VERSION.to_owned(),
+            core_version: self.config.core_version.clone(),
+            plugin_dir: self.info.dir.to_string_lossy().into_owned(),
+            locale: self.config.locale.clone(),
+            log_level: self.config.log_level.clone(),
+        };
+        let Some((_, init_rx)) = conn.request(
+            PendingKind::Initialize,
+            "initialize",
+            serde_json::to_value(&init_params).expect("serialise"),
+            self.config.request_timeout("initialize"),
+            None,
+            &conn,
+        ) else {
+            return Outcome::Failed("could not write initialize".into());
+        };
+        let mut queued_starts: Vec<QueuedStart> = Vec::new();
+        let init = {
+            tokio::pin!(init_rx);
+            loop {
+                tokio::select! {
+                    r = &mut init_rx => break r,
+                    ended = proc.wait_ended() => return ended,
+                    cmd = self.rx.recv() => match cmd {
+                        None | Some(Command::Shutdown { .. }) => {
+                            let reply = match cmd { Some(Command::Shutdown { reply }) => Some(reply), _ => None };
+                            self.registry.set_plugin_state(&self.plugin_id, PluginState::ShuttingDown);
+                            proc.stop_without_handshake(&self.config).await;
+                            return Outcome::Shutdown(reply);
+                        }
+                        Some(Command::Restart { reply }) => {
+                            proc.stop_without_handshake(&self.config).await;
+                            let _ = reply.send(());
+                            return Outcome::Restart;
+                        }
+                        Some(Command::StartAccount { account_id, spec, reply }) => {
+                            queued_starts.push((account_id, spec, reply));
+                        }
+                        Some(Command::StopAccount { account_id, reply }) => {
+                            self.registry.update_account(&self.plugin_id, &account_id, |r| {
+                                r.info.wanted = false;
+                            });
+                            queued_starts.retain(|(id, _, _)| id != &account_id);
+                            let _ = reply.send(Ok(()));
+                        }
+                        Some(Command::Call { reply, .. }) => {
+                            let _ = reply.send(Err(self.not_running()));
+                        }
+                    },
+                    () = sweep_wait(&conn) => {
+                        if let Some(reason) = self.sweep(&conn) {
+                            return Outcome::Failed(reason);
+                        }
+                    }
+                }
+            }
+        };
+        let init: InitializeResult = match init {
+            Ok(Ok(v)) => match serde_json::from_value(v) {
+                Ok(r) => r,
+                Err(e) => return Outcome::Failed(format!("initialize result is malformed: {e}")),
+            },
+            Ok(Err(e)) => {
+                return Outcome::Failed(format!(
+                    "initialize failed: {} {}",
+                    e.code().as_str(),
+                    e.message
+                ));
+            }
+            Err(_) => return Outcome::Failed("initialize was not answered".into()),
+        };
+        if !ch_protocol::versions_compatible(&init.api_version, ch_protocol::API_VERSION) {
+            for (_, _, reply) in queued_starts {
+                let _ = reply.send(Err(HostError::PluginNotRunning {
+                    plugin_id: self.plugin_id.clone(),
+                    state: PluginState::Incompatible {
+                        api_version: init.api_version.clone(),
+                    },
+                }));
+            }
+            proc.graceful_stop(&self.config).await;
+            return Outcome::Incompatible(init.api_version);
+        }
+        conn.initialized.store(true, Ordering::Release);
+        for k in init.capabilities.unknown_keys() {
+            debug!(plugin = %self.plugin_id, key = k, "unknown capability key (newer minor?)");
+        }
+        let capabilities = Arc::new(init.capabilities);
+        info!(plugin = %self.plugin_id, api = %init.api_version, version = ?init.plugin_version,
+              capabilities = capabilities.0.len(), "initialized");
+        self.registry.set_plugin_state(
+            &self.plugin_id,
+            PluginState::Running {
+                api_version: init.api_version,
+                plugin_version: init.plugin_version,
+                capabilities,
+            },
+        );
+        let healthy_since = Instant::now();
+
+        // ---- resume accounts that were running before a crash, then the queued starts ----
+        for (id, wanted, phase) in self.registry.accounts_of(&self.plugin_id) {
+            if wanted
+                && phase == AccountPhase::Stopped
+                && let Some(spec) = self.registry.account_spec(&self.plugin_id, &id)
+            {
+                info!(plugin = %self.plugin_id, account = %id, "resuming account");
+                self.begin_account_start(&conn, &id, spec, None).await;
+            }
+        }
+        for (id, spec, reply) in queued_starts {
+            self.handle_start(&conn, id, spec, reply).await;
+        }
+
+        // ---- serve ----
+        let mut ping = tokio::time::interval(self.config.ping_interval);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ping.tick().await; // the first tick fires immediately; skip it
+        let outcome = loop {
+            tokio::select! {
+                ended = proc.wait_ended() => break ended,
+                _ = ping.tick() => {
+                    if conn.request(PendingKind::Ping, "ping", Value::Object(Default::default()),
+                                    self.config.request_timeout("ping"), None, &conn).is_none() {
+                        break Outcome::Failed("cannot write to the plugin".into());
+                    }
+                }
+                () = sweep_wait(&conn) => {
+                    if let Some(reason) = self.sweep(&conn) {
+                        break Outcome::Failed(reason);
+                    }
+                }
+                cmd = self.rx.recv() => match cmd {
+                    None | Some(Command::Shutdown { .. }) => {
+                        let reply = match cmd { Some(Command::Shutdown { reply }) => Some(reply), _ => None };
+                        self.registry.set_plugin_state(&self.plugin_id, PluginState::ShuttingDown);
+                        proc.graceful_stop(&self.config).await;
+                        break Outcome::Shutdown(reply);
+                    }
+                    Some(Command::Restart { reply }) => {
+                        self.registry.set_plugin_state(&self.plugin_id, PluginState::ShuttingDown);
+                        proc.graceful_stop(&self.config).await;
+                        let _ = reply.send(());
+                        break Outcome::Restart;
+                    }
+                    Some(Command::StartAccount { account_id, spec, reply }) => {
+                        self.handle_start(&conn, account_id, spec, reply).await;
+                    }
+                    Some(Command::StopAccount { account_id, reply }) => {
+                        self.handle_stop(&conn, account_id, reply);
+                    }
+                    Some(Command::Call { method, params, cancel, request_id, reply }) => {
+                        let timeout = self.config.request_timeout(&method);
+                        let name: &'static str = ch_protocol::method(&method)
+                            .map_or("x-vendor", |m| m.name);
+                        // Vendor methods are not in the registry; keep the dynamic name alive.
+                        let frame_method = method.clone();
+                        let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                        if let Some(cell) = request_id && cell.set(id).is_err() {
+                            let _ = reply.send(Err(HostError::InvalidMethod(frame_method,"request id cell already used")));
+                            continue;
+                        }
+                        let (tx, rx) = oneshot::channel();
+                        let (done_tx, done_rx) = oneshot::channel::<()>();
+                        match encode(&Request::new(id, frame_method, params)) {
+                            Err(e) => { let _ = reply.send(Err(HostError::Json(e))); }
+                            Ok(frame) => {
+                                conn.pending().insert(id, Pending {
+                                    kind: PendingKind::Call, method: name,
+                                    deadline: Instant::now() + timeout, timeout,
+                                    reply: tx, _done: Some(done_tx),
+                                });
+                                if !conn.send_frame(frame) {
+                                    conn.pending().remove(&id);
+                                    let _ = reply.send(Err(HostError::code(ErrorCode::Internal, "plugin is not reading stdin")));
+                                    break Outcome::Failed("plugin is not reading stdin".into());
+                                }
+                                let c2 = Arc::clone(&conn);
+                                tokio::spawn(async move {
+                                    let cancelled = async {
+                                        match cancel { Some(t) => t.cancelled().await, None => std::future::pending().await }
+                                    };
+                                    tokio::select! {
+                                        _ = cancelled => {
+                                            if c2.pending().contains_key(&id) { c2.send_cancel(id); }
+                                        }
+                                        _ = done_rx => {}
+                                    }
+                                });
+                                tokio::spawn(async move {
+                                    let r = match rx.await {
+                                        Ok(Ok(v)) => Ok(v),
+                                        Ok(Err(e)) => Err(HostError::rpc(e)),
+                                        Err(_) => Err(HostError::code(ErrorCode::Internal, "plugin restarted")),
+                                    };
+                                    let _ = reply.send(r);
+                                });
+                            }
+                        }
+                    }
+                },
+            }
+        };
+        if let Outcome::Failed(_) = &outcome
+            && healthy_since.elapsed() >= self.config.healthy_after
+        {
+            // It ran long enough to count as healthy: this failure starts a new series.
+            self.failures = 0;
+        }
+        outcome
+    }
+
+    /// Expire overdue requests. Returns a reason when the process must be restarted.
+    fn sweep(&self, conn: &Arc<Conn>) -> Option<String> {
+        let now = Instant::now();
+        let expired: Vec<(i64, Pending)> = {
+            let mut g = conn.pending();
+            let ids: Vec<i64> = g
+                .iter()
+                .filter(|(_, p)| p.deadline <= now)
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| g.remove(&id).map(|p| (id, p)))
+                .collect()
+        };
+        let mut fatal = None;
+        for (id, p) in expired {
+            match p.kind {
+                PendingKind::Ping => {
+                    if conn.stalled.load(Ordering::Acquire) {
+                        debug!(plugin = %self.plugin_id, "ping unanswered while the event queue is full; not counted");
+                        continue;
+                    }
+                    let misses = conn.ping_misses.fetch_add(1, Ordering::AcqRel) + 1;
+                    warn!(plugin = %self.plugin_id, misses, "ping missed");
+                    if misses >= self.config.ping_misses {
+                        fatal = Some(format!("hung: {misses} pings missed"));
+                    }
+                }
+                PendingKind::Initialize => {
+                    fatal = Some("initialize timed out".into());
+                }
+                PendingKind::Shutdown => {}
+                PendingKind::AccountStart(acc) => {
+                    warn!(plugin = %self.plugin_id, account = %acc, "account.start timed out");
+                    conn.send_cancel(id);
+                    self.registry.update_account(&self.plugin_id, &acc, |r| {
+                        r.info.phase = AccountPhase::Stopped;
+                        r.info.wanted = false;
+                        r.info.state = AccountState::Error;
+                        r.info.detail = Some("account.start timed out".to_owned());
+                    });
+                    let _ = p.reply.send(Err(timeout_error(p.method)));
+                }
+                PendingKind::AccountStop(acc) => {
+                    warn!(plugin = %self.plugin_id, account = %acc, "account.stop timed out; marking stopped");
+                    conn.send_cancel(id);
+                    self.registry.update_account(&self.plugin_id, &acc, |r| {
+                        r.info.phase = AccountPhase::Stopped;
+                        r.info.wanted = false;
+                        r.info.state = AccountState::Disconnected;
+                    });
+                    let _ = p.reply.send(Err(timeout_error(p.method)));
+                }
+                PendingKind::Call => {
+                    debug!(plugin = %self.plugin_id, id, method = p.method, "request timed out");
+                    conn.send_cancel(id);
+                    let _ = p.reply.send(Err(timeout_error(p.method)));
+                }
+            }
+        }
+        fatal
+    }
+
+    async fn handle_start(
+        &self,
+        conn: &Arc<Conn>,
+        account_id: String,
+        spec: AccountSpec,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    ) {
+        match self.registry.account_phase(&self.plugin_id, &account_id) {
+            Some(AccountPhase::Starting) | Some(AccountPhase::Running) => {
+                let _ = reply.send(Err(HostError::AccountAlreadyStarted(account_id)));
+                return;
+            }
+            Some(AccountPhase::Stopping) => {
+                let _ = reply.send(Err(HostError::AccountBusy(account_id, "stopping")));
+                return;
+            }
+            _ => {}
+        }
+        if let Err(e) = self.check_single_account(&account_id) {
+            let _ = reply.send(Err(e));
+            return;
+        }
+        self.begin_account_start(conn, &account_id, spec, Some(reply))
+            .await;
+    }
+
+    /// Build and send `account.start`; the reader applies the phase transition on the reply.
+    async fn begin_account_start(
+        &self,
+        conn: &Arc<Conn>,
+        account_id: &str,
+        spec: AccountSpec,
+        reply: Option<oneshot::Sender<Result<(), HostError>>>,
+    ) {
+        let secrets = match self.secrets.get_all(&self.plugin_id, account_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!(plugin = %self.plugin_id, account = %account_id, "secret store: {e}");
+                self.registry
+                    .update_account(&self.plugin_id, account_id, |r| {
+                        r.info.wanted = false;
+                        r.info.phase = AccountPhase::Stopped;
+                        r.info.state = AccountState::Error;
+                        r.info.detail = Some(format!("secret store: {e}"));
+                    });
+                if let Some(r) = reply {
+                    let _ = r.send(Err(HostError::code(ErrorCode::Internal, e.to_string())));
+                }
+                return;
+            }
+        };
+        let mut settings = spec.settings.clone();
+        fill_defaults(
+            self.info
+                .manifest
+                .as_ref()
+                .and_then(|m| m.settings_schema.as_ref()),
+            &mut settings,
+        );
+        let state_dir = self.config.state_dir(account_id);
+        let cache_dir = self.config.cache_dir(account_id);
+        for d in [&state_dir, &cache_dir] {
+            if let Err(e) = tokio::fs::create_dir_all(d).await {
+                warn!(plugin = %self.plugin_id, "cannot create {}: {e}", d.display());
+            }
+        }
+        let params = AccountStartParams {
+            account_id: account_id.to_owned(),
+            settings,
+            secrets,
+            state_dir: state_dir.to_string_lossy().into_owned(),
+            cache_dir: cache_dir.to_string_lossy().into_owned(),
+            ghost: spec.ghost,
+            auto_download: spec.auto_download.clone(),
+        };
+        self.registry
+            .update_account(&self.plugin_id, account_id, |r| {
+                r.spec = spec;
+                r.info.wanted = true;
+                r.info.phase = AccountPhase::Starting;
+                r.info.state = AccountState::Disconnected;
+                r.info.detail = None;
+                r.info.reconnecting = false;
+            });
+        let sent = conn.request(
+            PendingKind::AccountStart(account_id.to_owned()),
+            "account.start",
+            serde_json::to_value(&params).expect("serialise"),
+            self.config.request_timeout("account.start"),
+            None,
+            conn,
+        );
+        match sent {
+            None => {
+                self.registry
+                    .update_account(&self.plugin_id, account_id, |r| {
+                        r.info.phase = AccountPhase::Stopped;
+                    });
+                if let Some(r) = reply {
+                    let _ = r.send(Err(HostError::code(
+                        ErrorCode::Internal,
+                        "cannot write to the plugin",
+                    )));
+                }
+            }
+            Some((_, rx)) => {
+                if let Some(reply) = reply {
+                    tokio::spawn(async move {
+                        let r = match rx.await {
+                            Ok(Ok(_)) => Ok(()),
+                            Ok(Err(e)) => Err(HostError::rpc(e)),
+                            Err(_) => Err(HostError::code(ErrorCode::Internal, "plugin restarted")),
+                        };
+                        let _ = reply.send(r);
+                    });
+                }
+            }
+        }
+    }
+
+    fn handle_stop(
+        &self,
+        conn: &Arc<Conn>,
+        account_id: String,
+        reply: oneshot::Sender<Result<(), HostError>>,
+    ) {
+        match self.registry.account_phase(&self.plugin_id, &account_id) {
+            None => {
+                let _ = reply.send(Err(HostError::UnknownAccount(account_id)));
+                return;
+            }
+            Some(AccountPhase::Stopped) => {
+                self.registry
+                    .update_account(&self.plugin_id, &account_id, |r| {
+                        r.info.wanted = false;
+                    });
+                let _ = reply.send(Ok(()));
+                return;
+            }
+            Some(AccountPhase::Stopping) => {
+                let _ = reply.send(Err(HostError::AccountBusy(account_id, "stopping")));
+                return;
+            }
+            Some(AccountPhase::Starting) => {
+                let _ = reply.send(Err(HostError::AccountBusy(account_id, "starting")));
+                return;
+            }
+            Some(AccountPhase::Running) => {}
+        }
+        self.registry
+            .update_account(&self.plugin_id, &account_id, |r| {
+                r.info.wanted = false;
+                r.info.phase = AccountPhase::Stopping;
+            });
+        let params = serde_json::json!({ "account_id": account_id });
+        match conn.request(
+            PendingKind::AccountStop(account_id.clone()),
+            "account.stop",
+            params,
+            self.config.request_timeout("account.stop"),
+            None,
+            conn,
+        ) {
+            None => {
+                self.registry
+                    .update_account(&self.plugin_id, &account_id, |r| {
+                        r.info.phase = AccountPhase::Stopped;
+                        r.info.state = AccountState::Disconnected;
+                    });
+                let _ = reply.send(Ok(()));
+            }
+            Some((_, rx)) => {
+                tokio::spawn(async move {
+                    // `UNKNOWN_ACCOUNT` means "already stopped" (§4.2); the reader has marked
+                    // the account stopped either way.
+                    let r = match rx.await {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(e)) if e.code() == ErrorCode::UnknownAccount => Ok(()),
+                        Ok(Err(e)) => Err(HostError::rpc(e)),
+                        Err(_) => Ok(()),
+                    };
+                    let _ = reply.send(r);
+                });
+            }
+        }
+    }
+}
+
+fn timeout_error(method: &str) -> ErrorObject {
+    ErrorObject::new(ErrorCode::Timeout, format!("{method} timed out"))
+}
+
+/// Sleep until the earliest pending deadline (or forever when nothing is pending).
+async fn sweep_wait(conn: &Arc<Conn>) {
+    let next = conn.pending().values().map(|p| p.deadline).min();
+    match next {
+        Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
+        None => std::future::pending().await,
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The child process and its tasks
+// ---------------------------------------------------------------------------------------
+
+struct Process {
+    child: Child,
+    conn: Arc<Conn>,
+    /// `None` once it has been joined (a `JoinHandle` must not be polled again).
+    reader: Option<JoinHandle<Result<(), FrameError>>>,
+    writer: JoinHandle<Option<std::io::Error>>,
+    stderr_task: JoinHandle<()>,
+}
+
+impl Process {
+    /// Resolves when the process exits or the reader ends (EOF or framing error).
+    async fn wait_ended(&mut self) -> Outcome {
+        tokio::select! {
+            status = self.child.wait() => {
+                match status {
+                    Ok(s) => Outcome::Failed(format!("exited unexpectedly ({s})")),
+                    Err(e) => Outcome::Failed(format!("wait: {e}")),
+                }
+            }
+            r = join_opt(&mut self.reader) => {
+                self.reader = None;
+                match r {
+                    Ok(Ok(())) => {
+                        // EOF on stdout: the process is gone or closed its end.
+                        let status = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await;
+                        match status {
+                            Ok(Ok(s)) => Outcome::Failed(format!("exited unexpectedly ({s})")),
+                            _ => Outcome::Failed("closed stdout".into()),
+                        }
+                    }
+                    Ok(Err(e)) => Outcome::Failed(format!("protocol error: {e}")),
+                    Err(e) => Outcome::Failed(format!("reader task: {e}")),
+                }
+            }
+        }
+    }
+
+    /// §4.5: `shutdown` → wait for the reply (grace) → close stdin → wait → SIGTERM → wait →
+    /// SIGKILL. Never closes stdin before the reply or the grace expiry.
+    async fn graceful_stop(&mut self, config: &HostConfig) {
+        let grace = config
+            .scale(Duration::from_secs(ch_protocol::SHUTDOWN_GRACE_SECONDS))
+            .max(config.shutdown_grace);
+        if self.conn.initialized.load(Ordering::Acquire)
+            && let Some((_, rx)) = self.conn.request(
+                PendingKind::Shutdown,
+                "shutdown",
+                Value::Object(Default::default()),
+                grace,
+                None,
+                &self.conn,
+            )
+        {
+            match tokio::time::timeout(grace, rx).await {
+                Ok(Ok(Ok(_))) => debug!(plugin = %self.conn.plugin_id, "shutdown acknowledged"),
+                Ok(Ok(Err(e))) => {
+                    warn!(plugin = %self.conn.plugin_id, "shutdown answered with error {}", e.code().as_str())
+                }
+                Ok(Err(_)) => {
+                    debug!(plugin = %self.conn.plugin_id, "process ended before answering shutdown")
+                }
+                Err(_) => {
+                    warn!(plugin = %self.conn.plugin_id, "shutdown not answered within {grace:?}")
+                }
+            }
+        }
+        self.stop_without_handshake(config).await;
+    }
+
+    /// Close stdin, wait for exit, escalate to SIGTERM then SIGKILL.
+    async fn stop_without_handshake(&mut self, config: &HostConfig) {
+        let _ = self.conn.writer.try_send(Out::Close);
+        let exit_grace = config.exit_grace;
+        if tokio::time::timeout(exit_grace, self.child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if let Some(pid) = self.child.id() {
+            warn!(plugin = %self.conn.plugin_id, pid, "did not exit after stdin closed; SIGTERM");
+            // SAFETY: plain kill(2) on a pid we own; no memory is involved.
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        if tokio::time::timeout(exit_grace, self.child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        warn!(plugin = %self.conn.plugin_id, "did not exit after SIGTERM; SIGKILL");
+        let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
+    }
+
+    /// Tear everything down after the loop decided the process lifetime is over.
+    async fn finish(mut self, config: &HostConfig, registry: &Registry, plugin_id: &str) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            self.stop_without_handshake(config).await;
+        }
+        self.conn.fail_all(registry, "plugin restarted");
+        // The reader ends on EOF once the process is dead; give it a moment, then abort.
+        if let Some(reader) = self.reader.take()
+            && tokio::time::timeout(Duration::from_secs(2), reader)
+                .await
+                .is_err()
+        {
+            // The timeout dropped the handle; the task is detached and ends on EOF.
+            warn!(plugin = %plugin_id, "reader did not end after the process exited");
+        }
+        let _ = self.conn.writer.try_send(Out::Close);
+        self.writer.abort();
+        if tokio::time::timeout(Duration::from_secs(2), &mut self.stderr_task)
+            .await
+            .is_err()
+        {
+            self.stderr_task.abort();
+        }
+        debug!(plugin = %plugin_id, "process finished");
+    }
+}
+
+/// Await an optional `JoinHandle` without consuming it; pending forever when `None`.
+async fn join_opt<T>(h: &mut Option<JoinHandle<T>>) -> Result<T, tokio::task::JoinError> {
+    match h {
+        Some(h) => h.await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn writer_loop(mut stdin: ChildStdin, mut rx: mpsc::Receiver<Out>) -> Option<std::io::Error> {
+    while let Some(out) = rx.recv().await {
+        match out {
+            Out::Close => break,
+            Out::Frame(f) => {
+                if let Err(e) = stdin.write_all(&f).await {
+                    return Some(e);
+                }
+                if let Err(e) = stdin.flush().await {
+                    return Some(e);
+                }
+            }
+        }
+    }
+    drop(stdin);
+    None
+}
+
+async fn stderr_loop(
+    plugin_id: String,
+    stderr: tokio::process::ChildStderr,
+    log_path: Option<std::path::PathBuf>,
+    per_sec: u32,
+) {
+    let mut file = match &log_path {
+        Some(p) => {
+            if let Some(dir) = p.parent() {
+                let _ = tokio::fs::create_dir_all(dir).await;
+            }
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .await
+                .ok()
+        }
+        None => None,
+    };
+    let mut lines = BufReader::new(stderr).lines();
+    let mut window = Instant::now();
+    let mut in_window: u32 = 0;
+    let mut dropped: u64 = 0;
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(f) = file.as_mut() {
+            let mut bytes = line.clone().into_bytes();
+            bytes.push(b'\n');
+            if f.write_all(&bytes).await.is_err() {
+                file = None;
+            }
+        }
+        if window.elapsed() >= Duration::from_secs(1) {
+            if dropped > 0 {
+                warn!(target: "ch_core::host::plugin_stderr", plugin = %plugin_id, "{dropped} stderr lines not shown (rate limit)");
+            }
+            window = Instant::now();
+            in_window = 0;
+            dropped = 0;
+        }
+        if in_window < per_sec {
+            in_window += 1;
+            info!(target: "ch_core::host::plugin_stderr", plugin = %plugin_id, "{line}");
+        } else {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        warn!(target: "ch_core::host::plugin_stderr", plugin = %plugin_id, "{dropped} stderr lines not shown (rate limit)");
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Reader: stdout → pending replies, plugin requests, events
+// ---------------------------------------------------------------------------------------
+
+async fn reader_loop(
+    conn: Arc<Conn>,
+    stdout: ChildStdout,
+    registry: Arc<Registry>,
+    secrets: Arc<dyn SecretStore>,
+    deliver: mpsc::Sender<Delivery>,
+) -> Result<(), FrameError> {
+    let mut reader = FrameReader::new(stdout);
+    let pid = conn.plugin_id.clone();
+    while let Some(frame) = reader.next().await? {
+        match frame {
+            Frame::Invalid { id, reason } => {
+                warn!(plugin = %pid, "invalid frame: {reason}");
+                conn.reject_frame(id, reason);
+            }
+            Frame::Envelope(Envelope::Success(s)) => {
+                let id = s.id.clone();
+                resolve(&conn, &registry, id, Ok(s.result));
+            }
+            Frame::Envelope(Envelope::Error(e)) => match e.id {
+                Some(id) => resolve(&conn, &registry, id, Err(e.error)),
+                None => {
+                    warn!(plugin = %pid, "error response without id: {} {}", e.error.code().as_str(), e.error.message)
+                }
+            },
+            Frame::Envelope(Envelope::Notification(n)) => {
+                handle_incoming(
+                    &conn, &registry, &secrets, &deliver, None, &n.method, n.params,
+                )
+                .await;
+            }
+            Frame::Envelope(Envelope::Request(r)) => {
+                handle_incoming(
+                    &conn,
+                    &registry,
+                    &secrets,
+                    &deliver,
+                    Some(r.id),
+                    &r.method,
+                    r.params,
+                )
+                .await;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A response from the plugin: hand it to the waiting caller and apply lifecycle transitions
+/// in stream order.
+fn resolve(
+    conn: &Arc<Conn>,
+    registry: &Registry,
+    id: RequestId,
+    result: Result<Value, ErrorObject>,
+) {
+    let RequestId::Number(n) = id else {
+        debug!(plugin = %conn.plugin_id, %id, "response with a string id (we never send those)");
+        return;
+    };
+    let Some(p) = conn.pending().remove(&n) else {
+        trace!(plugin = %conn.plugin_id, id = n, "late response for a finished request");
+        return;
+    };
+    trace!(plugin = %conn.plugin_id, id = n, method = p.method, ok = result.is_ok(), "response");
+    match &p.kind {
+        PendingKind::Ping => {
+            conn.ping_misses.store(0, Ordering::Release);
+        }
+        PendingKind::AccountStart(acc) => {
+            let ok = result.is_ok();
+            debug!(plugin = %conn.plugin_id, account = %acc, ok, "account.start answered");
+            registry.update_account(&conn.plugin_id, acc, |r| {
+                if ok {
+                    r.info.phase = AccountPhase::Running;
+                } else {
+                    r.info.phase = AccountPhase::Stopped;
+                    r.info.wanted = false;
+                    r.info.state = AccountState::Error;
+                    r.info.detail = result.as_ref().err().map(|e| e.message.clone());
+                }
+            });
+        }
+        PendingKind::AccountStop(acc) => {
+            registry.update_account(&conn.plugin_id, acc, |r| {
+                r.info.phase = AccountPhase::Stopped;
+                r.info.wanted = false;
+                r.info.state = AccountState::Disconnected;
+                r.info.reconnecting = false;
+            });
+        }
+        _ => {}
+    }
+    let _ = p.reply.send(result);
+}
+
+async fn handle_incoming(
+    conn: &Arc<Conn>,
+    registry: &Arc<Registry>,
+    secrets: &Arc<dyn SecretStore>,
+    deliver: &mpsc::Sender<Delivery>,
+    id: Option<RequestId>,
+    method: &str,
+    params: Option<Value>,
+) {
+    let pid = &conn.plugin_id;
+    let params = params.unwrap_or_else(|| Value::Object(Default::default()));
+    if !params.is_object() {
+        conn.respond(
+            id,
+            Err(ErrorObject::new(
+                ErrorCode::InvalidParams,
+                "params must be an object",
+            )),
+        );
+        return;
+    }
+    if method == CANCEL_METHOD {
+        // The only plugin→core work that could be cancelled is an acked event already queued;
+        // it is answered when ingested regardless (§11.0: a cancel for a finished id is ignored).
+        trace!(plugin = %pid, "plugin sent $/cancelRequest; ignored");
+        return;
+    }
+    if !conn.initialized.load(Ordering::Acquire) {
+        warn!(plugin = %pid, method, "message before initialize was answered (§4.1)");
+    }
+    match method {
+        "secrets.set" | "secrets.delete" => {
+            let Some(id) = id else {
+                warn!(plugin = %pid, method, "sent as a notification; ignored");
+                return;
+            };
+            let account_id = params["account_id"].as_str().map(str::to_owned);
+            let key = params["key"].as_str().map(str::to_owned);
+            let value = params["value"].as_str().map(str::to_owned);
+            let (Some(account_id), Some(key)) = (account_id, key) else {
+                conn.respond(
+                    Some(id),
+                    Err(ErrorObject::new(
+                        ErrorCode::InvalidParams,
+                        "account_id and key are required",
+                    )),
+                );
+                return;
+            };
+            if registry
+                .account_phase(pid, &account_id)
+                .is_none_or(|p| p == AccountPhase::Stopped)
+            {
+                conn.respond(
+                    Some(id),
+                    Err(ErrorObject::new(
+                        ErrorCode::UnknownAccount,
+                        "account is not started",
+                    )),
+                );
+                return;
+            }
+            let is_set = method == "secrets.set";
+            if is_set && value.is_none() {
+                conn.respond(
+                    Some(id),
+                    Err(
+                        ErrorObject::new(ErrorCode::InvalidParams, "value is required")
+                            .with_data(|d| d.field = Some("value".into())),
+                    ),
+                );
+                return;
+            }
+            let (conn, secrets, pid) = (Arc::clone(conn), Arc::clone(secrets), pid.clone());
+            tokio::spawn(async move {
+                let r = if is_set {
+                    secrets
+                        .set(
+                            &pid,
+                            &account_id,
+                            &key,
+                            value.as_deref().unwrap_or_default(),
+                        )
+                        .await
+                } else {
+                    secrets.delete(&pid, &account_id, &key).await
+                };
+                let result = r
+                    .map(|()| serde_json::to_value(Empty {}).expect("empty"))
+                    .map_err(|e| ErrorObject::new(ErrorCode::Internal, e.to_string()));
+                conn.respond(Some(id), result);
+            });
+        }
+        name => match Event::from_params(name, params.clone()) {
+            None => {
+                if name.starts_with("x-") {
+                    debug!(plugin = %pid, method = name, "vendor message ignored (§12.3)");
+                } else {
+                    warn!(plugin = %pid, method = name, "unknown method");
+                }
+                conn.respond(
+                    id,
+                    Err(ErrorObject::new(
+                        ErrorCode::MethodNotFound,
+                        format!("unknown method {name}"),
+                    )),
+                );
+            }
+            Some(Err(e)) => {
+                warn!(plugin = %pid, event = name, "event params invalid: {e}");
+                conn.respond(
+                    id,
+                    Err(ErrorObject::new(ErrorCode::InvalidParams, e.to_string())),
+                );
+            }
+            Some(Ok(event)) => {
+                let account_id = params["account_id"].as_str().unwrap_or_default();
+                let phase = registry.account_phase(pid, account_id);
+                if phase == Some(AccountPhase::Starting) {
+                    // §4.2 says the reply comes first; tolerate the slip, the start was asked for.
+                    debug!(plugin = %pid, account = account_id, event = name, "event before the account.start reply (§4.2)");
+                }
+                if !matches!(
+                    phase,
+                    Some(AccountPhase::Starting | AccountPhase::Running | AccountPhase::Stopping)
+                ) {
+                    debug!(plugin = %pid, account = account_id, event = name, "event for an account that is not started; dropped (§4.2)");
+                    conn.respond(
+                        id,
+                        Err(ErrorObject::new(
+                            ErrorCode::UnknownAccount,
+                            "account is not started",
+                        )),
+                    );
+                    return;
+                }
+                if let Event::TransferProgress(tp) = &event
+                    && let Some(RequestId::Number(n)) = &tp.request_id
+                    && let Some(p) = conn.pending().get_mut(n)
+                {
+                    // §4.6: each transfer.progress for a request resets its timeout.
+                    p.deadline = Instant::now() + p.timeout;
+                }
+                if let Event::Status(s) = &event {
+                    registry.update_account(pid, account_id, |r| {
+                        r.info.state = s.state.clone();
+                        r.info.detail = s.detail.clone();
+                        r.info.reconnecting = s.reconnecting;
+                        if s.me.is_some() {
+                            r.info.me = s.me.clone();
+                        }
+                    });
+                }
+                let item = Delivery {
+                    event,
+                    ack: id.map(|id| (id, Arc::clone(conn))),
+                };
+                // Bounded queue: when full, stop reading stdout until there is room (§16).
+                match deliver.try_send(item) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(item)) => {
+                        conn.stalled.store(true, Ordering::Release);
+                        trace!(plugin = %pid, "event queue full; stalling stdout");
+                        let r = deliver.send(item).await;
+                        conn.stalled.store(false, Ordering::Release);
+                        if r.is_err() {
+                            warn!(plugin = %pid, "event queue closed");
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        warn!(plugin = %pid, "event queue closed");
+                    }
+                }
+            }
+        },
+    }
+}
+
+async fn delivery_loop(
+    plugin_id: String,
+    sink: Arc<dyn EventSink>,
+    mut rx: mpsc::Receiver<Delivery>,
+) {
+    while let Some(item) = rx.recv().await {
+        let name = item.event.name();
+        let r = sink.deliver(&plugin_id, item.event).await;
+        if let Err(e) = &r {
+            warn!(plugin = %plugin_id, event = name, "sink rejected event: {e}");
+        }
+        if let Some((id, conn)) = item.ack {
+            let result = r
+                .map(|()| serde_json::to_value(Empty {}).expect("empty"))
+                .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, e));
+            conn.respond(Some(id), result);
+        }
+    }
+}

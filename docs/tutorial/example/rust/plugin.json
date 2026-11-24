@@ -1,0 +1,36 @@
+{
+  "id": "parrot",
+  "name": "Parrot",
+  "version": "0.1.0",
+  "api_version": "1.0.0",
+  "entry": [
+    "./target/release/parrot"
+  ],
+  "brand_color": "#2EAD5B",
+  "multi_account": true,
+  "auth_methods": [
+    "phone_code"
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "nickname": {
+        "type": "string",
+        "title": "Your name",
+        "default": "Me",
+        "x-order": 1
+      },
+      "max_per_minute": {
+        "type": "integer",
+        "title": "Messages per minute",
+        "description": "Polly gets grumpy if you talk faster than this.",
+        "minimum": 1,
+        "maximum": 100,
+        "default": 20,
+        "x-order": 2
+      }
+    }
+  },
+  "description": "A toy platform: one chat with Polly, who repeats what you say.",
+  "license": "MIT"
+}

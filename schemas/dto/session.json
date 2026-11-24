@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/session.json",
+  "title": "Session",
+  "$defs": {
+    "Session": {
+      "description": "A logged-in device.",
+      "type": "object",
+      "required": ["id", "device", "platform", "app", "current"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "device": { "type": "string" },
+        "platform": { "description": "Operating system.", "type": "string" },
+        "app": { "type": "string" },
+        "ip": { "type": ["string", "null"] },
+        "country": { "type": ["string", "null"] },
+        "location": { "type": ["string", "null"] },
+        "created_at": { "anyOf": [{ "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" }] },
+        "active_at": { "anyOf": [{ "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" }] },
+        "current": { "type": "boolean" },
+        "official": { "type": ["boolean", "null"] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

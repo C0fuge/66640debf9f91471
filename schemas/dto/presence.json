@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/presence.json",
+  "title": "OnlineStatus and PresenceAction",
+  "$defs": {
+    "OnlineState": {
+      "type": "string",
+      "enum": ["online", "offline", "recently", "within_week", "within_month", "long_ago", "hidden"]
+    },
+    "OnlineStatus": {
+      "type": "object",
+      "required": ["state"],
+      "properties": {
+        "state": { "$ref": "#/$defs/OnlineState" },
+        "last_seen_at": { "anyOf": [{ "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" }] },
+        "until": {
+          "description": "For online: when the platform will consider the user offline without further news.",
+          "anyOf": [{ "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" }]
+        }
+      },
+      "additionalProperties": true
+    },
+    "PresenceAction": {
+      "description": "What someone is doing in a chat. cancel clears whatever was showing.",
+      "type": "string",
+      "enum": [
+        "typing",
+        "recording_voice",
+        "recording_video",
+        "uploading",
+        "choosing_sticker",
+        "playing",
+        "speaking",
+        "cancel"
+      ]
+    }
+  }
+}

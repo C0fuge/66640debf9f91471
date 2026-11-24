@@ -1,0 +1,18 @@
+{
+  "jsonrpc": "2.0",
+  "method": "status",
+  "params": {
+    "account_id": "discord",
+    "state": "connected",
+    "reconnecting": false,
+    "me": {
+      "id": "100",
+      "display_name": "Me",
+      "username": "me_user",
+      "is_bot": false,
+      "status": {
+        "state": "online"
+      }
+    }
+  }
+}

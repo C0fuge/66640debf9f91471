@@ -1,0 +1,25 @@
+{
+  "id": "{{plugin_id}}",
+  "name": "{{display_name}}",
+  "version": "0.1.0",
+  "api_version": "1.0.0",
+  "entry": ["./.venv/bin/python", "-m", "{{module_name}}"],
+  "brand_color": "#4A90D9",
+  "multi_account": true,
+  "auth_methods": ["none"],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "server": {
+        "type": "string",
+        "title": "Server URL",
+        "description": "Where the {{display_name}} API lives.",
+        "format": "uri",
+        "default": "https://example.org"
+      }
+    }
+  },
+  "description": "{{display_name}} for Contact Hub.",
+  "author": "{{author}}",
+  "license": "MIT"
+}

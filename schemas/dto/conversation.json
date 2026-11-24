@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/conversation.json",
+  "title": "Conversation",
+  "$defs": {
+    "ConversationKind": {
+      "type": "string",
+      "enum": ["dm", "group", "channel"]
+    },
+    "Conversation": {
+      "description": "A chat. docs/plugin-api.md section 9.2. Merge-updated: an absent or null field means 'unchanged' and leaves the core's row alone; when the core first creates the row it uses the documented creation defaults (archived false, unread_* 0, is_self_chat false). To reset a value send it explicitly.",
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "kind": { "$ref": "#/$defs/ConversationKind" },
+        "title": { "type": ["string", "null"] },
+        "peer_user_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "parent_chat_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "username": { "type": ["string", "null"] },
+        "about": { "type": ["string", "null"] },
+        "archived": { "description": "On create: false.", "type": ["boolean", "null"] },
+        "muted": { "type": ["boolean", "null"] },
+        "mute_until": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "pinned": { "type": ["boolean", "null"] },
+        "pin_order": { "type": ["integer", "null"], "minimum": 0 },
+        "folder_ids": { "$ref": "../common.json#/$defs/IdList" },
+        "unread_count": { "description": "On create: 0.", "type": ["integer", "null"], "minimum": 0 },
+        "unread_mentions": { "description": "On create: 0.", "type": ["integer", "null"], "minimum": 0 },
+        "unread_reactions": { "description": "On create: 0.", "type": ["integer", "null"], "minimum": 0 },
+        "marked_unread": { "type": ["boolean", "null"] },
+        "read_inbox_max_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "read_outbox_max_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "last_message_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] },
+        "is_self_chat": { "description": "On create: false.", "type": ["boolean", "null"] },
+        "avatar_path": { "type": ["string", "null"] },
+        "member_count": { "type": ["integer", "null"], "minimum": 0 },
+        "can_post": { "type": ["boolean", "null"] },
+        "is_forum": { "type": ["boolean", "null"] },
+        "draft": { "anyOf": [ { "$ref": "draft.json#/$defs/Draft" }, { "type": "null" } ] },
+        "color_index": { "type": ["integer", "null"], "minimum": 0 },
+        "scheduled_count": { "type": ["integer", "null"], "minimum": 0 },
+        "auto_delete_seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "slow_mode_seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "permissions": {
+          "anyOf": [
+            { "type": "object", "additionalProperties": { "type": "boolean" } },
+            { "type": "null" }
+          ]
+        },
+        "is_verified": { "type": ["boolean", "null"] },
+        "is_scam": { "type": ["boolean", "null"] },
+        "is_restricted": { "type": ["boolean", "null"] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

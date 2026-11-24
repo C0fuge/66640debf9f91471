@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/threads.json",
+  "title": "Comment threads and forum topics",
+  "$defs": {
+    "replies.list.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "limit": { "$ref": "../common.json#/$defs/Limit" },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "replies.list.result": {
+      "type": "object",
+      "required": ["messages"],
+      "properties": {
+        "messages": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Message" } },
+        "thread_chat_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "next_cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "topics.list.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "limit": { "anyOf": [ { "$ref": "../common.json#/$defs/Limit" }, { "type": "null" } ] },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "topics.list.result": {
+      "type": "object",
+      "required": ["topics"],
+      "properties": {
+        "topics": { "type": "array", "items": { "$ref": "../dto/topic.json#/$defs/Topic" } },
+        "next_cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "topics.create.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "title"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "title": { "type": "string", "minLength": 1 },
+        "icon_color": { "type": ["integer", "null"], "minimum": 0, "maximum": 16777215 },
+        "icon_custom_emoji_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "topics.create.result": {
+      "type": "object",
+      "required": ["topic"],
+      "properties": { "topic": { "$ref": "../dto/topic.json#/$defs/Topic" } },
+      "additionalProperties": true
+    },
+    "topics.edit.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "topic_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "$ref": "../common.json#/$defs/Id" },
+        "title": { "type": ["string", "null"] },
+        "closed": { "type": ["boolean", "null"] },
+        "hidden": { "type": ["boolean", "null"] },
+        "icon_custom_emoji_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "topics.edit.result": { "$ref": "../common.json#/$defs/Empty" },
+    "topics.pin.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "topic_id", "pinned"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "$ref": "../common.json#/$defs/Id" },
+        "pinned": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "topics.pin.result": { "$ref": "../common.json#/$defs/Empty" }
+  }
+}

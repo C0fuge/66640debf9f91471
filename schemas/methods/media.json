@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/media.json",
+  "title": "Media and avatar methods",
+  "$defs": {
+    "MediaWhat": { "type": "string", "enum": ["full", "thumb"] },
+    "media.download.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id", "what"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "what": { "$ref": "#/$defs/MediaWhat" },
+        "priority": { "type": ["integer", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "media.download.result": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "$ref": "../common.json#/$defs/Path" },
+        "mime": { "type": ["string", "null"] },
+        "bytes": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "MediaSearchKind": { "type": "string", "enum": ["photo", "video", "music", "voice", "document", "link", "gif", "round"] },
+    "media.search.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "kind", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "kind": { "$ref": "#/$defs/MediaSearchKind" },
+        "query": { "type": ["string", "null"] },
+        "limit": { "$ref": "../common.json#/$defs/Limit" },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "media.search.result": { "$ref": "common.json#/$defs/PagedMessagesResult" },
+    "AvatarSize": { "type": "string", "enum": ["small", "big"] },
+    "avatars.download.params": {
+      "type": "object",
+      "required": ["account_id", "kind", "id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "kind": { "$ref": "../events.json#/$defs/AvatarKind" },
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "size": { "anyOf": [ { "$ref": "#/$defs/AvatarSize" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "avatars.download.result": { "$ref": "common.json#/$defs/PathResult" }
+  }
+}

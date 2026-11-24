@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "account.start",
+  "params": {
+    "account_id": "discord",
+    "settings": {
+      "proxy": "",
+      "token": "mfa.Zm9vYmFy"
+    },
+    "secrets": {
+      "session": "eyJhbGciOiJIUzI1NiJ9"
+    },
+    "state_dir": "/home/user/.local/share/contact-hub-ng/accounts/discord/state",
+    "cache_dir": "/home/user/.cache/contact-hub-ng/accounts/discord",
+    "ghost": false,
+    "auto_download": {
+      "photos": true,
+      "videos_max_bytes": 10485760,
+      "files_max_bytes": 1048576,
+      "voice": true
+    }
+  }
+}

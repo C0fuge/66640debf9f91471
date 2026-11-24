@@ -1,0 +1,87 @@
+[
+  {
+    "file": "manifest.json",
+    "schema": "manifest.json",
+    "type": "Manifest"
+  },
+  {
+    "file": "initialize.request.json",
+    "schema": "jsonrpc.json#/$defs/Request",
+    "params_schema": "methods/lifecycle.json#/$defs/initialize.params",
+    "type": "Request<InitializeParams>"
+  },
+  {
+    "file": "initialize.response.json",
+    "schema": "jsonrpc.json#/$defs/SuccessResponse",
+    "result_schema": "methods/lifecycle.json#/$defs/initialize.result",
+    "type": "Response<InitializeResult>"
+  },
+  {
+    "file": "account.start.request.json",
+    "schema": "jsonrpc.json#/$defs/Request",
+    "params_schema": "methods/lifecycle.json#/$defs/account.start.params",
+    "type": "Request<AccountStartParams>"
+  },
+  {
+    "file": "message.json",
+    "schema": "dto/message.json#/$defs/Message",
+    "type": "Message"
+  },
+  {
+    "file": "conversation.json",
+    "schema": "dto/conversation.json#/$defs/Conversation",
+    "type": "Conversation"
+  },
+  {
+    "file": "event.messages.upsert.json",
+    "schema": "jsonrpc.json#/$defs/Notification",
+    "params_schema": "events.json#/$defs/messages.upsert",
+    "type": "Notification<Event>"
+  },
+  {
+    "file": "event.status.json",
+    "schema": "jsonrpc.json#/$defs/Notification",
+    "params_schema": "events.json#/$defs/status",
+    "type": "Notification<Event>"
+  },
+  {
+    "file": "event.auth_step.json",
+    "schema": "jsonrpc.json#/$defs/Notification",
+    "params_schema": "events.json#/$defs/auth.step",
+    "type": "Notification<Event>"
+  },
+  {
+    "file": "event.transfer_progress.request.json",
+    "schema": "jsonrpc.json#/$defs/Request",
+    "params_schema": "events.json#/$defs/transfer.progress",
+    "type": "Request<Event>"
+  },
+  {
+    "file": "error.flood_wait.json",
+    "schema": "jsonrpc.json#/$defs/ErrorResponse",
+    "type": "Response<Empty>"
+  },
+  {
+    "file": "error.not_supported.json",
+    "schema": "jsonrpc.json#/$defs/ErrorResponse",
+    "type": "Response<Empty>"
+  },
+  {
+    "file": "cancel.json",
+    "schema": "jsonrpc.json#/$defs/Notification",
+    "params_schema": "jsonrpc.json#/$defs/CancelParams",
+    "type": "Notification<CancelParams>"
+  },
+  {
+    "file": "messages.send.request.json",
+    "schema": "jsonrpc.json#/$defs/Request",
+    "params_schema": "methods/messages.json#/$defs/messages.send.params",
+    "type": "Request<MessagesSendParams>"
+  },
+  {
+    "file": "messages.send.response.json",
+    "schema": "jsonrpc.json#/$defs/SuccessResponse",
+    "result_schema": "methods/messages.json#/$defs/messages.send.result",
+    "type": "Response<MessageResult>"
+  }
+]

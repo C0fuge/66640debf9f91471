@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/profile.json",
+  "title": "Profile",
+  "$defs": {
+    "Profile": {
+      "description": "This account's own profile, or another user's full card.",
+      "type": "object",
+      "required": ["user_id", "display_name"],
+      "properties": {
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "display_name": { "type": "string" },
+        "first_name": { "type": ["string", "null"] },
+        "last_name": { "type": ["string", "null"] },
+        "username": { "type": ["string", "null"] },
+        "phone": { "type": ["string", "null"] },
+        "bio": { "type": ["string", "null"] },
+        "avatar_path": { "type": ["string", "null"] },
+        "birthday": {
+          "description": "YYYY-MM-DD, or --MM-DD when the year is hidden.",
+          "type": ["string", "null"],
+          "pattern": "^(\\d{4}|-)-\\d{2}-\\d{2}$"
+        },
+        "is_blocked": { "type": ["boolean", "null"] },
+        "is_contact": { "type": ["boolean", "null"] },
+        "is_premium": { "type": ["boolean", "null"] },
+        "common_chats_count": { "type": ["integer", "null"], "minimum": 0 },
+        "status": { "anyOf": [ { "$ref": "presence.json#/$defs/OnlineStatus" }, { "type": "null" } ] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

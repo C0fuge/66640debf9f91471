@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/contacts.json",
+  "title": "Contact, profile, privacy, session and account methods",
+  "$defs": {
+    "lookup.username.params": {
+      "type": "object",
+      "required": ["account_id", "username"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "username": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "lookup.username.result": {
+      "type": "object",
+      "properties": {
+        "contact": { "anyOf": [ { "$ref": "../dto/contact.json#/$defs/Contact" }, { "type": "null" } ] },
+        "conversation": { "anyOf": [ { "$ref": "../dto/conversation.json#/$defs/Conversation" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "lookup.phone.params": {
+      "type": "object",
+      "required": ["account_id", "phone"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "phone": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "lookup.phone.result": {
+      "type": "object",
+      "properties": {
+        "contact": { "anyOf": [ { "$ref": "../dto/contact.json#/$defs/Contact" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "ContactsResult": {
+      "type": "object",
+      "required": ["contacts"],
+      "properties": {
+        "contacts": { "type": "array", "items": { "$ref": "../dto/contact.json#/$defs/Contact" } },
+        "next_cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "contacts.list.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "contacts.list.result": { "$ref": "#/$defs/ContactsResult" },
+    "contacts.set.params": {
+      "type": "object",
+      "required": ["account_id", "user_id", "add"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "add": { "type": "boolean" },
+        "first_name": { "type": ["string", "null"] },
+        "last_name": { "type": ["string", "null"] },
+        "phone": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "contacts.set.result": { "$ref": "../common.json#/$defs/Empty" },
+    "ProfileResult": {
+      "type": "object",
+      "required": ["profile"],
+      "properties": { "profile": { "$ref": "../dto/profile.json#/$defs/Profile" } },
+      "additionalProperties": true
+    },
+    "contacts.info.params": { "$ref": "common.json#/$defs/UserParams" },
+    "contacts.info.result": { "$ref": "#/$defs/ProfileResult" },
+    "contacts.common_chats.params": {
+      "type": "object",
+      "required": ["account_id", "user_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "limit": { "anyOf": [ { "$ref": "../common.json#/$defs/Limit" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "contacts.common_chats.result": {
+      "type": "object",
+      "required": ["conversations"],
+      "properties": { "conversations": { "type": "array", "items": { "$ref": "../dto/conversation.json#/$defs/Conversation" } } },
+      "additionalProperties": true
+    },
+    "blocked.list.params": {
+      "type": "object",
+      "required": ["account_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "limit": { "anyOf": [ { "$ref": "../common.json#/$defs/Limit" }, { "type": "null" } ] },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "blocked.list.result": { "$ref": "#/$defs/ContactsResult" },
+    "blocked.set.params": {
+      "type": "object",
+      "required": ["account_id", "user_id", "blocked"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "blocked": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "blocked.set.result": { "$ref": "../common.json#/$defs/Empty" },
+
+    "profile.get.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "profile.get.result": { "$ref": "#/$defs/ProfileResult" },
+    "profile.update.params": {
+      "type": "object",
+      "required": ["account_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "first_name": { "type": ["string", "null"] },
+        "last_name": { "type": ["string", "null"] },
+        "bio": { "type": ["string", "null"] },
+        "username": { "type": ["string", "null"] },
+        "photo_path": { "type": ["string", "null"] },
+        "remove_photo": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "profile.update.result": { "$ref": "#/$defs/ProfileResult" },
+    "profile.photos.params": {
+      "type": "object",
+      "required": ["account_id", "user_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "limit": { "anyOf": [ { "$ref": "../common.json#/$defs/Limit" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "profile.photos.result": {
+      "type": "object",
+      "required": ["paths"],
+      "properties": { "paths": { "type": "array", "items": { "$ref": "../common.json#/$defs/Path" } } },
+      "additionalProperties": true
+    },
+    "stories.list.params": { "$ref": "common.json#/$defs/UserParams" },
+    "stories.list.result": {
+      "type": "object",
+      "required": ["stories"],
+      "properties": { "stories": { "type": "array", "items": { "$ref": "../dto/story.json#/$defs/Story" } } },
+      "additionalProperties": true
+    },
+
+    "privacy.get.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "privacy.get.result": {
+      "type": "object",
+      "required": ["rules"],
+      "properties": { "rules": { "type": "array", "items": { "$ref": "../dto/privacy.json#/$defs/PrivacyRule" } } },
+      "additionalProperties": true
+    },
+    "privacy.set.params": {
+      "type": "object",
+      "required": ["account_id", "key", "value"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "key": { "type": "string", "minLength": 1 },
+        "value": { "$ref": "../dto/privacy.json#/$defs/PrivacyValue" }
+      },
+      "additionalProperties": true
+    },
+    "privacy.set.result": { "$ref": "../common.json#/$defs/Empty" },
+    "two_factor.get.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "two_factor.get.result": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "hint": { "type": ["string", "null"] },
+        "has_recovery_email": { "type": ["boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "two_factor.set.params": {
+      "type": "object",
+      "required": ["account_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "current_password": { "type": ["string", "null"] },
+        "new_password": { "description": "Absent or empty = remove.", "type": ["string", "null"] },
+        "hint": { "type": ["string", "null"] },
+        "email": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "two_factor.set.result": { "$ref": "../common.json#/$defs/Empty" },
+
+    "sessions.list.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "sessions.list.result": {
+      "type": "object",
+      "required": ["sessions"],
+      "properties": { "sessions": { "type": "array", "items": { "$ref": "../dto/session.json#/$defs/Session" } } },
+      "additionalProperties": true
+    },
+    "sessions.terminate.params": {
+      "type": "object",
+      "required": ["account_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "session_id": { "description": "Absent = all other sessions.", "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "sessions.terminate.result": { "$ref": "../common.json#/$defs/Empty" },
+
+    "ghost.apply.params": {
+      "type": "object",
+      "required": ["account_id", "enabled"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "enabled": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "ghost.apply.result": { "$ref": "../common.json#/$defs/Empty" },
+    "account.sign_out.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "account.sign_out.result": { "$ref": "../common.json#/$defs/Empty" }
+  }
+}

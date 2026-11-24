@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/capabilities.json",
+  "title": "Contact Hub plugin API: capabilities",
+  "description": "The capability map returned by initialize. Each known key maps to true (default parameters) or a parameter object. Absent or false = not supported. Vendor keys x-<plugin-id>.<name> are allowed and ignored by the core. See docs/plugin-api.md section 14.",
+  "$defs": {
+    "CapabilityKey": {
+      "description": "Every capability key defined by API v1. The order groups them by area.",
+      "type": "string",
+      "enum": [
+        "messages.get",
+        "send.entities",
+        "send.schedule",
+        "send.silent",
+        "send.no_webpage",
+        "send.effects",
+        "quote_reply",
+        "comments.send",
+        "send.file",
+        "send.voice",
+        "send.video_note",
+        "send.spoiler",
+        "send.as_file",
+        "send.ttl",
+        "send.album",
+        "edit",
+        "edit.caption",
+        "edit.media",
+        "delete",
+        "delete.for_me",
+        "forward",
+        "forward.drop_author",
+        "pin",
+        "unpin",
+        "seen_by",
+        "translate",
+        "transcribe",
+        "history.jump_to_date",
+        "history.fill_gap",
+        "media.download",
+        "media.search",
+        "avatars",
+        "reactions.set",
+        "reactions.custom",
+        "paid.react",
+        "reactions.who",
+        "reactions.effects",
+        "reactions.unread",
+        "polls.create",
+        "polls.vote",
+        "polls.close",
+        "bots.commands",
+        "bots.buttons",
+        "read_receipts",
+        "typing",
+        "presence",
+        "mentions.unread",
+        "pins.list",
+        "drafts.sync",
+        "scheduled",
+        "scheduled.edit",
+        "replies.list",
+        "topics",
+        "topics.manage",
+        "topics.pin",
+        "chat.sync",
+        "chat.flags",
+        "chat.pin",
+        "chat.mute",
+        "chat.archive",
+        "chat.mark_unread",
+        "chat.clear",
+        "chat.leave",
+        "auto_delete",
+        "chat.reorder_pinned",
+        "folders",
+        "folders.manage",
+        "folders.edit",
+        "folders.rules",
+        "group.create",
+        "group.join_by_link",
+        "group.invite_link",
+        "group.edit",
+        "group.photo",
+        "group.permissions",
+        "group.slow_mode",
+        "members",
+        "members.search",
+        "members.ban",
+        "members.admin",
+        "members.invite",
+        "join_requests",
+        "lookup.username",
+        "lookup.phone",
+        "contacts.list",
+        "contacts.edit",
+        "contacts.info",
+        "common_chats",
+        "blocked",
+        "profile",
+        "profile.edit",
+        "profile.photos",
+        "stories",
+        "privacy",
+        "two_factor",
+        "sessions",
+        "ghost_mode",
+        "sign_out",
+        "auth.interactive",
+        "stickers",
+        "stickers.send",
+        "stickers.search",
+        "stickers.manage",
+        "stickers.favorites",
+        "stickers.play",
+        "gifs",
+        "gifs.send",
+        "gifs.search",
+        "custom_emoji",
+        "emoji.animated"
+      ]
+    },
+    "Flag": {
+      "description": "A capability without parameters: true, or an (ignored) empty object. false means absent.",
+      "oneOf": [{ "type": "boolean" }, { "type": "object", "additionalProperties": true }]
+    },
+    "SendEntitiesParams": {
+      "type": "object",
+      "properties": {
+        "types": {
+          "description": "Entity types the platform can send. Default: all.",
+          "type": "array",
+          "items": { "$ref": "dto/message.json#/$defs/EntityType" },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "SendFileParams": {
+      "type": "object",
+      "properties": { "max_bytes": { "type": "integer", "minimum": 1, "default": 2147483648 } },
+      "additionalProperties": true
+    },
+    "SendAlbumParams": {
+      "type": "object",
+      "properties": { "max": { "type": "integer", "minimum": 2, "default": 10 } },
+      "additionalProperties": true
+    },
+    "WindowParams": {
+      "description": "edit / delete: how long after sending the action is still allowed. null = no limit.",
+      "type": "object",
+      "properties": { "window_seconds": { "type": ["integer", "null"], "minimum": 0, "default": null } },
+      "additionalProperties": true
+    },
+    "MediaSearchParams": {
+      "type": "object",
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["photo", "video", "music", "voice", "document", "link", "gif", "round"]
+          },
+          "default": ["photo", "video", "music", "voice", "document", "link"],
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "ReactionsSetParams": {
+      "type": "object",
+      "properties": {
+        "max": {
+          "description": "Reactions one account may put on one message.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "PollsCreateParams": {
+      "type": "object",
+      "properties": {
+        "quiz": { "type": "boolean", "default": false },
+        "multiple": { "type": "boolean", "default": false },
+        "anonymous": {
+          "description": "Whether the anonymous switch is offered.",
+          "type": "boolean",
+          "default": false
+        },
+        "max_options": { "type": "integer", "minimum": 2, "default": 10 }
+      },
+      "additionalProperties": true
+    },
+    "TypingParams": {
+      "type": "object",
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": { "$ref": "dto/presence.json#/$defs/PresenceAction" },
+          "default": ["typing"],
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "ChatClearParams": {
+      "type": "object",
+      "properties": {
+        "revoke": {
+          "description": "Whether clearing for everyone is possible.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "ChoicesParams": {
+      "description": "auto_delete / group.slow_mode: the values (seconds) the platform accepts; 0 = off.",
+      "type": "object",
+      "properties": {
+        "choices": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "uniqueItems": true }
+      },
+      "additionalProperties": true
+    },
+    "GroupCreateParams": {
+      "type": "object",
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["group", "channel"] },
+          "default": ["group"],
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "KeysParams": {
+      "description": "group.permissions / privacy: the keys the platform knows.",
+      "type": "object",
+      "properties": { "keys": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true } },
+      "additionalProperties": true
+    },
+    "Capabilities": {
+      "type": "object",
+      "properties": {
+        "send.entities": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/SendEntitiesParams" }] },
+        "send.file": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/SendFileParams" }] },
+        "send.album": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/SendAlbumParams" }] },
+        "edit": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/WindowParams" }] },
+        "delete": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/WindowParams" }] },
+        "media.search": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/MediaSearchParams" }] },
+        "reactions.set": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/ReactionsSetParams" }] },
+        "polls.create": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/PollsCreateParams" }] },
+        "typing": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/TypingParams" }] },
+        "chat.clear": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/ChatClearParams" }] },
+        "auto_delete": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/ChoicesParams" }] },
+        "group.slow_mode": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/ChoicesParams" }] },
+        "group.create": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/GroupCreateParams" }] },
+        "group.permissions": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/KeysParams" }] },
+        "privacy": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/KeysParams" }] }
+      },
+      "additionalProperties": { "$ref": "#/$defs/Flag" },
+      "description": "Keys not in CapabilityKey (vendor x-<plugin-id>.<name> keys, or keys from a newer minor version) are allowed and ignored by an older core."
+    }
+  }
+}

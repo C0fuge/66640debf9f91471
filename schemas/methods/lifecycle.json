@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/lifecycle.json",
+  "title": "Lifecycle methods (required)",
+  "$defs": {
+    "initialize.params": {
+      "type": "object",
+      "required": ["api_version", "core_version", "plugin_dir", "locale", "log_level"],
+      "properties": {
+        "api_version": { "description": "The API version the core speaks.", "$ref": "../common.json#/$defs/Semver" },
+        "core_version": { "type": "string" },
+        "plugin_dir": { "$ref": "../common.json#/$defs/Path" },
+        "locale": { "description": "BCP 47.", "type": "string", "minLength": 2 },
+        "log_level": { "type": "string", "enum": ["error", "warn", "info", "debug", "trace"] }
+      },
+      "additionalProperties": true
+    },
+    "initialize.result": {
+      "type": "object",
+      "required": ["api_version", "capabilities"],
+      "properties": {
+        "api_version": {
+          "description": "The API version the plugin implements.",
+          "$ref": "../common.json#/$defs/Semver"
+        },
+        "capabilities": { "$ref": "../capabilities.json#/$defs/Capabilities" },
+        "plugin_version": { "anyOf": [{ "$ref": "../common.json#/$defs/Semver" }, { "type": "null" }] }
+      },
+      "additionalProperties": true
+    },
+    "shutdown.params": { "type": "object", "additionalProperties": true },
+    "shutdown.result": { "$ref": "../common.json#/$defs/Empty" },
+    "ping.params": { "type": "object", "additionalProperties": true },
+    "ping.result": {
+      "type": "object",
+      "properties": { "busy": { "type": ["boolean", "null"] } },
+      "additionalProperties": true
+    },
+    "AutoDownload": {
+      "description": "What the plugin may fetch without being asked. 0 bytes = never.",
+      "type": "object",
+      "required": ["photos", "videos_max_bytes", "files_max_bytes", "voice"],
+      "properties": {
+        "photos": { "type": "boolean" },
+        "videos_max_bytes": { "type": "integer", "minimum": 0 },
+        "files_max_bytes": { "type": "integer", "minimum": 0 },
+        "voice": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "account.start.params": {
+      "type": "object",
+      "required": ["account_id", "settings", "secrets", "state_dir", "cache_dir", "ghost", "auto_download"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "settings": {
+          "description": "settings_schema values with secrets merged in.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "secrets": {
+          "description": "Values stored via secrets.set.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "state_dir": { "$ref": "../common.json#/$defs/Path" },
+        "cache_dir": { "$ref": "../common.json#/$defs/Path" },
+        "ghost": { "type": "boolean" },
+        "auto_download": { "$ref": "#/$defs/AutoDownload" }
+      },
+      "additionalProperties": true
+    },
+    "account.start.result": { "$ref": "../common.json#/$defs/Empty" },
+    "account.stop.params": { "$ref": "common.json#/$defs/AccountParams" },
+    "account.stop.result": { "$ref": "../common.json#/$defs/Empty" }
+  }
+}

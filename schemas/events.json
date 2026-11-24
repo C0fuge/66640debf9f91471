@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/events.json",
+  "title": "Contact Hub plugin API: events (plugin to core)",
+  "description": "Params of each event notification. The $defs name is the event (method) name. Every event carries account_id. See docs/plugin-api.md section 10.",
+  "$defs": {
+    "EventName": {
+      "type": "string",
+      "enum": [
+        "status",
+        "conversations.upsert",
+        "conversations.synced",
+        "messages.upsert",
+        "messages.deleted",
+        "message.edited",
+        "reaction.changed",
+        "contacts.upsert",
+        "folders.synced",
+        "topics.upsert",
+        "read.outbox",
+        "read.inbox",
+        "presence",
+        "draft.changed",
+        "avatar.ready",
+        "media.ready",
+        "transfer.progress",
+        "auth.step"
+      ]
+    },
+    "AccountState": {
+      "type": "string",
+      "enum": ["disconnected", "connecting", "auth_required", "connected", "unavailable", "error"]
+    },
+    "status": {
+      "type": "object",
+      "required": ["account_id", "state"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "state": { "$ref": "#/$defs/AccountState" },
+        "detail": { "type": ["string", "null"] },
+        "reconnecting": { "type": "boolean", "default": false },
+        "me": { "anyOf": [ { "$ref": "dto/contact.json#/$defs/Contact" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "conversations.upsert": {
+      "type": "object",
+      "required": ["account_id", "conversations"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "conversations": { "type": "array", "items": { "$ref": "dto/conversation.json#/$defs/Conversation" } }
+      },
+      "additionalProperties": true
+    },
+    "conversations.synced": {
+      "description": "Every chat the account currently has. Chats not listed are hidden by the core.",
+      "type": "object",
+      "required": ["account_id", "chat_ids"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "chat_ids": { "$ref": "common.json#/$defs/IdList" }
+      },
+      "additionalProperties": true
+    },
+    "messages.upsert": {
+      "type": "object",
+      "required": ["account_id", "messages"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "messages": { "type": "array", "items": { "$ref": "dto/message.json#/$defs/Message" } }
+      },
+      "additionalProperties": true
+    },
+    "messages.deleted": {
+      "type": "object",
+      "required": ["account_id", "message_ids"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "chat_id": { "anyOf": [ { "$ref": "common.json#/$defs/Id" }, { "type": "null" } ] },
+        "message_ids": { "$ref": "common.json#/$defs/IdList" }
+      },
+      "additionalProperties": true
+    },
+    "message.edited": {
+      "type": "object",
+      "required": ["account_id", "message"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "message": { "$ref": "dto/message.json#/$defs/Message" }
+      },
+      "additionalProperties": true
+    },
+    "reaction.changed": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id", "reactions"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "common.json#/$defs/Id" },
+        "message_id": { "$ref": "common.json#/$defs/Id" },
+        "reactions": { "type": "array", "items": { "$ref": "dto/message.json#/$defs/Reaction" } },
+        "reactors": { "type": "array", "items": { "$ref": "dto/message.json#/$defs/Reactor" } }
+      },
+      "additionalProperties": true
+    },
+    "contacts.upsert": {
+      "type": "object",
+      "required": ["account_id", "contacts"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "contacts": { "type": "array", "items": { "$ref": "dto/contact.json#/$defs/Contact" } }
+      },
+      "additionalProperties": true
+    },
+    "folders.synced": {
+      "type": "object",
+      "required": ["account_id", "folders"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "folders": { "type": "array", "items": { "$ref": "dto/folder.json#/$defs/Folder" } }
+      },
+      "additionalProperties": true
+    },
+    "topics.upsert": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "topics"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "common.json#/$defs/Id" },
+        "topics": { "type": "array", "items": { "$ref": "dto/topic.json#/$defs/Topic" } },
+        "complete": { "description": "true: this is every topic of the chat.", "type": "boolean", "default": false }
+      },
+      "additionalProperties": true
+    },
+    "read.outbox": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "max_message_id"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "common.json#/$defs/Id" }, { "type": "null" } ] },
+        "max_message_id": { "$ref": "common.json#/$defs/Id" }
+      },
+      "additionalProperties": true
+    },
+    "read.inbox": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "max_message_id"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "common.json#/$defs/Id" }, { "type": "null" } ] },
+        "max_message_id": { "$ref": "common.json#/$defs/Id" },
+        "unread_count": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "presence": {
+      "type": "object",
+      "required": ["account_id", "user_id"],
+      "anyOf": [ { "required": ["online"] }, { "required": ["action"] } ],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "user_id": { "$ref": "common.json#/$defs/Id" },
+        "chat_id": { "anyOf": [ { "$ref": "common.json#/$defs/Id" }, { "type": "null" } ] },
+        "topic_id": { "anyOf": [ { "$ref": "common.json#/$defs/Id" }, { "type": "null" } ] },
+        "online": { "anyOf": [ { "$ref": "dto/presence.json#/$defs/OnlineStatus" }, { "type": "null" } ] },
+        "action": { "anyOf": [ { "$ref": "dto/presence.json#/$defs/PresenceAction" }, { "type": "null" } ] },
+        "expires_at": { "anyOf": [ { "$ref": "common.json#/$defs/Timestamp" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "draft.changed": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "draft"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "common.json#/$defs/Id" }, { "type": "null" } ] },
+        "draft": { "$ref": "dto/draft.json#/$defs/Draft" }
+      },
+      "additionalProperties": true
+    },
+    "AvatarKind": { "type": "string", "enum": ["user", "chat"] },
+    "avatar.ready": {
+      "type": "object",
+      "required": ["account_id", "kind", "id", "path"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "kind": { "$ref": "#/$defs/AvatarKind" },
+        "id": { "$ref": "common.json#/$defs/Id" },
+        "path": { "$ref": "common.json#/$defs/Path" }
+      },
+      "additionalProperties": true
+    },
+    "media.ready": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id"],
+      "anyOf": [ { "required": ["thumb_path"] }, { "required": ["path"] } ],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "common.json#/$defs/Id" },
+        "message_id": { "$ref": "common.json#/$defs/Id" },
+        "thumb_path": { "type": ["string", "null"] },
+        "path": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "TransferDirection": { "type": "string", "enum": ["download", "upload"] },
+    "transfer.progress": {
+      "type": "object",
+      "required": ["account_id", "direction", "done_bytes"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "request_id": {
+          "description": "The id of the core request that caused this transfer.",
+          "anyOf": [ { "$ref": "jsonrpc.json#/$defs/RequestId" }, { "type": "null" } ]
+        },
+        "direction": { "$ref": "#/$defs/TransferDirection" },
+        "chat_id": { "anyOf": [ { "$ref": "common.json#/$defs/Id" }, { "type": "null" } ] },
+        "message_id": { "anyOf": [ { "$ref": "common.json#/$defs/Id" }, { "type": "null" } ] },
+        "done_bytes": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "auth.step": {
+      "type": "object",
+      "required": ["account_id", "step"],
+      "properties": {
+        "account_id": { "$ref": "common.json#/$defs/AccountId" },
+        "step": { "$ref": "dto/auth.json#/$defs/AuthStep" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

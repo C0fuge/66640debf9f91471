@@ -1,0 +1,6 @@
+{
+  "identifier": "desktop-main",
+  "description": "Subscribe to core invalidations in the local application window.",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

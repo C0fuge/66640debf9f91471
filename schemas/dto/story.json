@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/story.json",
+  "title": "Story",
+  "$defs": {
+    "Story": {
+      "type": "object",
+      "required": ["id", "user_id", "media"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "user_id": { "$ref": "../common.json#/$defs/Id" },
+        "media": { "$ref": "message.json#/$defs/Media" },
+        "caption": { "type": ["string", "null"] },
+        "entities": { "type": "array", "items": { "$ref": "message.json#/$defs/Entity" } },
+        "posted_at": { "anyOf": [{ "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" }] },
+        "expires_at": { "anyOf": [{ "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" }] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "messages.send",
+  "params": {
+    "account_id": "discord",
+    "chat_id": "4421",
+    "text": "On my way",
+    "reply_to": {
+      "message_id": "1189"
+    },
+    "silent": true,
+    "client_id": "c-1a2b"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/history.json",
+  "title": "History methods",
+  "$defs": {
+    "history.around.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "at", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "at": { "$ref": "../common.json#/$defs/Timestamp" },
+        "limit": { "$ref": "../common.json#/$defs/Limit" }
+      },
+      "additionalProperties": true
+    },
+    "history.around.result": {
+      "type": "object",
+      "required": ["messages"],
+      "properties": {
+        "messages": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Message" } },
+        "older_cursor": { "description": "For messages.fetch_recent.", "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] },
+        "newer_cursor": { "description": "For history.fill_gap.", "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "history.fill_gap.params": {
+      "description": "Messages newer than after_message_id (and older than before_message_id when given), oldest first.",
+      "type": "object",
+      "required": ["account_id", "chat_id", "after_message_id", "limit"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "after_message_id": { "$ref": "../common.json#/$defs/Id" },
+        "before_message_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "limit": { "$ref": "../common.json#/$defs/Limit" },
+        "cursor": { "anyOf": [ { "$ref": "../common.json#/$defs/Cursor" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "history.fill_gap.result": { "$ref": "common.json#/$defs/PagedMessagesResult" }
+  }
+}

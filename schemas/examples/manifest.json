@@ -1,0 +1,40 @@
+{
+  "id": "discord",
+  "name": "Discord",
+  "version": "0.3.1",
+  "api_version": "1.0.0",
+  "entry": [
+    "./venv/bin/python",
+    "-m",
+    "discord_plugin"
+  ],
+  "icon": "icon.svg",
+  "brand_color": "#5865F2",
+  "multi_account": true,
+  "auth_methods": [
+    "token",
+    "qr"
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "proxy": {
+        "type": "string",
+        "title": "SOCKS5 proxy",
+        "default": ""
+      },
+      "token": {
+        "type": "string",
+        "title": "User token",
+        "x-secret": true
+      }
+    }
+  },
+  "description": "Discord DMs, servers and group DMs through a user token.",
+  "homepage": "https://example.org/ch-discord",
+  "author": "Jane Doe",
+  "license": "MIT",
+  "env": {
+    "PYTHONUNBUFFERED": "1"
+  }
+}

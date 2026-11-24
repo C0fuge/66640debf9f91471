@@ -1,0 +1,24 @@
+{
+  "id": "telegram",
+  "name": "Telegram",
+  "version": "0.1.0",
+  "api_version": "1.0.0",
+  "entry": ["./.venv/bin/python", "-m", "telegram_plugin"],
+  "brand_color": "#229ED9",
+  "multi_account": true,
+  "auth_methods": ["phone_code", "qr"],
+  "settings_schema": {
+    "type": "object",
+    "required": ["api_id", "api_hash"],
+    "properties": {
+      "api_id": {"type": "integer", "title": "Telegram API ID", "minimum": 1, "maximum": 2147483647},
+      "api_hash": {"type": "string", "title": "Telegram API hash", "x-secret": true},
+      "proxy_host": {"type": "string", "title": "SOCKS5 proxy host"},
+      "proxy_port": {"type": "integer", "title": "SOCKS5 proxy port", "minimum": 1, "maximum": 65535, "default": 1080},
+      "proxy_username": {"type": "string", "title": "Proxy username", "x-secret": true},
+      "proxy_password": {"type": "string", "title": "Proxy password", "x-secret": true}
+    }
+  },
+  "description": "Telegram user accounts over MTProto.",
+  "license": "MIT"
+}

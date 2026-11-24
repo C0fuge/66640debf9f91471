@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": "p-17",
+  "method": "transfer.progress",
+  "params": {
+    "account_id": "discord",
+    "request_id": 42,
+    "direction": "download",
+    "chat_id": "4421",
+    "message_id": "1189",
+    "done_bytes": 65536,
+    "total_bytes": 184233
+  }
+}

@@ -1,0 +1,21 @@
+[project]
+name = "contact-hub-sdk"
+version = "1.0.0"
+description = "Python SDK for Contact Hub messenger plugins (plugin API v1)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "jsonschema>=4.18", "referencing>=0.30"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/contact_hub_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

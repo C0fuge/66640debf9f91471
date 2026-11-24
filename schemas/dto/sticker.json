@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/sticker.json",
+  "title": "Sticker, StickerPack and Gif",
+  "$defs": {
+    "Sticker": {
+      "type": "object",
+      "required": ["id", "format"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "pack_id": { "anyOf": [{ "$ref": "../common.json#/$defs/Id" }, { "type": "null" }] },
+        "emoji": { "type": ["string", "null"] },
+        "format": { "$ref": "message.json#/$defs/StickerFormat" },
+        "thumb_path": { "type": ["string", "null"] },
+        "path": { "type": ["string", "null"] },
+        "width": { "type": ["integer", "null"], "minimum": 0 },
+        "height": { "type": ["integer", "null"], "minimum": 0 },
+        "premium": { "type": "boolean", "default": false },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    },
+    "StickerPackKind": { "type": "string", "enum": ["stickers", "emoji"] },
+    "StickerPack": {
+      "type": "object",
+      "required": ["id", "title", "kind"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "title": { "type": "string" },
+        "short_name": { "type": ["string", "null"] },
+        "count": { "type": "integer", "minimum": 0, "default": 0 },
+        "kind": { "$ref": "#/$defs/StickerPackKind" },
+        "installed": { "type": ["boolean", "null"] },
+        "thumb_path": { "type": ["string", "null"] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    },
+    "Gif": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "thumb_path": { "type": ["string", "null"] },
+        "path": { "type": ["string", "null"] },
+        "width": { "type": ["integer", "null"], "minimum": 0 },
+        "height": { "type": ["integer", "null"], "minimum": 0 },
+        "duration": { "type": ["integer", "null"], "minimum": 0 },
+        "mime": { "type": ["string", "null"] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

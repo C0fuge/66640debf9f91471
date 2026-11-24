@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/common.json",
+  "title": "Contact Hub plugin API: shared primitives",
+  "description": "Primitives referenced by every other schema. See docs/plugin-api.md section 8.",
+  "$defs": {
+    "Id": {
+      "description": "An opaque identifier: non-empty UTF-8, at most 256 bytes. Never assume numeric form or ordering.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "AccountId": {
+      "description": "The core-assigned account id. Opaque to plugins.",
+      "$ref": "#/$defs/Id"
+    },
+    "Timestamp": {
+      "description": "RFC 3339 UTC date-time. Producers emit exactly YYYY-MM-DDTHH:MM:SS.sssZ; consumers accept any RFC 3339 date-time.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "Cursor": {
+      "description": "An opaque paging cursor chosen by the plugin.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "Limit": {
+      "description": "Page size for list methods.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
+    "Path": {
+      "description": "An absolute filesystem path. Paths emitted by a plugin must lie inside its cache_dir or state_dir.",
+      "type": "string",
+      "minLength": 1
+    },
+    "Color": {
+      "description": "A CSS hex colour, #RRGGBB.",
+      "type": "string",
+      "pattern": "^#[0-9A-Fa-f]{6}$"
+    },
+    "Semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+    },
+    "Ext": {
+      "description": "Platform-specific extension data, keyed by plugin id. Stored verbatim, never interpreted by the core.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]{1,31}$" },
+      "additionalProperties": { "type": "object" }
+    },
+    "IdList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Id" }
+    },
+    "Empty": {
+      "description": "An empty result. Unknown fields are ignored for forward compatibility.",
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

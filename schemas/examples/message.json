@@ -1,0 +1,63 @@
+{
+  "id": "1189",
+  "chat_id": "4421",
+  "direction": "in",
+  "sent_at": "2026-10-19T14:03:27.512Z",
+  "sender_id": "777000",
+  "sender_name": "Jane Doe",
+  "text": "Look at this 🙂 https://example.org",
+  "entities": [
+    {
+      "type": "bold",
+      "offset": 0,
+      "length": 4
+    },
+    {
+      "type": "url",
+      "offset": 15,
+      "length": 19
+    }
+  ],
+  "media": {
+    "kind": "photo",
+    "mime": "image/jpeg",
+    "bytes": 184233,
+    "width": 1280,
+    "height": 960,
+    "thumb_path": "/home/user/.cache/contact-hub-ng/accounts/discord/4421/1189.thumb.jpg",
+    "has_spoiler": false
+  },
+  "reply_to": {
+    "message_id": "1180",
+    "quote_text": "earlier",
+    "quote_offset": 3,
+    "preview": "Something said earlier"
+  },
+  "reactions": [
+    {
+      "key": {
+        "emoji": "❤"
+      },
+      "count": 2,
+      "mine": true
+    },
+    {
+      "key": {
+        "custom_emoji_id": "5368324170671202286"
+      },
+      "count": 1,
+      "mine": false
+    }
+  ],
+  "views": 41,
+  "edited": false,
+  "delivery": null,
+  "is_scheduled": false,
+  "mentioned": false,
+  "ext": {
+    "discord": {
+      "guild_id": "99",
+      "flags": 0
+    }
+  }
+}

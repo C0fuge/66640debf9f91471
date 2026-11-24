@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/dto/contact.json",
+  "title": "Contact",
+  "$defs": {
+    "Contact": {
+      "description": "A user on the platform as seen by this account. docs/plugin-api.md section 9.1.",
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "../common.json#/$defs/Id" },
+        "display_name": { "type": ["string", "null"] },
+        "first_name": { "type": ["string", "null"] },
+        "last_name": { "type": ["string", "null"] },
+        "username": { "description": "Without the @.", "type": ["string", "null"] },
+        "phone": { "description": "E.164 where possible.", "type": ["string", "null"] },
+        "avatar_path": { "type": ["string", "null"] },
+        "is_bot": { "type": ["boolean", "null"] },
+        "is_contact": { "type": ["boolean", "null"] },
+        "is_premium": { "type": ["boolean", "null"] },
+        "is_verified": { "type": ["boolean", "null"] },
+        "is_deleted": { "type": ["boolean", "null"] },
+        "bio": { "type": ["string", "null"] },
+        "status": { "anyOf": [ { "$ref": "presence.json#/$defs/OnlineStatus" }, { "type": "null" } ] },
+        "ext": { "$ref": "../common.json#/$defs/Ext" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

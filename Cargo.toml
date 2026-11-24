@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/ch-protocol", "crates/ch-plugin-sdk", "crates/ch-db", "crates/ch-core", "crates/ch-conformance", "crates/ch-cli", "crates/ch-app", "app/src-tauri"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/C0fuge/66640debf9f91471"
+rust-version = "1.99"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+thiserror = "2.0"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+jsonschema = { version = "0.59", default-features = false }
+ch-protocol = { path = "crates/ch-protocol", version = "1.0.0" }
+tokio = { version = "1.53", features = ["rt", "rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
+tokio-util = "0.7.20"
+tracing = "0.1.44"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tempfile = "3"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
+async-trait = "0.1"
+libc = "0.2"
+keyring = { version = "3.6", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

@@ -1,0 +1,16 @@
+# The inspected official rust:1-slim image (Rust 1.99.0), pinned to its digest.
+FROM docker.io/library/rust@sha256:2752b332db73fdbb7dc576f06c82ed1f312005784ef913d7e04a28f5f55dc581
+COPY --from=ghcr.io/astral-sh/uv:0.13.9 /uv /uvx /usr/local/bin/
+
+# No desktop session, D-Bus daemon, keyring service, or account credentials.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential ca-certificates git pkg-config libdbus-1-dev python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add clippy rustfmt \
+    && python3 -c 'import subprocess, sys; assert sys.version_info >= (3, 12), sys.version; assert subprocess.check_output(["rustc", "--version"], text=True).startswith("rustc 1.99.0 "); assert subprocess.check_output(["uv", "--version"], text=True).startswith("uv 0.13.9 ")' \
+    && cargo clippy --version \
+    && cargo fmt --version
+
+WORKDIR /work
+ENTRYPOINT ["python3", "/verification/suite.py"]

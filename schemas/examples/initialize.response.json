@@ -1,0 +1,69 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "api_version": "1.0.0",
+    "plugin_version": "0.3.1",
+    "capabilities": {
+      "edit": {
+        "window_seconds": 172800
+      },
+      "delete": true,
+      "delete.for_me": true,
+      "send.file": {
+        "max_bytes": 26214400
+      },
+      "send.album": {
+        "max": 10
+      },
+      "send.entities": {
+        "types": [
+          "bold",
+          "italic",
+          "code",
+          "pre",
+          "url",
+          "text_url",
+          "spoiler"
+        ]
+      },
+      "polls.create": {
+        "quiz": true,
+        "multiple": true,
+        "anonymous": true,
+        "max_options": 10
+      },
+      "reactions.set": {
+        "max": 3
+      },
+      "reactions.who": true,
+      "typing": {
+        "actions": [
+          "typing",
+          "recording_voice",
+          "uploading"
+        ]
+      },
+      "media.download": true,
+      "media.search": {
+        "kinds": [
+          "photo",
+          "video",
+          "document",
+          "link"
+        ]
+      },
+      "avatars": true,
+      "presence": true,
+      "read_receipts": true,
+      "chat.sync": true,
+      "chat.flags": true,
+      "chat.pin": true,
+      "chat.mute": true,
+      "auth.interactive": true,
+      "x-discord.slash_commands": {
+        "guilds_only": true
+      }
+    }
+  }
+}

@@ -1,0 +1,97 @@
+.thread-pane {
+  display: flex;
+  flex: 1 1 0%;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  color: var(--text);
+}
+
+.thread-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.thread-avatar {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--bubble-in);
+  border: 1px solid var(--border);
+  font-weight: 650;
+  font-size: 15px;
+}
+
+.thread-heading { min-width: 0; flex: 1; }
+.thread-heading h2 { margin: 0 0 2px; font-size: 1rem; font-weight: 650; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.thread-heading > span, .thread-empty, .thread-secondary { color: var(--muted); }
+.thread-heading > span { font-size: .8rem; overflow-wrap: anywhere; }
+
+.thread-action, .thread-status button, .thread-latest, .thread-page-button {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  padding: 5px 11px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-size: .8125rem;
+}
+
+.thread-pane button:disabled { cursor: default; opacity: .6; }
+.thread-stage { flex: 1 1 0%; min-height: 0; position: relative; }
+.thread-scroll { position: absolute; inset: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; }
+.thread-virtual { position: relative; width: 100%; }
+.thread-row { position: absolute; top: 0; inset-inline: 0; padding: 3px clamp(12px, 3vw, 34px); }
+.thread-day, .thread-page-button { display: table; margin: 7px auto; }
+.thread-day { font-size: .75rem; padding: 4px 11px; background: var(--surface); border-radius: 99px; color: var(--muted); }
+.thread-bubble {
+  width: fit-content;
+  max-width: min(84%, 48rem);
+  padding: 8px 12px 6px;
+  border: 1px solid var(--border);
+  border-radius: 13px 13px 13px 4px;
+  overflow-wrap: anywhere;
+}
+.thread-bubble-in { background: var(--bubble-in); }
+.thread-bubble-out { background: var(--bubble-out); }
+.thread-sender { font-size: .79rem; font-weight: 650; margin-bottom: 2px; }
+.thread-message-body { white-space: pre-wrap; line-height: 1.45; unicode-bidi: plaintext; }
+.thread-message-meta { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 2px; font-size: .69rem; color: var(--muted); }
+.thread-media { color: var(--muted); font-size: .85rem; font-style: italic; }
+.thread-empty { display: grid; place-items: center; text-align: center; padding: 24px 12px; }
+.thread-pane.thread-empty { display: grid; }
+.thread-latest { position: absolute; right: 14px; bottom: 12px; box-shadow: 0 2px 8px #0002; }
+.thread-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; font-size: .82rem; background: var(--surface); }
+
+.thread-message-body pre { margin: .25em 0; white-space: pre-wrap; }
+.thread-message-body blockquote {
+  margin: .25em 0;
+  padding-inline-start: .7em;
+  border-inline-start: 3px solid var(--accent);
+}
+.thread-quote > summary { cursor: pointer; color: var(--muted); }
+.thread-quote > summary::after { content: attr(aria-label); }
+.thread-reference { color: var(--accent); }
+.thread-spoiler {
+  max-width: 100%;
+  border: 0;
+  border-radius: .25em;
+  padding: 0 .12em;
+  background: var(--muted);
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  white-space: inherit;
+  overflow-wrap: anywhere;
+  vertical-align: baseline;
+}
+.thread-spoiler > span { visibility: hidden; }

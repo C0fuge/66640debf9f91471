@@ -1,0 +1,31 @@
+{
+  "id": "fake",
+  "name": "Fake",
+  "version": "0.1.0",
+  "api_version": "1.0.0",
+  "entry": ["./.venv/bin/python", "-m", "fake_plugin"],
+  "icon": "icon.svg",
+  "brand_color": "#8E44AD",
+  "multi_account": true,
+  "auth_methods": ["phone_code", "qr"],
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "seed": {"type": "integer", "title": "Seed", "description": "Same seed, same chats, messages and media.", "default": 1, "minimum": 0, "maximum": 2147483647, "x-order": 1, "x-group": "Data"},
+      "chats": {"type": "integer", "title": "Number of chats", "description": "Saved Messages, a bot, a group, a channel and a forum come first; the rest are private chats (every 7th a group).", "default": 12, "minimum": 1, "maximum": 500, "x-order": 2, "x-group": "Data"},
+      "messages_per_chat": {"type": "integer", "title": "Messages per chat", "default": 60, "minimum": 0, "maximum": 2000, "x-order": 3, "x-group": "Data"},
+      "latency_ms": {"type": "integer", "title": "Latency (ms)", "description": "Added to every request and to connecting.", "default": 0, "minimum": 0, "maximum": 60000, "x-order": 10, "x-group": "Network"},
+      "transfer_chunk_ms": {"type": "integer", "title": "Transfer delay per 64 KiB (ms)", "description": "Slows downloads and uploads so progress and cancel can be seen.", "default": 40, "minimum": 0, "maximum": 10000, "x-order": 11, "x-group": "Network"},
+      "fail_rate": {"type": "number", "title": "Random failure rate", "description": "Share of requests (0..1) failing with FLOOD_WAIT or NETWORK, drawn from a seeded RNG.", "default": 0, "minimum": 0, "maximum": 1, "x-order": 12, "x-group": "Network"},
+      "fail_script": {"type": "string", "title": "Scripted failures", "description": "method[#n]=CODE[:seconds], comma separated. Without #n every call fails. Example: messages.send#2=FLOOD_WAIT:7, media.download=NETWORK", "default": "", "x-order": 13, "x-group": "Network", "x-widget": "textarea"},
+      "start_state": {"type": "string", "title": "Start state", "enum": ["auto", "connected", "unavailable", "error"], "description": "auto: sign in unless a session is stored; connected: skip sign-in.", "default": "auto", "x-order": 14, "x-group": "Network"},
+      "live_interval_ms": {"type": "integer", "title": "Live events every (ms)", "description": "0 = off. Incoming messages, typing, presence, read receipts, reactions and edits.", "default": 0, "minimum": 0, "maximum": 3600000, "x-order": 20, "x-group": "Live"},
+      "require_2fa": {"type": "boolean", "title": "Ask for a 2FA password", "default": true, "x-order": 30, "x-group": "Sign-in"},
+      "qr_scan_ms": {"type": "integer", "title": "QR is 'scanned' after (ms)", "default": 3000, "minimum": 0, "maximum": 600000, "x-order": 31, "x-group": "Sign-in"}
+    }
+  },
+  "description": "Deterministic fake messenger for UI and end-to-end tests. Test code 12345, 2FA password 'fake'.",
+  "author": "Contact Hub",
+  "license": "MIT",
+  "env": {"PYTHONUNBUFFERED": "1"}
+}

@@ -1,0 +1,25 @@
+target/
+node_modules/
+dist/
+*.session
+*.session-journal
+.env
+__pycache__/
+.venv/
+venv/
+.worktrees/
+
+# Never publish runtime state or credentials
+.env*
+!.env.example
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.session*
+auth.json
+credentials.json
+.codex/
+.cloud-output/
+.cloud-state/
+*.log

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Contact Hub",
+  "version": "0.1.0",
+  "identifier": "org.contacthub.desktop",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://127.0.0.1:5173"
+  },
+  "app": {
+    "windows": [{"label":"main","title":"Contact Hub","width":1160,"height":760,"minWidth":640,"minHeight":460}],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-src 'none'"
+    }
+  },
+  "bundle": {"active":false,"icon":["icons/icon.png"]}
+}

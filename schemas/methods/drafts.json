@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contacthub.dev/schemas/v1/methods/drafts.json",
+  "title": "Draft and scheduled-message methods",
+  "$defs": {
+    "drafts.save.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "draft"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "topic_id": { "anyOf": [ { "$ref": "../common.json#/$defs/Id" }, { "type": "null" } ] },
+        "draft": { "$ref": "../dto/draft.json#/$defs/Draft" }
+      },
+      "additionalProperties": true
+    },
+    "drafts.save.result": { "$ref": "../common.json#/$defs/Empty" },
+    "scheduled.list.params": { "$ref": "common.json#/$defs/ChatParams" },
+    "scheduled.list.result": { "$ref": "common.json#/$defs/MessagesResult" },
+    "scheduled.edit.params": {
+      "type": "object",
+      "required": ["account_id", "chat_id", "message_id"],
+      "properties": {
+        "account_id": { "$ref": "../common.json#/$defs/AccountId" },
+        "chat_id": { "$ref": "../common.json#/$defs/Id" },
+        "message_id": { "$ref": "../common.json#/$defs/Id" },
+        "text": { "type": ["string", "null"] },
+        "entities": { "type": "array", "items": { "$ref": "../dto/message.json#/$defs/Entity" } },
+        "schedule_at": { "anyOf": [ { "$ref": "../common.json#/$defs/Timestamp" }, { "type": "null" } ] }
+      },
+      "additionalProperties": true
+    },
+    "scheduled.edit.result": { "$ref": "common.json#/$defs/OptionalMessageResult" },
+    "scheduled.delete.params": { "$ref": "common.json#/$defs/ChatMessagesParams" },
+    "scheduled.delete.result": { "$ref": "../common.json#/$defs/Empty" },
+    "scheduled.send_now.params": { "$ref": "common.json#/$defs/ChatMessagesParams" },
+    "scheduled.send_now.result": { "$ref": "../common.json#/$defs/Empty" }
+  }
+}
