@@ -17,10 +17,12 @@ mkdir -p "$CH_DATA_DIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$CH_DATA_DIR" "$XDG_RUNTIME_DIR"
 case "${1:-}" in
   quick)
-    (cd app/ui && npm ci --no-audit --no-fund && npm test && npm run build)
+    result=0
+    (cd app/ui && npm ci --no-audit --no-fund && npm test && npm run build) || result=1
     for package in sdk/python plugins/fake plugins/telegram; do
-      (cd "$package" && uv sync --locked && uv run --no-sync pytest -q)
+      (cd "$package" && uv sync --locked && uv run --no-sync pytest -q) || result=1
     done
+    exit "$result"
     ;;
   rust)
     (cd app/ui && npm ci --no-audit --no-fund && npm run build)
