@@ -24,6 +24,7 @@ class Stub:
         self.attempt = 0
         self.handlers = []
         self.sent = {}
+        self.messages = {i: row(i) for i in range(1, 11)}
 
     async def connect(self):
         self.attempt += 1
@@ -82,9 +83,17 @@ class Stub:
             asyncio.get_running_loop().call_later(.15, self._lost.set_result, None)
 
     async def get_input_entity(self, chat):
-        if chat != tl.PeerUser(17):
-            raise ValueError("synthetic-private-error")
-        return tl.InputPeerUser(17, 0)
+        if chat in (tl.PeerUser(17), tl.PeerUser(18)):
+            return tl.InputPeerUser(chat.user_id, 0)
+        if chat == tl.PeerChannel(8):
+            return tl.InputPeerChannel(8, 0)
+        raise ValueError("synthetic-private-error")
+
+    async def get_messages(self, peer, *, ids):
+        # Simulate Telegram's account-wide private-chat lookup.
+        if ids == 99:
+            return row(99, tl.PeerUser(18))
+        return self.messages.get(ids)
 
     async def iter_messages(self, peer, *, limit, reply_to=None, offset_id=0, offset_date=None, reverse=False, min_id=0, max_id=0):
         ids = list(range(1, 11))
@@ -99,6 +108,34 @@ class Stub:
     async def __call__(self, req):
         if isinstance(req, functions.contacts.GetContactsRequest):
             return tl.contacts.Contacts([tl.Contact(17, True)], 1, [USER])
+        if isinstance(req, functions.messages.EditMessageRequest):
+            item = self.messages[req.id]
+            if item.message == req.message and item.entities == req.entities:
+                raise errors.MessageNotModifiedError(None)
+            item.message, item.entities, item.edit_date = req.message, req.entities, NOW
+            return tl.Updates([tl.UpdateEditMessage(item, 1, 1)], [], [], NOW, 1)
+        if isinstance(req, functions.messages.DeleteMessagesRequest):
+            for mid in req.id:
+                self.messages.pop(mid, None)
+            return tl.messages.AffectedMessages(1, 1)
+        if isinstance(req, functions.messages.ForwardMessagesRequest):
+            updates = []
+            for mid, random in zip(req.id, req.random_id):
+                new_id = 20 + len(self.messages)
+                item = row(new_id, tl.PeerUser(req.to_peer.user_id), out=True,
+                           fwd_from=None if req.drop_author else tl.MessageFwdHeader(NOW, from_id=PEER))
+                self.messages[new_id] = item
+                updates.extend([tl.UpdateMessageID(new_id, random), tl.UpdateNewMessage(item, 1, 1)])
+            return tl.Updates(updates, [], [], NOW, 1)
+        if isinstance(req, functions.messages.UpdatePinnedMessageRequest):
+            self.messages[req.id].pinned = not req.unpin
+            return tl.Updates([], [], [], NOW, 1)
+        if isinstance(req, functions.messages.UnpinAllMessagesRequest):
+            return tl.messages.AffectedHistory(1, 1, 0)
+        if isinstance(req, (functions.messages.ReadHistoryRequest, functions.channels.ReadHistoryRequest,
+                            functions.messages.ReadDiscussionRequest, functions.messages.SetTypingRequest,
+                            functions.messages.SaveDraftRequest)):
+            return True
         assert isinstance(req, functions.messages.SendMessageRequest)
         if req.message == "wait":
             raise errors.FloodWaitError(None, capture=23)

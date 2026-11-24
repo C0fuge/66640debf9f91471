@@ -3,7 +3,7 @@ import asyncio
 from contact_hub_sdk import Plugin, errors as rpc, method
 from contact_hub_sdk import types as dto
 
-from . import history, sync
+from . import actions, activity, history, sync
 from .auth import sign_in
 from .mapping import SEND_ENTITY_TYPES, contact
 from .send import send
@@ -14,6 +14,9 @@ class TelegramPlugin(Plugin):
     capabilities = {
         "chat.sync": True, "contacts.list": True, "history.jump_to_date": True, "history.fill_gap": True,
         "send.entities": {"types": SEND_ENTITY_TYPES}, "send.silent": True, "send.no_webpage": True,
+        "messages.get": True, "edit": True, "edit.caption": True, "delete": True, "delete.for_me": True,
+        "forward": True, "forward.drop_author": True, "pin": True, "unpin": True,
+        "read_receipts": True, "typing": {"actions": list(activity.TYPING)}, "drafts.sync": True,
     }
 
     def __init__(self, factory=make_client):
@@ -28,7 +31,11 @@ class TelegramPlugin(Plugin):
                 raise rpc.InvalidParams("The state directory is already open.", field="state_dir")
             client = self.factory(path, *config)
             account.data.update(path=path.resolve(), client=client, signed_in=asyncio.Event(), sync_lock=asyncio.Lock())
-            sync.bind_updates(account, client)
+            try:
+                sync.bind_updates(account, client)
+            except BaseException:
+                await disconnect(client)
+                raise
         await account.status("connecting")
         account.spawn(self._supervise(account))
 
@@ -141,6 +148,51 @@ class TelegramPlugin(Plugin):
         with platform_errors():
             result = await send(self.ready(account), params)
             # Link the outbox echo even when the stdio response is lost after dispatch.
-            if params.client_id:
+            if params.client_id is not None:
                 await account.messages_upsert([result.message])
             return result
+
+    @method("messages.get")
+    async def get(self, account, params):
+        with platform_errors():
+            return await actions.get(self.ready(account), params)
+
+    @method("messages.edit")
+    async def edit(self, account, params):
+        with platform_errors():
+            return await actions.edit(self.ready(account), params)
+
+    @method("messages.delete")
+    async def delete(self, account, params):
+        with platform_errors():
+            await actions.delete(self.ready(account), params)
+
+    @method("messages.forward")
+    async def forward(self, account, params):
+        with platform_errors():
+            return await actions.forward(self.ready(account), params)
+
+    @method("messages.pin")
+    async def pin(self, account, params):
+        with platform_errors():
+            await actions.pin(self.ready(account), params)
+
+    @method("messages.unpin")
+    async def unpin(self, account, params):
+        with platform_errors():
+            await actions.unpin(self.ready(account), params)
+
+    @method("read.send_receipt")
+    async def read_receipt(self, account, params):
+        with platform_errors():
+            await activity.read(self.ready(account), params)
+
+    @method("typing.send")
+    async def typing(self, account, params):
+        with platform_errors():
+            await activity.typing(self.ready(account), params)
+
+    @method("drafts.save")
+    async def draft(self, account, params):
+        with platform_errors():
+            await activity.save_draft(self.ready(account), params)

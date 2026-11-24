@@ -41,7 +41,7 @@ def start(core, mode=1, name="a"):
 def test_wire_and_snapshot(core):
     VALIDATE(core.manifest, "manifest.json")
     caps = core.initialize()["capabilities"]
-    assert "auth.interactive" in caps and "messages.edit" not in caps
+    assert "auth.interactive" in caps and caps["edit"] is True
     start(core)
     assert core.event("conversations.synced")["chat_ids"] == ["17"]
     assert core.event("contacts.upsert")["contacts"][0]["display_name"] == "Sample"
@@ -161,6 +161,7 @@ def test_history(core):
     assert ids(forward) == [7, 8]
     end = core.call("history.fill_gap", {**gap, "cursor": forward["next_cursor"]})
     assert ids(end) == [9] and not end.get("next_cursor")
+    assert core.error("history.fill_gap", {**gap, "before_message_id": "6"})["data"]["field"] == "before_message_id"
     assert ids(core.call("history.around", {**p, "at": "2000-01-01T00:00:00Z"})) == [3, 2, 1]
     assert ids(core.call("history.around", {**p, "at": "2050-01-01T00:00:00Z"})) == [10, 9, 8]
     assert core.shutdown() == 0
@@ -176,6 +177,8 @@ def test_send(core):
     echo = core.event("messages.upsert", where=lambda e: e["messages"][0].get("ext") is not None)
     assert echo["messages"][0] == sent
     assert core.call("messages.send", p)["message"]["id"] == sent["id"]
+    empty_key = core.call("messages.send", {**p, "client_id": ""})["message"]
+    assert empty_key["ext"]["telegram"]["client_id"] == ""
     assert core.call("messages.send", {**p, "client_id": "another"})["message"]["id"] != sent["id"]
     assert core.error("messages.send", {**p, "entities": [{"type": "bold", "offset": 1, "length": 1}]})["data"]["field"] == "entities"
     assert core.error("messages.send", {**p, "schedule_at": "2025-04-03T12:00:00Z"})["data"]["code"] == "NOT_SUPPORTED"
@@ -192,3 +195,48 @@ def test_eof_during_sign_in(core):
     core.event("auth.step")
     core.close_stdin()
     assert core.wait_exit(timeout=5) == 0
+
+
+def test_message_actions(core):
+    start(core)
+    p = {"account_id": "a", "chat_id": "17", "message_id": "4"}
+    assert core.call("messages.get", p)["message"]["text"] == "Row 4"
+    edited = core.call("messages.edit", {**p, "text": "😀new", "entities": [{"type": "bold", "offset": 2, "length": 3}],
+                                           "no_webpage": True})["message"]
+    assert edited["text"] == "😀new" and edited["edited"]
+    assert core.call("messages.edit", {**p, "text": "😀new", "entities": edited["entities"]})["message"]["id"] == "4"
+    assert core.error("messages.edit", {**p, "path": "/synthetic/file"})["data"]["code"] == "NOT_SUPPORTED"
+    core.call("messages.pin", {**p, "silent": True, "for_me_only": True})
+    core.call("messages.unpin", p)
+    core.call("messages.unpin", {"account_id": "a", "chat_id": "17"})
+    forwarded = core.call("messages.forward", {"account_id": "a", "from_chat_id": "17", "to_chat_id": "18",
+                                                "message_ids": ["4", "5"], "drop_author": True,
+                                                "drop_captions": True, "silent": True})
+    assert len(forwarded["messages"]) == 2
+    assert all(m["chat_id"] == "18" for m in forwarded["messages"])
+    core.call("messages.delete", {"account_id": "a", "chat_id": "17", "message_ids": ["4"], "revoke": False})
+    assert not core.call("messages.get", p).get("message")
+    # An ID from another DM must not be edited, deleted, forwarded or pinned.
+    wrong = {**p, "message_id": "99"}
+    for method, params in [("messages.get", wrong), ("messages.edit", {**wrong, "text": "x"}),
+                           ("messages.pin", wrong), ("messages.unpin", wrong),
+                           ("messages.delete", {"account_id": "a", "chat_id": "17", "message_ids": ["5", "99"], "revoke": True}),
+                           ("messages.forward", {"account_id": "a", "from_chat_id": "17", "to_chat_id": "18", "message_ids": ["99"]})]:
+        assert core.error(method, params)["data"]["code"] == "NOT_FOUND"
+    assert core.call("messages.get", {**p, "message_id": "5"})["message"]
+    assert core.shutdown() == 0
+
+
+def test_activity_and_drafts(core):
+    start(core)
+    p = {"account_id": "a", "chat_id": "17"}
+    core.call("read.send_receipt", {**p, "max_message_id": "10"})
+    core.call("read.send_receipt", {**p, "chat_id": "-1000000000008", "topic_id": "4", "max_message_id": "10"})
+    core.call("typing.send", {**p, "action": "typing"})
+    core.call("typing.send", {**p, "action": "cancel"})
+    assert core.error("typing.send", {**p, "action": "speaking"})["data"]["code"] == "NOT_SUPPORTED"
+    core.call("drafts.save", {**p, "draft": {"text": "😀note", "reply_to": "4",
+                                            "entities": [{"type": "italic", "offset": 2, "length": 4}]}})
+    core.call("drafts.save", {**p, "draft": {"text": "", "reply_to": "4"}})
+    assert core.error("drafts.save", {**p, "topic_id": "4", "draft": {"text": "x"}})["data"]["code"] == "NOT_SUPPORTED"
+    assert core.shutdown() == 0

@@ -37,8 +37,8 @@ async def send(client, p):
                      and u.message.id == sent_id and (m := message(u.message)) and m.chat_id == p.chat_id), None)
         if item is None and sent_id:
             item = message(await client.get_messages(peer, ids=sent_id))
-        if item is None or item.chat_id != p.chat_id:
+        if item is None or item.chat_id != p.chat_id or item.id != str(sent_id):
             raise rpc.Internal("Telegram accepted the request without a matching message confirmation.")
-    if p.client_id:
-        item.ext = {"telegram": {"client_id": p.client_id}}
+    if p.client_id is not None:
+        item.ext = {**(item.ext or {}), "telegram": {**(item.ext or {}).get("telegram", {}), "client_id": p.client_id}}
     return dto.MessageResult(message=item)

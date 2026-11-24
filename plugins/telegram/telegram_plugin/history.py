@@ -39,7 +39,9 @@ async def read(client, p, count, **offset):
     peer = await resolve_chat(client, p.chat_id)
     rows = []
     async for raw in client.iter_messages(peer, limit=count, reply_to=topic_id, **offset):
-        if (item := message(raw)) and item.chat_id == p.chat_id:
+        if item := message(raw):
+            if item.chat_id != p.chat_id:
+                raise rpc.Internal("Telegram returned history for a different chat.")
             rows.append(item)
     return rows
 
@@ -53,7 +55,11 @@ async def recent(client, p):
 async def fill_gap(client, p):
     lower = identifier(p.after_message_id, "after_message_id")
     upper = identifier(p.before_message_id, "before_message_id") if p.before_message_id is not None else 0
+    if upper and upper <= lower:
+        raise rpc.InvalidParams("Gap endpoints must be ordered.", field="before_message_id")
     start = max(lower, boundary(p, b"F"))
+    if upper and start >= upper:
+        return dto.PagedMessagesResult(messages=[])
     rows = await read(client, p, p.limit + 1, min_id=start, max_id=upper, reverse=True)
     page = rows[:p.limit]
     return dto.PagedMessagesResult(messages=page, next_cursor=cursor(p, b"F", page[-1].id) if len(rows) > p.limit else None)

@@ -129,6 +129,36 @@ def conversation(dialog):
                             marked_unread=raw.unread_mark, draft=draft(raw.draft))
 
 
+_SERVICE_KINDS = {
+    tl.MessageActionChatAddUser: "joined", tl.MessageActionChatJoinedByLink: "joined",
+    tl.MessageActionChatJoinedByRequest: "joined", tl.MessageActionChatDeleteUser: "left",
+    tl.MessageActionPinMessage: "pinned", tl.MessageActionChatEditTitle: "title_changed",
+    tl.MessageActionChatEditPhoto: "photo_changed", tl.MessageActionChatDeletePhoto: "photo_removed",
+    tl.MessageActionChatCreate: "created", tl.MessageActionChannelCreate: "created",
+    tl.MessageActionPhoneCall: "call", tl.MessageActionSetMessagesTTL: "ttl_changed",
+    tl.MessageActionTopicCreate: "topic_created", tl.MessageActionTopicEdit: "topic_edited",
+    tl.MessageActionHistoryClear: "history_cleared", tl.MessageActionContactSignUp: "contact_joined",
+    tl.MessageActionScreenshotTaken: "screenshot",
+}
+
+
+def service_action(raw, sender, reply_id):
+    action = getattr(raw, "action", None)
+    if action is None or isinstance(action, tl.MessageActionEmpty):
+        return None
+    kind = _SERVICE_KINDS.get(type(action), "other")
+    targets = getattr(action, "users", None)
+    if isinstance(action, tl.MessageActionChatDeleteUser):
+        targets = [action.user_id]
+    return dto.ServiceAction(kind=kind, actor_id=sender, title=getattr(action, "title", None),
+                             target_ids=[str(value) for value in targets] if targets is not None else None,
+                             message_id=sid(reply_id) if kind == "pinned" else None,
+                             seconds=getattr(action, "period", None) if kind == "ttl_changed" else getattr(action, "duration", None),
+                             video=getattr(action, "video", None),
+                             missed=isinstance(action.reason, tl.PhoneCallDiscardReasonMissed) if kind == "call" else None,
+                             text=getattr(action, "message", None) or (type(action).__name__ if kind == "other" else None))
+
+
 def message(raw):
     if not getattr(raw, "date", None) or not getattr(raw, "peer_id", None) or isinstance(raw, tl.MessageEmpty):
         return None
@@ -140,10 +170,27 @@ def message(raw):
     if isinstance(getattr(raw, "action", None), tl.MessageActionTopicCreate):
         topic = raw.id
     reply = dto.ReplyRef(message_id=str(reply_id), chat_id=peer_id(getattr(header, "reply_to_peer_id", None)),
-                         quote_text=getattr(header, "quote_text", None)) if reply_id else None
+                         quote_text=getattr(header, "quote_text", None),
+                         quote_entities=entities_from_tl(header.quote_entities) if getattr(header, "quote_entities", None) is not None else None,
+                         quote_offset=getattr(header, "quote_offset", None)) if reply_id else None
+    forwarded = getattr(raw, "fwd_from", None)
+    origin = getattr(forwarded, "from_id", None)
+    forward = dto.ForwardInfo(name=forwarded.from_name, sender_id=peer_id(origin),
+                              chat_id=peer_id(origin) if isinstance(origin, (tl.PeerChannel, tl.PeerChat)) else None,
+                              message_id=sid(forwarded.channel_post), at=forwarded.date,
+                              signature=forwarded.post_author) if forwarded else None
     text = getattr(raw, "message", None)
+    sender = sid(getattr(raw, "sender_id", None)) or peer_id(getattr(raw, "from_id", None))
+    replies = getattr(raw, "replies", None)
     return dto.Message(id=str(raw.id), chat_id=peer_id(raw.peer_id), direction="out" if raw.out else "in",
-                       sent_at=raw.date, sender_id=sid(raw.sender_id), text=text, topic_id=sid(topic),
-                       entities=entities_from_tl(raw.entities) if text is not None else None, reply_to=reply,
+                       sent_at=raw.date, sender_id=sender, text=text, topic_id=sid(topic),
+                       entities=entities_from_tl(getattr(raw, "entities", None)) if text is not None else None,
+                       reply_to=reply, forward_from=forward,
                        grouped_id=sid(getattr(raw, "grouped_id", None)), views=getattr(raw, "views", None),
-                       edited=True if raw.edit_date else None, edited_at=raw.edit_date)
+                       action=service_action(raw, sender, reply_id), mentioned=getattr(raw, "mentioned", None),
+                       replies_count=getattr(replies, "replies", None),
+                       replies_chat_id=peer_id(tl.PeerChannel(replies.channel_id)) if getattr(replies, "channel_id", None) else None,
+                       via_bot_id=sid(getattr(raw, "via_bot_id", None)), effect_id=sid(getattr(raw, "effect", None)),
+                       ttl_seconds=getattr(raw, "ttl_period", None),
+                       is_pinned=getattr(raw, "pinned", None), silent=getattr(raw, "silent", None),
+                       edited=True if getattr(raw, "edit_date", None) else None, edited_at=getattr(raw, "edit_date", None))
