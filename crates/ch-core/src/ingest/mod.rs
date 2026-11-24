@@ -1329,9 +1329,9 @@ impl Ingest {
 
     // ---- drafts -----------------------------------------------------------------------------
 
-    /// Tri-state draft write (spec §8.4, §10.1): empty text clears; an incoming draft older than
-    /// the stored one (by `updated_at`) or equal in text is ignored. `now_override` forces the
-    /// stored `updated_at` (core-initiated saves use the current time).
+    /// Replace a whole draft snapshot (spec §8.4, §10.1): empty text clears and older snapshots
+    /// are ignored. Equal content emits no change; a newer explicit timestamp still advances
+    /// the freshness watermark. Undated duplicates do not advance that watermark.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_draft(
         &self,
@@ -1356,29 +1356,36 @@ impl Ingest {
         let key = topic_id.unwrap_or("");
         let incoming_at = d.updated_at.map(ts_to_millis).unwrap_or_else(now_millis);
         let existing = ch_db::get_draft(conn, conv_id, key)?;
+        let row = DraftRow {
+            conversation_id: conv_id,
+            topic_id: key.to_owned(),
+            text: d.text.clone(),
+            entities: d.entities.clone(),
+            reply_to: d.reply_to.clone(),
+            updated_at: incoming_at,
+            ext: d.ext.clone(),
+        };
         if let Some(cur) = &existing {
-            if cur.text == d.text {
-                return Ok(());
-            }
             if incoming_at < cur.updated_at {
                 out.ignore("draft older than the stored one");
+                return Ok(());
+            }
+            if cur.text == row.text
+                && cur.entities == row.entities
+                && cur.reply_to == row.reply_to
+                && cur.ext == row.ext
+            {
+                // Keep freshness even when nothing visible changed, so an older conflicting
+                // snapshot cannot overwrite a newer confirmation of this content.
+                if d.updated_at.is_some() && incoming_at > cur.updated_at {
+                    ch_db::set_draft(conn, &row)?;
+                }
                 return Ok(());
             }
         } else if d.text.is_empty() {
             return Ok(());
         }
-        ch_db::set_draft(
-            conn,
-            &DraftRow {
-                conversation_id: conv_id,
-                topic_id: key.to_owned(),
-                text: d.text.clone(),
-                entities: d.entities.clone(),
-                reply_to: d.reply_to.clone(),
-                updated_at: incoming_at,
-                ext: d.ext.clone(),
-            },
-        )?;
+        ch_db::set_draft(conn, &row)?;
         out.push(Change::DraftChanged {
             chat_id: chat_id.to_owned(),
             topic_id: topic_id.map(str::to_owned),

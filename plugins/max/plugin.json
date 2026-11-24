@@ -1,0 +1,21 @@
+{
+  "id": "max",
+  "name": "MAX",
+  "version": "0.1.0",
+  "api_version": "1.0.0",
+  "entry": ["./.venv/bin/python", "-m", "max_plugin"],
+  "brand_color": "#3478F6",
+  "multi_account": true,
+  "auth_methods": ["phone_code", "qr"],
+  "settings_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "request_timeout": {"type": "integer", "minimum": 5, "maximum": 60, "default": 30, "title": "API timeout (seconds)"},
+      "proxy": {"type": "string", "x-secret": true, "title": "Proxy URL"}
+    }
+  },
+  "description": "MAX phone/QR sign-in, login snapshots, live text events and confirmed text sending. History continuation is bounded; see README.",
+  "homepage": "https://github.com/MaxApiTeam/PyMax",
+  "license": "MIT"
+}

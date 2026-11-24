@@ -563,9 +563,11 @@ message's `text` (or the caption when the text is a caption).
   (and SDKs) MUST NOT write such defaults for fields they did not set. Nested value
   objects (`Media`, `Poll`, `Location`, `FolderRules`, …) and non-merged DTOs
   (`Folder`, `Sticker`, `AuthStep`) are replaced wholesale and keep their plain
-  defaults.
+  defaults. `Draft` is a whole nested snapshot: its absent or null optional
+  metadata is unknown in the replacement, not a request to preserve old metadata.
 - An **empty array** means "none" (the message has no reactions); an absent array
-  means "not reported". The core treats an absent array as "leave what I have".
+  means "not reported". In merge-updated rows the core treats an absent array as
+  "leave what I have"; this does not merge fields inside a replaced nested value.
 - `Conversation.draft`: a `Draft` with empty `text` means "no draft"; absent means
   "the platform did not say". This is how a platform without drafts never wipes a
   draft held locally.
@@ -944,9 +946,11 @@ change back as an update; the plugin MAY forward it as the matching event and SH
 NOT try to suppress it. The core is idempotent for these echoes: a `messages.upsert`
 or `message.edited` whose content equals what it holds changes nothing and creates
 no edit version; a `conversations.upsert` with the same flags is a no-op; a
-`draft.changed` that is older than the core's own draft (by `updated_at`, or equal
-in text) is ignored. A plugin MUST NOT echo *more* than the platform reports (no
-synthetic events "to be safe").
+`draft.changed` older than the stored draft (by `updated_at`) is ignored.
+For a whole `Draft` snapshot, compare `text`, `entities`, `reply_to` and `ext`:
+equal content emits no change, but a newer explicit `updated_at` still advances
+the stored freshness watermark. An identical undated snapshot is a no-op. A plugin
+MUST NOT echo *more* than the platform reports (no synthetic events "to be safe").
 
 ## 11. Requests (core → plugin)
 

@@ -25,6 +25,7 @@ function step(accountId: string, kind: string, stepId: string) {
 }
 const unused = async () => { throw new Error("Unexpected thread operation"); };
 const client: CoreClient = {
+  editText: unused, deleteMessages: unused, pinMessage: unused, unpinMessage: unused,
   history: unused, fillGap: unused, enqueueText: unused, listOutbox: unused, cancelOutbox: unused, retryOutbox: unused, search: unused,
   subscribe: async cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
   inventory: async () => ({ plugins: [plugin], accounts: accounts.map(a => ({ ...a })) }),

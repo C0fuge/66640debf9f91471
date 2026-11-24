@@ -1,0 +1,183 @@
+import json
+import time
+
+from max_plugin.state import PrivateState
+
+A = {"account_id": "max"}
+
+
+def sign_in(core, account="max", mode="phone_code"):
+    a = {"account_id": account}
+    core.call("auth.begin", {**a, "method": mode})
+    kinds = ["phone", "code", "password"] if mode == "phone_code" else ["qr", "password"]
+    for kind in kinds:
+        step = core.event("auth.step", account_id=account)["step"]
+        assert step["kind"] == kind
+        if kind != "qr":
+            core.call("auth.submit", {**a, "flow": "sign_in", "step_id": step["step_id"],
+                                       "value": "synthetic"})
+    core.event("status", account_id=account, state="connected")
+    core.event("auth.step", lambda p: p["step"]["kind"] == "done", account_id=account)
+
+
+def test_auth_order_accounts_events_send_and_pagination(core_factory, tmp_path):
+    core = core_factory()
+    core.start()
+    assert core.capabilities == {"auth.interactive": True}
+    core.event("status", state="auth_required")
+    frames = [json.loads(line) for line in core.raw]
+    start_reply = next(i for i, frame in enumerate(frames) if "result" in frame and frame["result"] == {})
+    first_status = next(i for i, frame in enumerate(frames) if frame.get("method") == "status")
+    assert first_status > start_reply
+    assert core.call("ping") == {}
+    sign_in(core)
+    core.event("contacts.upsert")
+    core.event("conversations.upsert")
+    core.event("messages.upsert")
+    assert core.error("auth.begin", {**A, "method": "phone_code"})["data"]["code"] == "INVALID_PARAMS"
+    assert core.call("auth.cancel", {**A, "flow": "sign_in"}) == {}
+    sent = core.call("messages.send", {**A, "chat_id": "10", "text": "**literal**", "client_id": "send-1"})
+    assert sent["message"]["text"] == "**literal**"
+    replay = core.call("messages.send", {**A, "chat_id": "10", "text": "**literal**", "client_id": "send-1"})
+    assert replay == sent
+    err = core.error("messages.send", {**A, "chat_id": "10", "text": "different", "client_id": "send-1"})
+    assert err["data"]["code"] == "INVALID_PARAMS"
+    for optional in ({"silent": False}, {"entities": []}, {"topic_id": "1"}, {"no_webpage": False}):
+        assert core.error("messages.send", {**A, "chat_id": "10", "text": "x", **optional})["data"]["code"] == "NOT_SUPPORTED"
+    core.call("messages.send", {**A, "chat_id": "10", "text": "live"})
+    core.event("messages.upsert", lambda p: p["messages"][0]["id"] == "200")
+    core.event("messages.deleted", chat_id="10")
+    core.event("conversations.upsert", lambda p: p["conversations"][0].get("title") == "Updated")
+    page = core.call("messages.fetch_recent", {**A, "chat_id": "10", "limit": 3})
+    assert [m["id"] for m in page["messages"]] == ["22", "21", "20"]
+    assert core.error("messages.fetch_recent", {**A, "chat_id": "10", "limit": 3,
+                                                "cursor": page["next_cursor"]})["data"]["code"] == "NOT_SUPPORTED"
+    assert core.error("messages.fetch_recent", {**A, "chat_id": "99", "limit": 3,
+                                                "cursor": page["next_cursor"]})["data"]["code"] == "INVALID_PARAMS"
+    empty = core.call("messages.fetch_recent", {**A, "chat_id": "99", "limit": 3})
+    assert empty["messages"] == [] and empty["next_cursor"]
+    assert core.error("history.fill_gap", {**A, "chat_id": "10", "after_message_id": "1", "limit": 3})["data"]["code"] == "NOT_SUPPORTED"
+    core.start("max#2")
+    core.event("status", account_id="max#2", state="auth_required")
+    sign_in(core, "max#2", "qr")
+    first = json.loads((tmp_path / "accounts/max/state/identity.json").read_text())
+    second = json.loads((tmp_path / "accounts/max_2/state/identity.json").read_text())
+    assert first["device_id"] != second["device_id"]
+    assert core.error("messages.fetch_recent", {"account_id": "max#2", "chat_id": "10", "limit": 3,
+                                                "cursor": page["next_cursor"]})["data"]["code"] == "INVALID_PARAMS"
+    core.stop()
+    assert core.error("messages.send", {**A, "chat_id": "10", "text": "x"})["data"]["code"] == "UNKNOWN_ACCOUNT"
+    assert core.shutdown() == 0
+
+
+def test_unknown_send_survives_process_restart_without_retry(core_factory, tmp_path):
+    core = core_factory()
+    core.start()
+    core.event("status", state="auth_required")
+    sign_in(core)
+    confirmed = {**A, "chat_id": "10", "text": "confirmed", "client_id": "confirmed-once"}
+    sent = core.call("messages.send", confirmed)
+    params = {**A, "chat_id": "10", "text": "uncertain", "client_id": "never-retry"}
+    error = core.error("messages.send", params)
+    assert error["data"]["outcome"] == "unknown" and error["data"]["retry_safe"] is False
+    assert core.shutdown() == 0
+    again = core_factory()
+    again.start()
+    again.event("status", state="connected")
+    assert again.error("messages.send", params)["data"]["outcome"] == "unknown"
+    assert again.call("messages.send", confirmed) == sent
+    state = json.loads((tmp_path / "accounts/max/state/identity.json").read_text())
+    assert state["send_count"] == 2
+    assert "synthetic-private-token-do-not-log" not in core.stderr_text + again.stderr_text
+    assert again.shutdown() == 0
+
+
+def test_slow_connection_fast_start_ping_stop_and_eof(core_factory, tmp_path):
+    directory = tmp_path / "accounts/max/state"
+    state = PrivateState(directory, "max")
+    state.identity["mode"] = "qr"
+    state.save_identity()
+    state.write("session.json", {"token": "synthetic", "device_id": state.identity["device_id"]})
+    state.release()
+    core = core_factory("slow")
+    before = time.monotonic()
+    core.start()
+    assert time.monotonic() - before < 2
+    assert core.call("ping") == {}
+    core.stop()
+    core.event("status", state="disconnected")
+    core.start()
+    core.proc.stdin.close()
+    assert core.wait_exit(5) == 0
+
+
+def test_reconnect_and_cancel(core_factory, tmp_path):
+    state = PrivateState(tmp_path / "accounts/max/state", "max")
+    state.identity["mode"] = "qr"
+    state.save_identity()
+    state.write("session.json", {"token": "synthetic", "device_id": state.identity["device_id"]})
+    state.release()
+    core = core_factory("reconnect")
+    core.start()
+    core.event("status", state="unavailable")
+    core.event("status", state="connected")
+    assert core.shutdown() == 0
+    assert "synthetic-private-token-do-not-log" not in core.stderr_text
+    other = core_factory(directory=tmp_path / "fresh")
+    other.start()
+    other.event("status", state="auth_required")
+    other.call("auth.begin", {**A, "method": "phone_code"})
+    other.event("auth.step")
+    other.call("auth.cancel", {**A, "flow": "sign_in"})
+    other.event("status", state="auth_required")
+    assert not (tmp_path / "fresh/accounts/max/state/session.json").exists()
+    assert other.shutdown() == 0
+
+
+def test_auth_restart_stale_submission_and_buffered_login_events(core_factory):
+    core = core_factory("early-events")
+    core.start()
+    core.event("status", state="auth_required")
+    core.call("auth.begin", {**A, "method": "phone_code"})
+    old = core.event("auth.step")["step"]
+    core.call("auth.begin", {**A, "method": "phone_code"})
+    new = core.event("auth.step")["step"]
+    assert new["step_id"] != old["step_id"]
+    core.call("auth.submit", {**A, "flow": "sign_in", "step_id": old["step_id"], "value": "stale"})
+    core.call("auth.submit", {**A, "flow": "sign_in", "step_id": new["step_id"], "value": "synthetic"})
+    for kind in ["code", "password"]:
+        step = core.event("auth.step")["step"]
+        assert step["kind"] == kind
+        core.call("auth.submit", {**A, "flow": "sign_in", "step_id": step["step_id"], "value": "synthetic"})
+    core.event("auth.step", lambda p: p["step"]["kind"] == "done")
+    messages = [frame["params"]["messages"][0]["id"] for frame in core.all_events
+                if frame["method"] == "messages.upsert"]
+    assert messages == ["20", "200"]
+    assert core.shutdown() == 0
+
+
+def test_opaque_client_id_empty_unicode_and_absent_are_distinct(core_factory, tmp_path):
+    core = core_factory()
+    core.start()
+    core.event("status", state="auth_required")
+    sign_in(core)
+    params = {**A, "chat_id": "10", "text": "opaque ID"}
+    empty = core.call("messages.send", {**params, "client_id": ""})
+    assert core.call("messages.send", {**params, "client_id": ""}) == empty
+    # An omitted/null ID has no journal key, and must not alias the empty ID.
+    absent = core.call("messages.send", params)
+    null = core.call("messages.send", {**params, "client_id": None})
+    assert len({empty["message"]["id"], absent["message"]["id"], null["message"]["id"]}) == 3
+    opaque = "雪🙂" * 300
+    unicode_sent = core.call("messages.send", {**params, "client_id": opaque})
+    assert core.call("messages.send", {**params, "client_id": opaque}) == unicode_sent
+    assert core.shutdown() == 0
+    # The UTF-8 hash and empty-string key survive the process restart.
+    again = core_factory()
+    again.start()
+    again.event("status", state="connected")
+    assert again.call("messages.send", {**params, "client_id": ""}) == empty
+    assert again.call("messages.send", {**params, "client_id": opaque}) == unicode_sent
+    state = json.loads((tmp_path / "accounts/max/state/identity.json").read_text())
+    assert state["send_count"] == 4
+    assert again.shutdown() == 0

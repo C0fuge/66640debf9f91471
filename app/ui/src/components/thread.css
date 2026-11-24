@@ -95,3 +95,14 @@
   vertical-align: baseline;
 }
 .thread-spoiler > span { visibility: hidden; }
+.thread-message-actions { display: flex; gap: 8px; margin-top: 5px; }
+.thread-message-actions button { color: var(--accent); background: transparent; border: 0; padding: 3px 5px; font-size: 12px; cursor: pointer; }
+.thread-message-actions button:disabled { color: var(--muted); cursor: default; opacity: .6; }
+.thread-message-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.message-action-dialog { color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: min(440px, calc(100vw - 32px)); }
+.message-action-dialog::backdrop { background: #0008; }
+.message-action-dialog h2 { margin-top: 0; font-size: 19px; }
+.message-action-dialog label { display: block; margin: 10px 0; }
+.message-action-dialog textarea { display: block; box-sizing: border-box; width: 100%; min-height: 120px; margin-top: 8px; padding: 8px; color: inherit; background: var(--canvas); border: 1px solid var(--border); border-radius: 6px; font: inherit; resize: vertical; }
+.message-action-dialog p { font-size: 13px; }
+.message-action-buttons { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }

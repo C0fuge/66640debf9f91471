@@ -23,18 +23,20 @@ export function isChange(value: unknown): value is CoreChange {
     (value.kind === "account" && typeof value.accountId === "string"));
 }
 
-function unpack(reply: unknown): unknown {
+function unpack(reply: unknown, mutation: boolean): unknown {
   if (isObject(reply)) {
     if (reply.ok === true && Object.hasOwn(reply, "value")) return reply.value;
     if (reply.ok === false && isObject(reply.error)) {
       const code = reply.error.code;
       if (typeof code === "string" && Object.hasOwn(reasons, code)) {
-        throw failure(code as CoreFailure["code"]);
+        throw { ...failure(code as CoreFailure["code"]), ...(reply.error.outcomeUnknown === true ? { outcomeUnknown: true } : {}) };
       }
     }
   }
-  throw failure("unavailable");
+  throw { ...failure("unavailable"), ...(mutation ? { outcomeUnknown: true } : {}) };
 }
+
+const messageMutations = new Set<keyof CoreOperations>(["editText", "deleteMessages", "pinMessage", "unpinMessage"]);
 
 export function createClient(send: Request, subscribe: CoreClient["subscribe"]): CoreClient {
   function method<K extends keyof CoreOperations>(name: K) {
@@ -44,9 +46,9 @@ export function createClient(send: Request, subscribe: CoreClient["subscribe"]):
         // The call site's method and parameters share K.
         reply = await send({ method: name, params } as CoreRequest);
       } catch {
-        throw failure("unavailable");
+        throw { ...failure("unavailable"), ...(messageMutations.has(name) ? { outcomeUnknown: true } : {}) };
       }
-      return unpack(reply) as Awaited<ReturnType<CoreOperations[K]>>;
+      return unpack(reply, messageMutations.has(name)) as Awaited<ReturnType<CoreOperations[K]>>;
     };
   }
   return {
@@ -55,6 +57,10 @@ export function createClient(send: Request, subscribe: CoreClient["subscribe"]):
     history: method("history"),
     fillGap: method("fillGap"),
     enqueueText: method("enqueueText"),
+    editText: method("editText"),
+    deleteMessages: method("deleteMessages"),
+    pinMessage: method("pinMessage"),
+    unpinMessage: method("unpinMessage"),
     listOutbox: method("listOutbox"),
     cancelOutbox: method("cancelOutbox"),
     retryOutbox: method("retryOutbox"),

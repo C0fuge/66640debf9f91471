@@ -4,10 +4,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from contact_hub_sdk import errors as rpc, types as dto
-from telethon import functions, types as tl
+from telethon import errors as tg, functions, types as tl
 
 from stub import NOW, row
 from telegram_plugin import actions, activity
+from telegram_plugin.session import translated
 
 
 def client(peer=None):
@@ -78,3 +79,13 @@ def test_unpin_all_repeats_affected_history():
     value.side_effect = [tl.messages.AffectedHistory(1, 1, 2), tl.messages.AffectedHistory(2, 1, 0)]
     asyncio.run(actions.unpin(value, dto.MessagesUnpinParams(account_id="a", chat_id="17")))
     assert value.await_count == 2
+
+
+def test_platform_permissions_and_pin_retry():
+    for error in (tg.ChatAdminRequiredError, tg.MessageEditTimeExpiredError, tg.PinRestrictedError, tg.UserBannedInChannelError):
+        assert isinstance(translated(error(None)), rpc.Forbidden)
+    assert isinstance(translated(tg.MessageIdInvalidError(None)), rpc.NotFound)
+    value = client()
+    value.side_effect = tg.ChatNotModifiedError(None)
+    asyncio.run(actions.pin(value, dto.MessagesPinParams(account_id="a", chat_id="17", message_id="4")))
+    asyncio.run(actions.unpin(value, dto.MessagesUnpinParams(account_id="a", chat_id="17")))

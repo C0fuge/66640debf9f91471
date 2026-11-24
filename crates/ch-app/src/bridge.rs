@@ -18,14 +18,14 @@ use ch_protocol::{
 use serde_json::{Value, json};
 
 impl App {
-    async fn account(&self, id: &str) -> Result<AccountRow> {
+    pub(crate) async fn account(&self, id: &str) -> Result<AccountRow> {
         if !is_valid_id(id) {
             return Err(Failure::Invalid);
         }
         self.core.accounts().get(id).await?.ok_or(Failure::Missing)
     }
 
-    async fn thread(&self, key: &Thread) -> Result<(ConversationRow, bool)> {
+    pub(crate) async fn thread(&self, key: &Thread) -> Result<(ConversationRow, bool)> {
         if !is_valid_id(&key.account_id)
             || !is_valid_id(&key.chat_id)
             || key.topic_id.as_deref().is_some_and(|id| !is_valid_id(id))
@@ -54,6 +54,10 @@ impl App {
     pub(crate) async fn dispatch(&self, request: Request) -> Result<Value> {
         match request {
             Request::Inventory {} => self.inventory().await,
+            Request::EditText { thread, message_id, text, entities } => self.edit_text(thread, message_id, text, entities).await,
+            Request::DeleteMessages { thread, message_ids, revoke } => self.delete_messages(thread, message_ids, revoke).await,
+            Request::PinMessage { thread, message_id, silent } => self.pin_message(thread, message_id, Some(silent)).await,
+            Request::UnpinMessage { thread, message_id } => self.pin_message(thread, message_id, None).await,
             Request::ListChats {
                 account_id,
                 archived,
@@ -369,7 +373,7 @@ impl App {
     }
 }
 
-fn validate_spans(text: &str, entities: &[Entity]) -> Result<()> {
+pub(crate) fn validate_spans(text: &str, entities: &[Entity]) -> Result<()> {
     let mut boundaries = vec![0u64];
     let mut pos = 0;
     for c in text.chars() {

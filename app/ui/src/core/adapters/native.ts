@@ -2,8 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createClient, failure, isChange } from "./client";
 
-export function createNativeClient() {
-  return createClient(request => invoke("core_request", { request }), async listener => {
+export function createNativeClient(invokeCore: (command: string, args: Record<string, unknown>) => Promise<unknown> = invoke) {
+  return createClient(request => invokeCore("core_request", { request }), async listener => {
     try {
       const stop = await listen<unknown>("core-change", ({ payload }) => {
         listener(isChange(payload) ? payload : { kind: "reset" });

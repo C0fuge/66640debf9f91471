@@ -1,20 +1,24 @@
 # Build progress
 
-Development runs locally. GitHub Actions supplies build/test workers only, with
-no API key, ChatGPT OAuth or cloud coding job.
+Development runs locally. GitHub Actions runs builds/tests only, with no API key
+or provider login. All test accounts and messages are synthetic.
 
-## 2026-11-24 night batch
+## Verified first night batch
 
-Telegram source now adds nine existing-contract handlers: get/edit/delete/forward,
-pin/unpin, read receipt, typing and drafts. It also fixes startup cleanup, exact
-send confirmation and history boundaries, and preserves service-event metadata.
-The source declares23 core-to-plugin operations;96 remain pending.
+Run45485427483 passed UI20, SDK41, fake8, Telegram28 and the Rust workspace,
+no-default core, Clippy, fake integrations/conformance and debug builds. It
+verifies the23-handler Telegram source snapshot, not full platform parity.
 
-The updated batch is awaiting GitHub verification. Do not infer success from
-the first bootstrap run: it failed to propagate pipeline errors. The corrected
-CI uses pipefail; required public auth schemas were restored after an overly
-broad ignore rule excluded them from the initial snapshot.
+## Next candidate, awaiting verification
 
-Next local work: typed application edit/delete/pin/unpin controls (ADR0003),
-platform API audit and further Telegram/MAX implementation. No real account
-or server-side delivery has been verified in CI.
+- Four typed app actions: edit/delete/pin/unpin, scoped validation, ingest effects,
+  uncertain-outcome projection, UI dialogs and browser fixtures.
+- Correct Draft snapshot content/freshness comparison, spec erratum and regressions.
+- Partial MAX foundation: private state/auth/events/text and durable send journal.
+  Required history continuation is intentionally unsupported pending verified
+  server boundaries; real accounts/server behavior remain unverified.
+- Full platform source audit and proposals in docs/platform-coverage.md and
+  docs/api-contract-gaps.md.
+
+The next workflow also runs headless account/action UI checks with screenshots.
+A published candidate is not a claim that its tests have passed; inspect Actions.

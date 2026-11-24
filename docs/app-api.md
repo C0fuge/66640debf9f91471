@@ -30,6 +30,23 @@ DTO member names use camelCase. Required nullable members are present with JSON 
 
 Expose only text sends through `listOutbox` in this slice. A whole-chat snapshot includes items from its topics. A topic snapshot includes just that topic. Every item's thread identifies its exact destination. Its opaque ID is the outbox-generated client ID. The bridge resolves it through `get_by_client_id` and verifies the exact thread before forwarding cancel or retry to the outbox. An item can point at a bubble via echoRowKey, which can become null. `outcomeUnknown` is true for the core's `last_error.data.reason == "outcome_unknown"`. Do not expose raw plugin error data. Cancel is permitted for queued or sending items and can race completion or reconciliation. Retry is for failed items. Surface possible duplicate delivery and require an explicit user choice for an unknown outcome. Re-read the actual state on conflict.
 
+## Message actions
+
+ADR 0003 adds exactly four typed calls to the bundled `ch-core-v1` application API:
+
+- `editText({ thread, messageId, text, entities })` replaces confirmed outgoing text. `entities` is required, uses UTF-16 spans, and `[]` explicitly clears formatting. Both `edit` and `send.entities` must be live, including for an empty entity list. Media captions, service messages, scheduled messages and incoming messages cannot be edited in this batch.
+- `deleteMessages({ thread, messageIds, revoke })` accepts 1–100 distinct confirmed IDs in the exact thread. `revoke` is explicit: true requests everyone, false requests only the current user and requires `delete.for_me` in addition to `delete`. After confirmation the existing local user-deletion effect hard-deletes rows; remote deletions retain the existing tombstone policy.
+- `pinMessage({ thread, messageId, silent })` pins one stored message and requires `pin`. Both boolean values of `silent` are carried explicitly. Personal-only pins are not exposed.
+- `unpinMessage({ thread, messageId })` unpins one stored message and requires `unpin`. Unpin-all is not exposed.
+
+Each call resolves to null only after its local effect commits. The bridge resolves the persisted account owner, verifies exact account/chat/topic ownership and rejects provisional `local:` IDs and unconfirmed outbox echoes before RPC. A whole-chat history can display topic messages, but mutations must target the displayed message's exact topic. Closed-topic posting restrictions do not prohibit these actions. The backend checks the current method and parameter capabilities, independently of UI visibility. The UI offers keyboard-accessible controls, confirmation dialogs, explicit deletion scope and disabled controls for provisional messages. Editing has its own dialog and never changes composer drafts.
+
+The frozen edit response requires `MessageResult.message`; its ID, chat and topic must exactly match the requested target. Missing or foreign confirmation fails without invented local content. Confirmed responses use `Ingest::apply_edited`, `apply_deleted` and `apply_pinned`, publishing normal account invalidations. Event echoes before or after the reply converge through the same ingest rules. Application `Message.isPinned?: boolean` projects the stored pin state.
+
+Application `CoreFailure.outcomeUnknown?: boolean` marks a mutation that may have executed, including malformed/mismatched confirmations and failed local persistence after platform success. The bridge invalidates the affected account. Both transports preserve this flag while replacing raw plugin messages with safe text; a lost transport reply is also unknown for these four actions. They never automatically replay a mutation. The UI blocks another action until a successful history reload, then requires another explicit user action after reviewing the result. A definite rejection leaves the database unchanged.
+
+UI and backend must come from the same bundled version. Runtime method presence and current plugin handshake capabilities gate the controls; backend validation remains authoritative. This application amendment does not alter plugin API 1.0.0, schemas, SDKs or database migrations. Read receipts and synchronized drafts remain deferred.
+
 ## Accounts and sign-in
 
 `addAccount` delegates to Accounts with a generated ID and starts the account. The integration fixture may provision an isolated fake account with the fake plugin's connected start setting. The generic add path uses the selected manifest and supplied settings. Use Accounts' settings projection. The response exposes nonsecret values and names of configured secret fields. On save, values replace ordinary stored settings. For a secret field, omission keeps it, null clears it, and a string replaces it.

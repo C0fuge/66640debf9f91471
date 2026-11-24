@@ -20,8 +20,8 @@ def sid(value):
     return str(value) if value is not None else None
 
 
-async def resolve_chat(client, chat_id):
-    marked = identifier(chat_id, "chat_id", peer=True)
+async def resolve_chat(client, chat_id, *, field="chat_id"):
+    marked = identifier(chat_id, field, peer=True)
     raw_id, cls = utils.resolve_id(marked)
     peer = cls(raw_id)
     try:

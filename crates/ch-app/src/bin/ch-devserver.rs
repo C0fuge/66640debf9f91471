@@ -215,9 +215,14 @@ async fn dispatch_frames<F: Future<Output = Value> + Send + 'static>(
                     Some(Ok(Message::Text(data)))=>{
                         let frame:Envelope=serde_json::from_str(&data)?;
                         if frame.id.is_empty() || frame.id.len()>128 || active.len()>=16 || !active.insert(frame.id.clone()){break;}
+                        let mutation = matches!(frame.request["method"].as_str(), Some("editText" | "deleteMessages" | "pinMessage" | "unpinMessage"));
                         if let Some(task)=operations.start(dispatch(frame.request)){
                             pending.push(async move {
-                                let reply=task.await.unwrap_or_else(|_| json!({"ok":false,"error":{"code":"internal","message":"The operation could not be completed."}}));
+                                let reply=task.await.unwrap_or_else(|_| {
+                                    let mut reply = json!({"ok":false,"error":{"code":"internal","message":"The operation could not be completed."}});
+                                    if mutation { reply["error"]["outcomeUnknown"] = json!(true); }
+                                    reply
+                                });
                                 (frame.id,reply)
                             });
                             continue;
@@ -267,6 +272,12 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_mutation_finishes_after_socket_disconnect() {
+        for method in ["enqueueText", "editText", "deleteMessages", "pinMessage", "unpinMessage"] {
+            disconnected_mutation(method).await;
+        }
+    }
+
+    async fn disconnected_mutation(method: &'static str) {
         use std::sync::atomic::{AtomicU8, Ordering};
         use tokio::sync::Notify;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -284,7 +295,8 @@ mod tests {
             async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let ws = tokio_tungstenite::accept_async(socket).await.unwrap();
-                dispatch_frames(ws, rx, operations, move |_| {
+                dispatch_frames(ws, rx, operations, move |request| {
+                    assert_eq!(request["method"], method);
                     let (stage, started, resume) = (stage.clone(), started.clone(), resume.clone());
                     async move {
                         stage.store(1, Ordering::SeqCst);
@@ -302,7 +314,7 @@ mod tests {
             .await
             .unwrap();
         client
-            .send(Message::text(r#"{"id":"a","request":{}}"#))
+            .send(Message::text(json!({"id":"a","request":{"method":method,"params":{}}}).to_string()))
             .await
             .unwrap();
         timeout(Duration::from_secs(2), started.notified())
@@ -321,5 +333,31 @@ mod tests {
             .unwrap();
         assert_eq!(stage.load(Ordering::SeqCst), 2);
         drop(events);
+    }
+
+    #[tokio::test]
+    async fn failed_action_worker_is_unknown_but_read_failure_is_not() {
+        async fn fail(_: Value) -> Value {
+            panic!("synthetic worker failure")
+        }
+        for method in ["editText", "deleteMessages", "pinMessage", "unpinMessage", "inventory"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (events, rx) = tokio::sync::broadcast::channel(1);
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                dispatch_frames(ws, rx, Operations::new(), fail).await.unwrap();
+            });
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}")).await.unwrap();
+            client.send(Message::text(json!({"id":"a","request":{"method":method,"params":{}}}).to_string())).await.unwrap();
+            let frame = timeout(Duration::from_secs(2), client.next()).await.unwrap().unwrap().unwrap();
+            let reply: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(reply["reply"]["error"]["code"], "internal");
+            assert_eq!(reply["reply"]["error"]["outcomeUnknown"] == true, method != "inventory");
+            client.close(None).await.unwrap();
+            timeout(Duration::from_secs(2), peer).await.unwrap().unwrap();
+            drop(events);
+        }
     }
 }

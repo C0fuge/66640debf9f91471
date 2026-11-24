@@ -80,8 +80,8 @@ async def delete(client, p):
 
 
 async def forward(client, p):
-    source = await resolve_chat(client, p.from_chat_id)
-    target = await resolve_chat(client, p.to_chat_id)
+    source = await resolve_chat(client, p.from_chat_id, field="from_chat_id")
+    target = await resolve_chat(client, p.to_chat_id, field="to_chat_id")
     selected = ids(p.message_ids)
     if p.drop_captions and not p.drop_author:
         raise rpc.InvalidParams("Dropping captions requires dropping the author.", field="drop_captions")
@@ -124,8 +124,11 @@ async def pin(client, p):
     _, item = await fetch(client, peer, p.chat_id, mid)
     if item is None:
         raise rpc.NotFound(kind="message")
-    await client(functions.messages.UpdatePinnedMessageRequest(peer=peer, id=mid,
-                silent=p.silent, pm_oneside=p.for_me_only))
+    try:
+        await client(functions.messages.UpdatePinnedMessageRequest(peer=peer, id=mid,
+                    silent=p.silent, pm_oneside=p.for_me_only))
+    except tg.ChatNotModifiedError:
+        pass
 
 
 async def unpin(client, p):
@@ -135,10 +138,16 @@ async def unpin(client, p):
         _, item = await fetch(client, peer, p.chat_id, mid)
         if item is None:
             return
-        await client(functions.messages.UpdatePinnedMessageRequest(peer=peer, id=mid, unpin=True))
+        try:
+            await client(functions.messages.UpdatePinnedMessageRequest(peer=peer, id=mid, unpin=True))
+        except tg.ChatNotModifiedError:
+            pass
     else:
         # affectedHistory.offset is nonzero while more pins remain to be removed.
         while True:
-            response = await client(functions.messages.UnpinAllMessagesRequest(peer=peer))
+            try:
+                response = await client(functions.messages.UnpinAllMessagesRequest(peer=peer))
+            except tg.ChatNotModifiedError:
+                break
             if not response.offset:
                 break

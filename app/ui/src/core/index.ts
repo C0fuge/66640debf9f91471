@@ -78,6 +78,7 @@ export interface Message {
   edited: boolean;
   deleted: boolean;
   delivery: string | null;
+  isPinned?: boolean;
 }
 
 export type HistoryItem =
@@ -142,6 +143,7 @@ export interface CoreFailure {
   code: "invalid_request" | "not_found" | "unsupported" | "conflict"
     | "unavailable" | "internal";
   message: string;
+  outcomeUnknown?: boolean;
 }
 
 type Account = { accountId: string };
@@ -155,6 +157,10 @@ export interface CoreOperations {
   history(params: InThread & { window: HistoryWindow; limit: number }): Promise<HistoryPage>;
   fillGap(params: InThread & { gapId: string }): Promise<{ closed: boolean }>;
   enqueueText(params: InThread & { text: string; entities?: TextEntity[] }): Promise<OutboxItem>;
+  editText(params: InThread & { messageId: string; text: string; entities: TextEntity[] }): Promise<null>;
+  deleteMessages(params: InThread & { messageIds: string[]; revoke: boolean }): Promise<null>;
+  pinMessage(params: InThread & { messageId: string; silent: boolean }): Promise<null>;
+  unpinMessage(params: InThread & { messageId: string }): Promise<null>;
   listOutbox(params: InThread): Promise<OutboxItem[]>;
   cancelOutbox(params: OutboxTarget): Promise<OutboxItem>;
   retryOutbox(params: OutboxTarget): Promise<OutboxItem>;
@@ -192,6 +198,7 @@ export interface ChatListPaneProps {
 export interface ThreadPaneProps {
   client: CoreClient;
   chat: ChatSummary | null;
+  plugin?: PluginSummary | null;
 }
 
 export type ComposerProps = ThreadPaneProps;

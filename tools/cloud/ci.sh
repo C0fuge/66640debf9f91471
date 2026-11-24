@@ -19,7 +19,8 @@ case "${1:-}" in
   quick)
     result=0
     (cd app/ui && npm ci --no-audit --no-fund && npm test && npm run build) || result=1
-    for package in sdk/python plugins/fake plugins/telegram; do
+    for package in sdk/python plugins/*; do
+      [ -f "$package/pyproject.toml" ] || continue
       (cd "$package" && uv sync --locked && uv run --no-sync pytest -q) || result=1
     done
     exit "$result"

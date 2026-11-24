@@ -1,5 +1,6 @@
 //! One desktop or development-server session over the Rust core.
 mod bridge;
+mod actions;
 mod events;
 mod projection;
 mod wire;
@@ -19,7 +20,7 @@ use std::{
     collections::BTreeMap,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -34,6 +35,7 @@ pub struct App {
     outbox: Outbox,
     steps: Steps,
     auth_locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    action_locks: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
     changes: broadcast::Sender<Invalidation>,
     stop: CancellationToken,
     pump: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -155,6 +157,7 @@ impl App {
             db: Arc::new(Mutex::new(db)),
             steps,
             auth_locks: Mutex::default(),
+            action_locks: Mutex::default(),
             changes,
             stop,
             pump: tokio::sync::Mutex::new(Some(pump)),

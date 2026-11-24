@@ -20,9 +20,10 @@ def translated(exc):
         return rpc.FloodWait(exc.seconds)
     if isinstance(exc, (tg.UnauthorizedError, tg.AuthKeyNotFound, tg.AuthKeyDuplicatedError)):
         return rpc.AuthRequired()
-    if isinstance(exc, (tg.ForbiddenError, tg.ChannelPrivateError)):
+    if isinstance(exc, (tg.ForbiddenError, tg.ChannelPrivateError, tg.ChatAdminRequiredError,
+                        tg.MessageEditTimeExpiredError, tg.PinRestrictedError, tg.UserBannedInChannelError)):
         return rpc.Forbidden()
-    if isinstance(exc, (tg.PeerIdInvalidError, tg.ChannelInvalidError, tg.MsgIdInvalidError)):
+    if isinstance(exc, (tg.PeerIdInvalidError, tg.ChannelInvalidError, tg.MsgIdInvalidError, tg.MessageIdInvalidError)):
         return rpc.NotFound()
     if isinstance(exc, (TimeoutError, tg.TimedOutError)):
         return rpc.RpcTimeout()

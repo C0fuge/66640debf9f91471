@@ -1,11 +1,13 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { ChatSummary, CoreClient, HistoryItem, HistoryPage, Message, ThreadPaneProps } from "../core";
+import type { ChatSummary, CoreClient, HistoryItem, HistoryPage, Message, PluginSummary, ThreadPaneProps } from "../core";
 import { distinctItems, historyKey, messageDate, pageSize, prependPage } from "./thread/history";
 import { RichText } from "./thread/RichText";
 import { watchLocalHistory } from "./thread/historySignal";
 import { failureCode, failureText, threadId } from "./thread/shared";
 import { useAccountReads } from "./thread/useAccountReads";
+import { actionSession, type MessageAction } from "./thread/actions";
+import { MessageActionButtons, MessageActionDialog, type ActionSelection } from "./thread/MessageActionDialog";
 import "./thread.css";
 
 function chatKind(kind: string) {
@@ -17,8 +19,9 @@ function chatKind(kind: string) {
   }
 }
 
-function Bubble({ message, date, showSender }: {
+function Bubble({ message, date, showSender, client, plugin, disabled, select }: {
   message: Message; date: ReturnType<typeof messageDate>; showSender: boolean;
+  client: CoreClient; plugin?: PluginSummary | null; disabled: boolean; select: (action: ActionSelection) => void;
 }) {
   const sender = message.direction === "out" ? "You" : message.senderName;
   return <article className={'thread-bubble thread-bubble-' + message.direction} aria-label={sender || "Incoming message"}>
@@ -31,20 +34,26 @@ function Bubble({ message, date, showSender }: {
       {!message.mediaKind && !message.text && <span className="thread-secondary">Empty message</span>}
     </>}
     <footer className="thread-message-meta">
+      {message.isPinned && !message.deleted && <span>Pinned</span>}
       {message.edited && !message.deleted && <span>edited</span>}
       {date ? <time dateTime={date.iso}>{date.time}</time> : <span>Unknown time</span>}
       {message.direction === "out" && message.delivery && <span>{message.delivery}</span>}
     </footer>
+    <MessageActionButtons client={client} plugin={plugin} message={message} disabled={disabled} select={select} />
   </article>;
 }
 
 type ScrollTarget = { bottom: true } | { key: string; inset: number };
 
-function SelectedThread({ client, chat }: { client: CoreClient; chat: ChatSummary }) {
+function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: ChatSummary; plugin?: PluginSummary | null }) {
   const { thread } = chat;
   const [page, setPage] = useState<HistoryPage | null>(null);
   const latestLimit = useRef(pageSize);
   const [notice, setNotice] = useState("");
+  const [action, setAction] = useState<ActionSelection | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [reloadRequired, setReloadRequired] = useState(false);
+  const actions = useMemo(() => actionSession(client, thread), [client, thread.accountId, thread.chatId, thread.topicId]);
   const scroller = useRef<HTMLDivElement>(null);
   const scrollTarget = useRef<ScrollTarget | null>({ bottom: true });
   const lastScroll = useRef(0);
@@ -101,6 +110,29 @@ function SelectedThread({ client, chat }: { client: CoreClient; chat: ChatSummar
   }
   const reads = useAccountReads(client, thread.accountId, readCached);
   useEffect(() => watchLocalHistory(client, thread, reads.reload), [client, thread, reads.reload]);
+
+  function submitAction(mutation: MessageAction) {
+    reads.run(async active => {
+      setActionBusy(true);
+      const result = await actions.perform(mutation, action?.message.topicId ?? thread.topicId);
+      if (!active()) return;
+      setActionBusy(false);
+      setAction(null);
+      setNotice(result.error);
+      setReloadRequired(actions.reloadRequired);
+      if (result.ok) await readCached(active);
+    });
+  }
+
+  function reloadActions() {
+    reads.run(async active => {
+      await readCached(active);
+      if (!active()) return;
+      actions.reloaded();
+      setReloadRequired(false);
+      setNotice("History reloaded. Review the message before choosing another action.");
+    });
+  }
 
   useLayoutEffect(() => {
     const target = scrollTarget.current;
@@ -200,6 +232,7 @@ function SelectedThread({ client, chat }: { client: CoreClient; chat: ChatSummar
     {(reads.error || notice) && <div className="thread-status" role="status">
       <span>{reads.error || notice}</span>
       {reads.error && <button type="button" onClick={reads.reload} disabled={reads.busy}>Reload history</button>}
+      {reloadRequired && <button type="button" onClick={reloadActions} disabled={reads.busy || !reads.subscribed}>Reload before another action</button>}
     </div>}
     <div className="thread-stage">
       <div ref={scroller} className="thread-scroll" tabIndex={0} aria-label="Message history"
@@ -219,7 +252,8 @@ function SelectedThread({ client, chat }: { client: CoreClient; chat: ChatSummar
                 : row.item.kind === "gap" ? <button type="button" className="thread-page-button" disabled={reads.busy}
                   onClick={() => { if (row.item.kind === "gap") fillGap(row.item.gapId); }}>Load missing messages</button>
                 : <>{row.day && <div className="thread-day">{row.day}</div>}
-                  <Bubble message={row.item.message} date={row.date} showSender={row.showSender} /></>}
+                  <Bubble message={row.item.message} date={row.date} showSender={row.showSender} client={client} plugin={plugin}
+                    disabled={reads.busy || !reads.subscribed || actionBusy || reloadRequired} select={setAction} /></>}
             </div>;
           })}
         </div>
@@ -231,10 +265,11 @@ function SelectedThread({ client, chat }: { client: CoreClient; chat: ChatSummar
         virtual.scrollToIndex(rows.length - 1 + leading, { align: "end" });
       }}>Latest ↓</button>}
     </div>
+    {action && <MessageActionDialog selection={action} busy={actionBusy} close={() => setAction(null)} submit={submitAction} />}
   </section>;
 }
 
-export function ThreadPane({ client, chat }: ThreadPaneProps) {
+export function ThreadPane({ client, chat, plugin }: ThreadPaneProps) {
   if (!chat) return <section className="thread-pane thread-empty" aria-label="Conversation">Select a conversation</section>;
-  return <SelectedThread key={threadId(chat.thread)} client={client} chat={chat} />;
+  return <SelectedThread key={threadId(chat.thread)} client={client} chat={chat} plugin={plugin} />;
 }

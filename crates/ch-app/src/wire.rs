@@ -23,6 +23,7 @@ pub(crate) enum Failure {
     Conflict,
     Unavailable,
     Internal,
+    OutcomeUnknown,
 }
 
 impl Failure {
@@ -37,8 +38,13 @@ impl Failure {
             Self::Conflict => ("conflict", "The item changed. Reload its current state."),
             Self::Unavailable => ("unavailable", "The service is currently unavailable."),
             Self::Internal => ("internal", "The operation could not be completed."),
+            Self::OutcomeUnknown => ("unavailable", "The action may have completed. Reload before trying again."),
         };
-        json!({"ok":false,"error":{"code":code,"message":message}})
+        let mut reply = json!({"ok":false,"error":{"code":code,"message":message}});
+        if matches!(self, Self::OutcomeUnknown) {
+            reply["error"]["outcomeUnknown"] = json!(true);
+        }
+        reply
     }
 }
 
@@ -208,6 +214,10 @@ pub(crate) enum Request {
         #[serde(default)]
         entities: Vec<Span>,
     },
+    EditText { thread: Thread, message_id: String, text: String, entities: Vec<Span> },
+    DeleteMessages { thread: Thread, message_ids: Vec<String>, revoke: bool },
+    PinMessage { thread: Thread, message_id: String, silent: bool },
+    UnpinMessage { thread: Thread, message_id: String },
     ListOutbox {
         thread: Thread,
     },
