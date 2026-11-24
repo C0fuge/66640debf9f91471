@@ -1,8 +1,10 @@
 # Contact Hub
 
 Rust/Tauri messenger rebuild with process-isolated platform plugins.
-This source snapshot is under active development. The runnable demo uses only
-synthetic fake-plugin data; Telegram support is partial.
+This is a clean public source mirror under active development. The runnable demo
+uses synthetic fake-plugin data; Telegram support remains partial.
 
-See [cloud continuation](docs/CLOUD_HANDOFF.md), [cloud runs](docs/cloud-runs.md),
-[task queue](.github/cloud-tasks.md) and [progress](docs/cloud-progress.md).
+Development runs locally. GitHub Actions supplies builds and verification only;
+no API key, coding agent, OAuth login or personal messenger data is used in CI.
+See [cloud builds](docs/cloud-runs.md), [handoff](docs/CLOUD_HANDOFF.md) and
+[development queue](.github/cloud-tasks.md).

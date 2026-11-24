@@ -1,7 +1,7 @@
-# Cloud task queue
+# Development backlog
 
-Work in order. Progress persists on cloud/progress; update docs/cloud-progress.md.
-A task may span runs. Do not spend a run only rereading finished work.
+Local agents work in isolated branches. GitHub Actions verifies source snapshots
+only; it does not run these development tasks. A task may span work sessions.
 
 1. Verify the imported Telegram foundation and finish lifecycle/error/pagination
    review. Its existing 18 isolated tests passed locally, but the cloud result

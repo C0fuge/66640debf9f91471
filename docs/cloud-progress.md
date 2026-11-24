@@ -1,8 +1,6 @@
-# Cloud progress
+# Build progress
 
-## Bootstrap
-
-Status: source snapshot prepared; first GitHub-hosted verification pending.
-Agent authentication: OPENAI_API_KEY must be present as a repository Actions secret.
-No ChatGPT OAuth credentials or Anvil history are copied.
-Next: run independent baseline checks, then task1 in .github/cloud-tasks.md.
+Architecture: local development with GitHub Actions builds/tests only.
+No API key or provider OAuth state is used in GitHub Actions.
+Initial cloud verification is being configured; inspect Actions for each tested
+commit. The backlog is in .github/cloud-tasks.md.
