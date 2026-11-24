@@ -7,7 +7,7 @@ import os
 import sys
 
 mode = sys.argv[1]
-caps = {key: True for key in ("edit", "delete", "delete.for_me", "pin", "unpin", "send.entities")}
+caps = {key: True for key in ("edit", "delete", "delete.for_me", "pin", "unpin", "send.entities", "messages.get", "polls.vote", "polls.close")}
 if mode.startswith("without-"):
     caps[mode.removeprefix("without-")] = False
 sequence = 0
@@ -48,7 +48,23 @@ def handle(frame):
         write({"id": key, "error": {"code": -32000, "message": "sensitive fixture payload", "data": {
             "code": "FORBIDDEN" if mode == "denied" else "NETWORK", "reason": "sensitive fixture payload"}}})
         return
-    if method == "messages.edit":
+    if method in ("polls.vote", "polls.close", "messages.get"):
+        poll = {"id": "poll", "question": "Literal <question>", "options": [
+            {"id": "a", "text": "First", "chosen": "a" in params.get("option_ids", []), "votes": 1},
+            {"id": "b", "text": "Second", "chosen": "b" in params.get("option_ids", [])}],
+            "closed": method == "polls.close", "total_voters": 1}
+        message = {"id": params["message_id"], "chat_id": params["chat_id"], "direction": "out",
+                   "sent_at": "2026-11-01T00:00:00.000Z", "poll": poll}
+        if mode.startswith("wrong-"):
+            if mode == "wrong-poll":
+                poll["id"] = "foreign"
+            else:
+                message[{"wrong-id": "id", "wrong-chat": "chat_id", "wrong-topic": "topic_id"}[mode]] = "foreign"
+        if mode == "no-poll":
+            message.pop("poll")
+        result = {} if mode == "missing" else {"message": None if mode == "null-message" else message}
+        event = ("messages.upsert", {"account_id": params["account_id"], "messages": [message]})
+    elif method == "messages.edit":
         message = {"id": params["message_id"], "chat_id": params["chat_id"], "direction": "out",
                    "sent_at": "2026-11-01T00:00:00.000Z", "text": params["text"], "entities": params["entities"],
                    "edited": True, "edited_at": "2026-11-02T00:00:00.000Z"}

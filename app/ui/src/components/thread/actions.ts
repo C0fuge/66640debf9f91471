@@ -12,13 +12,13 @@ export function messageActions(client: CoreClient, plugin: PluginSummary | null 
     (plugin.capabilities?.[key] === true || typeof plugin.capabilities?.[key] === "object" && plugin.capabilities[key] !== null);
   const confirmed = !message.messageId.startsWith("local:") && !["sending", "failed"].includes(message.delivery ?? "");
   return {
-    showEdit: typeof client.editText === "function" && has("edit") && has("send.entities") && message.direction === "out" && message.text !== null && message.mediaKind === null && !message.deleted,
+    showEdit: typeof client.editText === "function" && has("edit") && has("send.entities") && message.direction === "out" && message.text !== null && message.mediaKind === null && !message.poll && !message.deleted,
     showDelete: typeof client.deleteMessages === "function" && has("delete"),
     showPin: typeof client.pinMessage === "function" && has("pin") && !message.deleted,
     showUnpin: typeof client.unpinMessage === "function" && has("unpin") && !message.deleted,
     // Bundled UI/core versions must match; method checks also protect fixture/older clients.
     edit: typeof client.editText === "function" && has("edit") && has("send.entities") && confirmed &&
-      message.direction === "out" && message.text !== null && message.mediaKind === null && !message.deleted,
+      message.direction === "out" && message.text !== null && message.mediaKind === null && !message.poll && !message.deleted,
     delete: typeof client.deleteMessages === "function" && has("delete") && confirmed,
     deleteForMe: has("delete.for_me"),
     pin: typeof client.pinMessage === "function" && has("pin") && confirmed && !message.deleted,

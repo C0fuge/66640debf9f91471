@@ -12,6 +12,7 @@ from stub import NOW, row
 from telegram_plugin.mapping import message
 from telegram_plugin.poll_info import option_id
 from telegram_plugin import polls
+from telegram_plugin.actions import get
 from telegram_plugin.sync import raw_update
 
 
@@ -281,4 +282,29 @@ def test_poll_refresh_and_write_reject_contradictory_topic_without_applying():
             await polls.vote(account, value, p)
         assert value.await_count == 1, "a contradictory write acknowledgement must not be replayed"
         account.messages_upsert.assert_not_awaited()
+    asyncio.run(exercise())
+
+
+def test_get_hydrates_sparse_poll_once_and_keeps_the_topic_barrier():
+    async def exercise():
+        raw = row(110, tl.PeerChannel(8), media=poll_media(minimum=True),
+                  reply_to=tl.MessageReplyHeader(reply_to_msg_id=42, forum_topic=True))
+        value = client(raw)
+        value.get_input_entity.return_value = tl.InputPeerChannel(8, 0)
+        full = tl.PollResults(results=[tl.PollAnswerVoters(b"\x00\xff", chosen=True), tl.PollAnswerVoters(b"\xff\x00")])
+        response = tl.Updates([tl.UpdateMessagePoll(707, full, peer=tl.PeerChannel(8), msg_id=110, top_msg_id=42)], [], [], NOW, 1)
+        value.return_value = response
+        p = dto.ChatMessageParams(account_id="a", chat_id="-1000000000008", message_id="110")
+        result = await get(value, p, hydrate=polls.hydrate)
+        assert result.message.topic_id == "42"
+        assert [a.chosen for a in result.message.poll.options] == [True, False]
+        value.get_messages.assert_awaited_once()
+        assert isinstance(value.await_args.args[0], functions.messages.GetPollResultsRequest)
+        assert value.await_args.args[0].poll_hash == 0
+        value.reset_mock()
+        response.updates[0].top_msg_id = 43
+        with pytest.raises(rpc.Internal):
+            await get(value, p, hydrate=polls.hydrate)
+        value.get_messages.assert_awaited_once()
+        assert value.await_count == 1
     asyncio.run(exercise())

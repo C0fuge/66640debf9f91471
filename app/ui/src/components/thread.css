@@ -111,3 +111,10 @@
 .message-action-dialog textarea { display: block; box-sizing: border-box; width: 100%; min-height: 120px; margin-top: 8px; padding: 8px; color: inherit; background: var(--canvas); border: 1px solid var(--border); border-radius: 6px; font: inherit; resize: vertical; }
 .message-action-dialog p { font-size: 13px; }
 .message-action-buttons { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+
+.poll-card { padding: .65rem; border: 1px solid var(--border); border-radius: .5rem; margin-block: .4rem; overflow-wrap: anywhere; }
+.poll-card p { margin: .35rem 0; }
+.poll-card ul { padding-inline-start: 1.3rem; }
+.poll-panel { max-width: min(36rem, 95vw); }
+.poll-panel fieldset { display: grid; gap: .6rem; margin-block: 1rem; }
+.poll-panel label { display: flex; align-items: baseline; gap: .4rem; overflow-wrap: anywhere; }

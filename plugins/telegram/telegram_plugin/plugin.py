@@ -166,7 +166,7 @@ class TelegramPlugin(Plugin):
     @method("messages.get")
     async def get(self, account, params):
         with platform_errors():
-            result = await actions.get(self.ready(account), params)
+            result = await actions.get(self.ready(account), params, hydrate=polls.hydrate)
             polls.observe(account, [result.message])
             return result
 

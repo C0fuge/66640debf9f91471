@@ -13,3 +13,4 @@ cd app/ui
 node tests/browser/accounts.mjs
 node tests/browser/actions.mjs
 node tests/browser/media.mjs
+node tests/browser/polls.mjs

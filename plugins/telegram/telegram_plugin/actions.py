@@ -15,9 +15,11 @@ async def fetch(client, peer, chat_id, message_id):
     return raw, item
 
 
-async def get(client, p):
+async def get(client, p, *, hydrate=None):
     peer = await resolve_chat(client, p.chat_id)
-    _, item = await fetch(client, peer, p.chat_id, identifier(p.message_id, "message_id"))
+    raw, item = await fetch(client, peer, p.chat_id, identifier(p.message_id, "message_id"))
+    if item is not None and hydrate is not None:
+        item = message(await hydrate(client, peer, raw))
     return dto.OptionalMessageResult(message=item)
 
 

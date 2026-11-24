@@ -54,6 +54,9 @@ impl App {
     pub(crate) async fn dispatch(&self, request: Request) -> Result<Value> {
         match request {
             Request::Inventory {} => self.inventory().await,
+            Request::VotePoll { thread, message_id, option_ids } => self.poll_action(thread, message_id, crate::polls::Operation::Vote(option_ids)).await,
+            Request::ClosePoll { thread, message_id } => self.poll_action(thread, message_id, crate::polls::Operation::Close).await,
+            Request::RefreshPoll { thread, message_id } => self.poll_action(thread, message_id, crate::polls::Operation::Refresh).await,
             Request::EditText { thread, message_id, text, entities } => self.edit_text(thread, message_id, text, entities).await,
             Request::DeleteMessages { thread, message_ids, revoke } => self.delete_messages(thread, message_ids, revoke).await,
             Request::PinMessage { thread, message_id, silent } => self.pin_message(thread, message_id, Some(silent)).await,

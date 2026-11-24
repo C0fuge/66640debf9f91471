@@ -76,3 +76,42 @@ Map validation and bad cursors to invalid_request, missing targets to not_found,
 ## Pane integration
 
 The shell passes the same CoreClient instance to named components ChatListPane, ThreadPane and Composer using the exported props. It owns selected account and selected chat, clears the chat when switching accounts, and mounts Composer once beneath ThreadPane. ChatListPane reports a selected ChatSummary through onSelectChat. ThreadPane and Composer receive that same chat, or null for the empty state. On receipt of updated chat rows the shell keeps the selected summary current. A successful enqueue appears through the committed outbox and history invalidations.
+
+## Stored polls
+
+ADR 0006 adds optional `Message.poll: PollSnapshot | null`, projected from confirmed
+stored polls. A snapshot contains nullable `id`, literal `question`, `options`
+(`id`, `text`, nullable unsigned decimal `votes`, nullable `chosen` and `correct`),
+nullable unsigned decimal `totalVoters`, `closed`, `multiple`, `quiz`, `anonymous`,
+nullable `closeAt: Millis`, nullable `solution`, and `solutionEntities`. Sparse values
+stay null. Correct answers and solutions are redacted until a quiz is closed or a
+server-reported personal choice is true. Deleted and provisional polls are omitted.
+
+Exactly three typed operations return `{ poll: PollSnapshot | null }`:
+
+- `votePoll({ thread, messageId, optionIds })` submits distinct opaque stored option
+  IDs. Single-choice polls accept at most one. `[]` explicitly retracts a known
+  normal-poll choice; quiz retraction and answered or unknown-choice quiz voting
+  are rejected. No vote is sent while displaying or selecting an answer.
+- `closePoll({ thread, messageId })` requests closing a confirmed outgoing,
+  nonforwarded poll. The server decides actual rights.
+- `refreshPoll({ thread, messageId })` reads that exact stored target through
+  `messages.get`, including an older message outside the latest history page.
+  It changes no history cursor or gap and never implies deletion for a missing result.
+
+All three enforce exact account/chat/topic ownership and a running account. Writes
+share the existing action lock and live method capability checks and also require
+`messages.get` for recovery. Returned real messages must match the target and any
+known poll ID, and use typed ingest. An absent message or absent returned poll is
+legal and returns null without fabricating choices or closure. Ambiguous writes
+use `outcomeUnknown`; both transports and development worker failures classify
+vote/close as writes and refresh as a read. Nothing automatically replays a vote.
+
+The poll panel captures its target independently of latest-history invalidations.
+Every freshly opened panel requires an explicit targeted refresh before writes,
+including after a chat/account switch or closing and reopening. It retains no
+unbounded session registry and never reads on render. Missing confirmations and unknown outcomes block further writes until an explicit
+targeted refresh reports a poll. Cached reloads cannot release that block. The user
+reviews the reported state before choosing another action. Pending responses cannot
+update a different account or a panel that has unmounted. Creation controls and a
+new outbox representation are outside this slice.

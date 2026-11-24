@@ -76,6 +76,16 @@ export interface Attachment {
   hasSpoiler: boolean;
 }
 
+export interface PollOptionSnapshot {
+  id: string; text: string; votes: string | null; chosen: boolean | null; correct: boolean | null;
+}
+export interface PollSnapshot {
+  id: string | null; question: string; options: PollOptionSnapshot[]; totalVoters: string | null;
+  closed: boolean; multiple: boolean; quiz: boolean; anonymous: boolean; closeAt: Millis | null;
+  solution: string | null; solutionEntities: TextEntity[];
+}
+export interface PollResult { poll: PollSnapshot | null }
+
 export interface Message {
   rowKey: string;
   messageId: string;
@@ -87,6 +97,7 @@ export interface Message {
   entities: TextEntity[];
   mediaKind: string | null;
   attachment?: Attachment | null;
+  poll?: PollSnapshot | null;
   edited: boolean;
   deleted: boolean;
   delivery: string | null;
@@ -173,6 +184,9 @@ export interface CoreOperations {
   deleteMessages(params: InThread & { messageIds: string[]; revoke: boolean }): Promise<null>;
   pinMessage(params: InThread & { messageId: string; silent: boolean }): Promise<null>;
   unpinMessage(params: InThread & { messageId: string }): Promise<null>;
+  votePoll(params: InThread & { messageId: string; optionIds: string[] }): Promise<PollResult>;
+  closePoll(params: InThread & { messageId: string }): Promise<PollResult>;
+  refreshPoll(params: InThread & { messageId: string }): Promise<PollResult>;
   listOutbox(params: InThread): Promise<OutboxItem[]>;
   cancelOutbox(params: OutboxTarget): Promise<OutboxItem>;
   retryOutbox(params: OutboxTarget): Promise<OutboxItem>;

@@ -92,15 +92,34 @@ pub(crate) fn history(page: Page) -> Value {
         Item::Message(m)=>{
             let media=m.media_kind();
             let attachment=attachment(&m);
+            let poll=poll(&m);
             let entities:Vec<_>=m.entities.unwrap_or_default().into_iter()
                 .filter(|e|e.offset<=JS_MAX && e.length<=JS_MAX).map(Span::from).collect();
             json!({"kind":"message","message":{"rowKey":m.id.to_string(),"messageId":m.message_id,
                 "topicId":m.topic_id,"direction":m.direction,"sentAt":m.sent_at.to_string(),
                 "senderName":m.sender_name.or(m.sender_title),"text":m.text,"entities":entities,
-                "mediaKind":media,"attachment":attachment,"edited":m.edited,"deleted":m.deleted_at.is_some(),"delivery":m.delivery,"isPinned":m.is_pinned.unwrap_or(false)}})
+                "mediaKind":media,"attachment":attachment,"poll":poll,"edited":m.edited,"deleted":m.deleted_at.is_some(),"delivery":m.delivery,"isPinned":m.is_pinned.unwrap_or(false)}})
         }
     }).collect::<Vec<_>>();
     json!({"items":items,"moreOlder":page.more_older,"moreNewer":page.more_newer})
+}
+
+pub(crate) fn poll(message: &MessageRow) -> Option<Value> {
+    if message.deleted_at.is_some() || message.message_id.starts_with("local:")
+        || matches!(message.delivery.as_deref(), Some("sending" | "failed")) { return None; }
+    let poll = message.poll.as_ref()?;
+    let reveal = poll.quiz && (poll.closed || poll.options.iter().any(|o| o.chosen == Some(true)));
+    let options: Vec<_> = poll.options.iter().map(|o| json!({
+        "id":o.id,"text":o.text,"votes":o.votes.map(|v|v.to_string()),"chosen":o.chosen,
+        "correct":if reveal { o.correct } else { None },
+    })).collect();
+    let entities: Vec<_> = if reveal { poll.solution_entities.clone().unwrap_or_default().into_iter()
+        .filter(|e| e.offset <= JS_MAX && e.length <= JS_MAX).map(Span::from).collect() } else { vec![] };
+    Some(json!({"id":poll.id,"question":poll.question,"options":options,
+        "totalVoters":poll.total_voters.map(|v|v.to_string()),"closed":poll.closed,
+        "multiple":poll.multiple,"quiz":poll.quiz,"anonymous":poll.anonymous,
+        "closeAt":poll.close_at.map(|t|t.unix_millis().to_string()),
+        "solution":if reveal { poll.solution.as_deref() } else { None },"solutionEntities":entities}))
 }
 
 fn attachment(message: &MessageRow) -> Option<Value> {

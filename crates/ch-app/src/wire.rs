@@ -218,6 +218,9 @@ pub(crate) enum Request {
     DeleteMessages { thread: Thread, message_ids: Vec<String>, revoke: bool },
     PinMessage { thread: Thread, message_id: String, silent: bool },
     UnpinMessage { thread: Thread, message_id: String },
+    VotePoll { thread: Thread, message_id: String, option_ids: Vec<String> },
+    ClosePoll { thread: Thread, message_id: String },
+    RefreshPoll { thread: Thread, message_id: String },
     ListOutbox {
         thread: Thread,
     },

@@ -8,7 +8,7 @@ use serde_json::Value;
 
 impl App {
     // Concurrent clicks cannot mutate a thread twice while a response is pending.
-    async fn action_lock(&self, thread: &Thread) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+    pub(crate) async fn action_lock(&self, thread: &Thread) -> Result<tokio::sync::OwnedMutexGuard<()>> {
         let key = serde_json::to_string(thread).map_err(|_| Failure::Invalid)?;
         let lock = {
             let mut locks = self.action_locks.lock().unwrap_or_else(|e| e.into_inner());
@@ -21,7 +21,7 @@ impl App {
         lock.try_lock_owned().map_err(|_| Failure::Conflict)
     }
 
-    async fn action_targets(&self, thread: &Thread, ids: &[String]) -> Result<(AccountRow, Vec<MessageRow>)> {
+    pub(crate) async fn action_targets(&self, thread: &Thread, ids: &[String]) -> Result<(AccountRow, Vec<MessageRow>)> {
         if ids.is_empty() || ids.len() > 100 || ids.iter().any(|id| !is_valid_id(id) || id.starts_with("local:")) {
             return Err(Failure::Invalid);
         }
@@ -46,7 +46,7 @@ impl App {
         Ok((owner, rows))
     }
 
-    async fn action_call<P: Serialize, R: DeserializeOwned>(&self, owner: &AccountRow, method: &str, params: &P) -> Result<R> {
+    pub(crate) async fn action_call<P: Serialize, R: DeserializeOwned>(&self, owner: &AccountRow, method: &str, params: &P) -> Result<R> {
         let value = serde_json::to_value(params).map_err(|_| Failure::Invalid)?;
         let state = self.core.host().plugin_state(&owner.plugin_id).ok_or(Failure::Unavailable)?;
         let caps = state.capabilities().ok_or(Failure::Unavailable)?;
@@ -61,12 +61,12 @@ impl App {
         })
     }
 
-    fn action_unknown(&self, account: &str) -> Failure {
+    pub(crate) fn action_unknown(&self, account: &str) -> Failure {
         events::notify(&self.changes, account);
         Failure::OutcomeUnknown
     }
 
-    async fn action_apply(&self, account: &str, apply: impl FnOnce(&mut Ingest) -> std::result::Result<Applied, IngestError> + Send + 'static) -> Result<Value> {
+    pub(crate) async fn action_apply(&self, account: &str, apply: impl FnOnce(&mut Ingest) -> std::result::Result<Applied, IngestError> + Send + 'static) -> Result<Value> {
         match self.core.ingest().with_ingest(apply).await {
             Ok(Ok(applied)) => {
                 self.core.bus().publish_local("message-actions", applied);

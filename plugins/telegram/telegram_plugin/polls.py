@@ -79,11 +79,17 @@ async def fresh(client, peer, chat_id, mid, poll_id):
     raw, item = await fetch(client, peer, chat_id, mid)
     if item is None or not isinstance(getattr(raw, "media", None), tl.MessageMediaPoll) or raw.media.poll.id != poll_id:
         raise rpc.NotFound(kind="poll")
+    return await hydrate(client, peer, raw)
+
+
+async def hydrate(client, peer, raw):
+    if not isinstance(getattr(raw, "media", None), tl.MessageMediaPoll):
+        return raw
     if raw.media.results.min or raw.media.results.results is None:
         # Hash 0 requests a fresh personal view, without accepting a cached
         # common/min result as evidence of the current user's chosen answers.
-        response = await client(functions.messages.GetPollResultsRequest(peer=peer, msg_id=mid, poll_hash=0))
-        update = matching_update(response, poll_id, chat_id, mid)
+        response = await client(functions.messages.GetPollResultsRequest(peer=peer, msg_id=raw.id, poll_hash=0))
+        update = matching_update(response, raw.media.poll.id, peer_id(raw.peer_id), raw.id)
         if update is not None:
             raw = with_update(raw, update)
     return raw

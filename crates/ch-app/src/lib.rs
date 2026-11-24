@@ -1,6 +1,7 @@
 //! One desktop or development-server session over the Rust core.
 mod bridge;
 mod actions;
+mod polls;
 mod events;
 mod projection;
 mod wire;

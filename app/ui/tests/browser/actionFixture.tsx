@@ -42,6 +42,7 @@ function target(thread: ThreadKey, messageId: string) {
 }
 const unused = async () => { throw new Error("Unexpected fixture operation"); };
 const client: CoreClient = {
+  votePoll: unused, closePoll: unused, refreshPoll: unused,
   subscribe: async listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
   inventory: async () => structuredClone({ plugins: [plugin], accounts }),
   listChats: async ({ accountId }) => [chat(accountId)],

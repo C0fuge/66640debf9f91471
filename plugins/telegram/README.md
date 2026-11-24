@@ -39,6 +39,8 @@ Poll answer IDs are scoped to the poll and preserve opaque Telegram bytes throug
 
 Omitted answer rows remain unknown for personal choice and correctness, even in non-minimal results; a reported non-minimal total of zero is evidence that nobody has chosen an answer. This follows the official Desktop client's [poll-result application](https://github.com/telegramdesktop/tdesktop/blob/dev/Telegram/SourceFiles/data/data_poll.cpp#L178-L213) and [listed-answer handling](https://github.com/telegramdesktop/tdesktop/blob/dev/Telegram/SourceFiles/data/data_poll.cpp#L282-L307), rather than treating an absent row as a negative flag. A contradictory explicit topic in a scoped poll-result response is rejected before any snapshot is combined or published.
 
+`messages.get` attempts one scoped personal-results hydration when the fetched poll is minimal or lacks result rows, using its already-fetched message envelope. This gives an application refresh a way to obtain personal choices without another message fetch. Missing rows remain unknown even after hydration; non-poll reads add no RPC.
+
 ## Remaining method groups
 
 The frozen registry contains 121 methods. The table above covers 30 core-to-plugin methods. The 89 core-to-plugin methods below remain unimplemented. The final two, `secrets.set` and `secrets.delete`, are host services for plugin callers. [Method registry](../../schemas/methods/registry.json)

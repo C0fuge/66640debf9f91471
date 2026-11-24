@@ -36,7 +36,7 @@ function unpack(reply: unknown, mutation: boolean): unknown {
   throw { ...failure("unavailable"), ...(mutation ? { outcomeUnknown: true } : {}) };
 }
 
-const messageMutations = new Set<keyof CoreOperations>(["editText", "deleteMessages", "pinMessage", "unpinMessage"]);
+const messageMutations = new Set<keyof CoreOperations>(["editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll"]);
 
 export function createClient(send: Request, subscribe: CoreClient["subscribe"]): CoreClient {
   function method<K extends keyof CoreOperations>(name: K) {
@@ -61,6 +61,9 @@ export function createClient(send: Request, subscribe: CoreClient["subscribe"]):
     deleteMessages: method("deleteMessages"),
     pinMessage: method("pinMessage"),
     unpinMessage: method("unpinMessage"),
+    votePoll: method("votePoll"),
+    closePoll: method("closePoll"),
+    refreshPoll: method("refreshPoll"),
     listOutbox: method("listOutbox"),
     cancelOutbox: method("cancelOutbox"),
     retryOutbox: method("retryOutbox"),

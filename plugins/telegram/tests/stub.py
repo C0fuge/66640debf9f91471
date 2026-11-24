@@ -107,7 +107,11 @@ class Stub:
         # Simulate Telegram's account-wide private-chat lookup.
         if ids == 99:
             return row(99, tl.PeerUser(18))
-        return self.messages.get(ids)
+        raw = self.messages.get(ids)
+        if self.mode == 6 and raw is not None and isinstance(raw.media, tl.MessageMediaPoll):
+            raw = copy.deepcopy(raw)
+            raw.media.results = tl.PollResults(min=True, total_voters=raw.media.results.total_voters)
+        return raw
 
     async def download_media(self, message, *, file, thumb, progress_callback):
         content = b"img" if thumb is not None and getattr(thumb, "type", None) == "s" else b"fixture"

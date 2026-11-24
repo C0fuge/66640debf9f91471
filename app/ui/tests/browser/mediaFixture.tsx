@@ -39,6 +39,7 @@ function records(accountId: string): Message[] {
 }
 const unused = async () => { throw new Error("Unexpected fixture mutation"); };
 const client: CoreClient = {
+  votePoll: unused, closePoll: unused, refreshPoll: unused,
   subscribe: async listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
   inventory: async () => { requests.push("inventory"); return { plugins: [plugin], accounts }; },
   listChats: async ({ accountId }) => { requests.push("listChats"); return [chat(accountId)]; },

@@ -9,6 +9,7 @@ import { useAccountReads } from "./thread/useAccountReads";
 import { actionSession, type MessageAction } from "./thread/actions";
 import { MessageActionButtons, MessageActionDialog, type ActionSelection } from "./thread/MessageActionDialog";
 import { AttachmentSummary } from "./thread/AttachmentSummary";
+import { PollPanel, PollSummary, type PollSelection } from "./thread/PollCard";
 import "./thread.css";
 
 function chatKind(kind: string) {
@@ -20,19 +21,20 @@ function chatKind(kind: string) {
   }
 }
 
-function Bubble({ thread, message, date, showSender, client, plugin, disabled, select }: {
+function Bubble({ thread, message, date, showSender, client, plugin, disabled, select, selectPoll }: {
   thread: ThreadKey; message: Message; date: ReturnType<typeof messageDate>; showSender: boolean;
-  client: CoreClient; plugin?: PluginSummary | null; disabled: boolean; select: (action: ActionSelection) => void;
+  client: CoreClient; plugin?: PluginSummary | null; disabled: boolean; select: (action: ActionSelection) => void; selectPoll: (poll: PollSelection) => void;
 }) {
   const sender = message.direction === "out" ? "You" : message.senderName;
   return <article className={'thread-bubble thread-bubble-' + message.direction} aria-label={sender || "Incoming message"}>
     {showSender && sender && <div className="thread-sender" dir="auto">{sender}</div>}
     {message.deleted ? <span className="thread-secondary">Deleted message</span> : <>
       <AttachmentSummary thread={thread} message={message} />
+      <PollSummary thread={thread} message={message} disabled={disabled} select={selectPoll} />
       {message.text && <div className="thread-message-body" dir="auto">
         <RichText text={message.text} entities={message.entities} />
       </div>}
-      {!message.mediaKind && !message.attachment && !message.text && <span className="thread-secondary">Empty message</span>}
+      {!message.mediaKind && !message.attachment && !message.poll && !message.text && <span className="thread-secondary">Empty message</span>}
     </>}
     <footer className="thread-message-meta">
       {message.isPinned && !message.deleted && <span>Pinned</span>}
@@ -52,6 +54,7 @@ function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: Ch
   const latestLimit = useRef(pageSize);
   const [notice, setNotice] = useState("");
   const [action, setAction] = useState<ActionSelection | null>(null);
+  const [poll, setPoll] = useState<PollSelection | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [reloadRequired, setReloadRequired] = useState(false);
   const actions = useMemo(() => actionSession(client, thread), [client, thread.accountId, thread.chatId, thread.topicId]);
@@ -254,7 +257,7 @@ function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: Ch
                   onClick={() => { if (row.item.kind === "gap") fillGap(row.item.gapId); }}>Load missing messages</button>
                 : <>{row.day && <div className="thread-day">{row.day}</div>}
                   <Bubble thread={thread} message={row.item.message} date={row.date} showSender={row.showSender} client={client} plugin={plugin}
-                    disabled={reads.busy || !reads.subscribed || actionBusy || reloadRequired} select={setAction} /></>}
+                    disabled={reads.busy || !reads.subscribed || actionBusy || reloadRequired} select={setAction} selectPoll={setPoll} /></>}
             </div>;
           })}
         </div>
@@ -266,6 +269,7 @@ function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: Ch
         virtual.scrollToIndex(rows.length - 1 + leading, { align: "end" });
       }}>Latest ↓</button>}
     </div>
+    {poll && <PollPanel selection={poll} client={client} plugin={plugin} close={() => setPoll(null)} />}
     {action && <MessageActionDialog selection={action} busy={actionBusy} close={() => setAction(null)} submit={submitAction} />}
   </section>;
 }

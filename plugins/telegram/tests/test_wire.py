@@ -326,3 +326,14 @@ def test_poll_retraction_and_uncertain_send_are_truthful(core):
     assert error["data"]["code"] == "NETWORK"
     assert "synthetic-private-poll-error" not in str(error) + core.stderr_text
     assert core.shutdown() == 0
+
+
+def test_messages_get_hydrates_sparse_personal_poll_results(core):
+    start(core, mode=6)
+    created = core.call("polls.create", {"account_id": "a", "chat_id": "17", "question": "Personal results", "options": ["A", "B"]})["message"]
+    p = {"account_id": "a", "chat_id": "17", "message_id": created["id"]}
+    core.call("polls.vote", {**p, "option_ids": [created["poll"]["options"][0]["id"]]})
+    read = core.call("messages.get", p)["message"]["poll"]
+    assert [value["chosen"] for value in read["options"]] == [True, False]
+    assert read["total_voters"] == 1
+    assert core.shutdown() == 0
