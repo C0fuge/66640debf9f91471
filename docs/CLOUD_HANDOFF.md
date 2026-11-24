@@ -2,26 +2,30 @@
 
 This is a clean source snapshot without private Git history. It combines the
 Rust/Tauri text demo, rich text, generic account settings/auth UI, and partial
-Telegram foundation. No real database, messenger login, .env or Anvil transcript
+Telegram/MAX foundations and typed message actions. No real database, messenger login, .env or Anvil transcript
 is present.
 
 Development runs locally. GitHub Actions provides builds and tests only, with no
 API key, ChatGPT OAuth credentials, cloud coding job or publishing agent. Reports
 and packaged synthetic-demo artifacts are retained for later inspection.
 
-Historical local baseline before publication:
-- Workspace Rust176 passed; core without native keyring108; Clippy passed.
-- UI20 passed; TypeScript/Vite build passed.
-- Python SDK41; Telegram foundation18 offline tests passed.
-- Fake-plugin CLI conformance and tutorial/template gates passed.
-- Browser send/account switching/drafts and native startup/close passed.
+Latest verified source snapshot: `7b949fc`, [Verify run45493731509](https://github.com/C0fuge/66640debf9f91471/actions/runs/45493731509), 2026-11-25.
 
-These counts do not prove the current cloud commit passed. Check its workflow.
-Telegram supports14 core-to-plugin operations in the imported foundation; the
-existing registry contains119 such operations and2 host services. Full Telegram
-parity is incomplete; MAX and WhatsApp plugins are pending.
+- Workspace Rust189 passed; core without native keyring113; Clippy passed.
+- UI28; Python SDK48; fake8; MAX18; Telegram44 offline tests passed.
+- Actual headless Chromium account and message-action scenarios passed.
+- Fake integrations and CLI conformance passed (144 passed, zero failed,71 skipped).
+- TypeScript/Vite and Linux desktop/CLI development builds passed.
 
-The next local batch continues Telegram actions/lifecycle and the full platform
-API audit. .github/cloud-tasks.md is a development backlog, not an automated agent
+These counts describe that source snapshot; check the workflow for any later
+source revision. Telegram implements27 core-to-plugin operations; the registry
+contains119 such operations and2 host services. Full Telegram parity is
+incomplete. MAX has a secure partial auth/session/text foundation; required
+history continuation is explicitly unsupported. WhatsApp is pending.
+
+The next local batch adds attachment metadata to the app view and researches
+safe MAX chat continuation. Full platform API evidence and remaining contract
+gaps are described in platform-coverage.md and api-contract-gaps.md.
+.github/cloud-tasks.md is a development backlog, not an automated agent
 schedule. Real legacy import and deletion of the old app remain a later verified
 stage outside this public source repository.

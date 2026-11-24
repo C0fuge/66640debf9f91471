@@ -12,15 +12,17 @@ read access to repository contents and does not push commits or create PRs.
 
 Two jobs run independently on disposable Ubuntu 24.04 runners:
 
-- UI tests and TypeScript/Vite build; Python SDK, fake and Telegram offline tests.
+- UI tests and TypeScript/Vite build; Python SDK and every Python plugin suite
+  (currently fake, MAX and Telegram); real headless Chromium account/action flows.
 - Rust workspace tests, core tests without default features, Clippy, ignored fake
   integrations, actual CLI fake conformance and desktop/CLI binary builds. The
   UI is built first because Tauri embeds its output. GTK/WebKit/D-Bus development
   packages are installed for the Linux desktop build.
 
-The baseline expects UI 20, Python SDK 41, fake 8 and Telegram 18 tests, Rust
-workspace 176 and core without default features 108 tests. These are historical
-counts; each run's logs are authoritative and counts may grow with new tests.
+Verified snapshot `7b949fc` passed UI28, Python SDK48, fake8, MAX18, Telegram44,
+Rust workspace189 and core without default features113 tests. Each run's logs
+are authoritative; counts may grow with new tests. See CLOUD_HANDOFF.md for the
+linked run and the explicit partial-platform limitations.
 
 Toolchains are Node 22, Python 3.13, uv 0.13.9 and Rust 1.99.0. Rust's published
 manifest confirms the required 1.99.0 toolchain; an installation failure fails
