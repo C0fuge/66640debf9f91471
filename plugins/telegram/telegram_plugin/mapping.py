@@ -184,6 +184,9 @@ def message(raw):
     text = getattr(raw, "message", None)
     sender = sid(getattr(raw, "sender_id", None)) or peer_id(getattr(raw, "from_id", None))
     replies = getattr(raw, "replies", None)
+    ttl = getattr(raw, "ttl_period", None)
+    if ttl is None:
+        ttl = getattr(getattr(raw, "media", None), "ttl_seconds", None)
     return dto.Message(id=str(raw.id), chat_id=peer_id(raw.peer_id), direction="out" if raw.out else "in",
                        sent_at=raw.date, sender_id=sender, text=text, topic_id=sid(topic),
                        entities=entities_from_tl(getattr(raw, "entities", None)) if text is not None else None,
@@ -194,6 +197,6 @@ def message(raw):
                        replies_count=getattr(replies, "replies", None),
                        replies_chat_id=peer_id(tl.PeerChannel(replies.channel_id)) if getattr(replies, "channel_id", None) else None,
                        via_bot_id=sid(getattr(raw, "via_bot_id", None)), effect_id=sid(getattr(raw, "effect", None)),
-                       ttl_seconds=getattr(raw, "ttl_period", None),
+                       ttl_seconds=ttl,
                        is_pinned=getattr(raw, "pinned", None), silent=getattr(raw, "silent", None),
                        edited=True if getattr(raw, "edit_date", None) else None, edited_at=getattr(raw, "edit_date", None))

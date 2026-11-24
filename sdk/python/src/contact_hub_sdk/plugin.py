@@ -127,20 +127,34 @@ class AuthFlow:
         """Emit an input step (``phone``, ``code``, ``password``, ``email``, ``email_code``,
         ``text``) and wait for the matching ``auth.submit``. To reject a value, call
         ``ask`` again with ``error=...`` (spec 7.2)."""
-        step_id = await self.show(
-            kind,
-            title=title,
-            hint=hint,
-            placeholder=placeholder,
-            error=error,
-            can_resend=can_resend,
-            min_length=min_length,
-            max_length=max_length,
-            expires_at=expires_at,
-        )
+        self._drop_pending()
+        step_id = self._next_id()
         fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self._pending[step_id] = fut
-        return await fut
+        try:
+            # The core can submit as soon as the emitted step becomes visible, including
+            # before auth_step's awaited write returns. Install its waiter first.
+            step = T.AuthStep(
+                flow=self.name,
+                step_id=step_id,
+                kind=kind,
+                title=title,
+                hint=hint,
+                placeholder=placeholder,
+                error=error,
+                can_resend=can_resend,
+                min_length=min_length,
+                max_length=max_length,
+                expires_at=expires_at,
+            )
+            await self.account.auth_step(step)
+            return await fut
+        finally:
+            # A replacement step or another flow owns its own waiter. Clean only ours.
+            if self._pending.get(step_id) is fut:
+                del self._pending[step_id]
+            if not fut.done():
+                fut.cancel()
 
     async def qr(self, data: str, *, expires_at: datetime | None = None, **fields: Any) -> str:
         return await self.show("qr", data=data, expires_at=expires_at, **fields)

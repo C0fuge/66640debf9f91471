@@ -14,6 +14,7 @@ from telegram_plugin import downloads
 from telegram_plugin.cache import atomic_file
 from telegram_plugin.mapping import message
 from telegram_plugin.media_info import document_info, photo_info, waveform
+from telegram_plugin.session import disconnect, make_client, session_path
 
 
 def account(tmp_path):
@@ -147,4 +148,25 @@ def test_download_queue_priority_and_cancelled_waiter():
             await asyncio.gather(cancelled, return_exceptions=True)
         await asyncio.gather(low, high)
         assert order == ["high", "low"]
+    asyncio.run(exercise())
+
+
+def test_real_telethon_download_stream_interface_offline(tmp_path):
+    async def exercise():
+        value = make_client(session_path(tmp_path / "state"), 1, "0" * 32, None)
+        async def chunks(*args, **kwargs):
+            yield b"fix"
+            yield b"ture"
+        value._iter_download = chunks
+        progress = AsyncMock()
+        try:
+            with atomic_file(tmp_path / "cache") as (stream, publish):
+                result = await value.download_media(row(100, media=tl.MessageMediaDocument(document=document())),
+                                                     file=stream, progress_callback=progress)
+                assert result is stream
+                path = Path(publish())
+            assert path.read_bytes() == b"fixture"
+            assert [call.args for call in progress.await_args_list] == [(3, 7), (7, 7)]
+        finally:
+            await disconnect(value)
     asyncio.run(exercise())

@@ -33,6 +33,7 @@ class Stub:
         self.attempt = 0
         self.handlers = []
         self.sent = {}
+        self.uploaded, self.stored_media = {}, {}
         self.messages = {i: row(i) for i in range(1, 11)}
         self.messages[100] = row(100, media=tl.MessageMediaDocument(document=document(tl.DocumentAttributeFilename("../../remote.bin"))))
         self.messages[101] = row(101, media=tl.MessageMediaPhoto(photo=photo(), spoiler=True))
@@ -118,6 +119,25 @@ class Stub:
         file.write(b"avatar")
         return file
 
+    async def upload_file(self, file, *, file_size, file_name, progress_callback):
+        payload = file.read()
+        assert len(payload) == file_size
+        handle = tl.InputFile(400 + len(self.uploaded), 1, file_name, "fixture")
+        self.uploaded[handle.id] = payload
+        await progress_callback(file_size, file_size)
+        return handle
+
+    def media_value(self, media):
+        if isinstance(media, tl.InputMediaUploadedPhoto):
+            value = tl.MessageMediaPhoto(photo=photo(), spoiler=media.spoiler, ttl_seconds=media.ttl_seconds)
+        elif isinstance(media, tl.InputMediaUploadedDocument):
+            value = tl.MessageMediaDocument(document=document(*media.attributes, mime=media.mime_type,
+                                              size=len(self.uploaded[media.file.id])), spoiler=media.spoiler, ttl_seconds=media.ttl_seconds)
+        else:
+            value = self.stored_media[media.id.id]
+            value.spoiler = media.spoiler
+        return value
+
     async def iter_messages(self, peer, *, limit, reply_to=None, offset_id=0, offset_date=None, reverse=False, min_id=0, max_id=0):
         ids = list(range(1, 11))
         if not reverse:
@@ -131,6 +151,28 @@ class Stub:
     async def __call__(self, req):
         if isinstance(req, functions.contacts.GetContactsRequest):
             return tl.contacts.Contacts([tl.Contact(17, True)], 1, [USER])
+        if isinstance(req, functions.messages.UploadMediaRequest):
+            value = self.media_value(req.media)
+            attachment = value.photo if isinstance(value, tl.MessageMediaPhoto) else value.document
+            # Give each upload a distinct stable media ID.
+            attachment.id = 500 + len(self.stored_media)
+            self.stored_media[attachment.id] = value
+            return value
+        if isinstance(req, (functions.messages.SendMediaRequest, functions.messages.SendMultiMediaRequest)):
+            inputs = req.multi_media if isinstance(req, functions.messages.SendMultiMediaRequest) else [req]
+            updates = []
+            for entry in inputs:
+                mid = 200 + len(self.messages)
+                value = self.media_value(entry.media)
+                header = tl.MessageReplyHeader(reply_to_msg_id=req.reply_to.reply_to_msg_id,
+                              reply_to_top_id=req.reply_to.top_msg_id, forum_topic=True) if req.reply_to else None
+                peer = tl.PeerUser(req.peer.user_id) if isinstance(req.peer, tl.InputPeerUser) else tl.PeerChannel(req.peer.channel_id)
+                item = row(mid, peer, out=True, media=value, entities=entry.entities, reply_to=header, silent=req.silent,
+                           grouped_id=123 if len(inputs) > 1 else None)
+                item.message = entry.message
+                self.messages[mid] = item
+                updates.extend([tl.UpdateMessageID(mid, entry.random_id), tl.UpdateNewMessage(item, 1, 1)])
+            return tl.Updates(updates, [], [], NOW, 1)
         if isinstance(req, functions.messages.EditMessageRequest):
             item = self.messages[req.id]
             if item.message == req.message and item.entities == req.entities:

@@ -476,12 +476,22 @@ async fn flood_with_slow_sink_stays_bounded_and_ordered() {
     env.misbehaving("ff", "good", json!({}));
     let mut config = env.config();
     config.event_queue = 16;
+    // Keep the fast ping period, but budget RPCs separately from the unscaled 4000-frame
+    // workload and forced sink pause. DIV=50 otherwise leaves only 400 ms to drain it.
+    config.timeout_scale = 0.1;
     let sink = RecSink::new();
     let h = HostHandle::new(config, sink.clone(), Arc::new(MemorySecretStore::new()));
     let mut changes = h.subscribe();
     h.start_account("ff", "f#1", spec(json!({}))).await.unwrap();
     sink.wait_status("f#1", secs(5.0), |s| s.state == AccountState::Connected)
         .await;
+
+    let hang_window = (h.config().ping_interval + h.config().request_timeout("ping")) * 3;
+    let stall_for = hang_window + secs(0.5);
+    assert!(
+        h.config().request_timeout("messages.fetch_recent") >= stall_for + secs(5.0),
+        "the flood RPC needs a drain budget after the intentional sink stall"
+    );
 
     // Block the sink, then make the plugin emit 4000 notifications (~700 KB).
     sink.pause();
@@ -493,8 +503,7 @@ async fn flood_with_slow_sink_stays_bounded_and_ordered() {
         );
 
     // Hold the stall for longer than the hang detection window.
-    let hang_window = (h.config().ping_interval + h.config().request_timeout("ping")) * 3;
-    tokio::time::sleep(hang_window + secs(0.5)).await;
+    tokio::time::sleep(stall_for).await;
 
     // Nothing reached the sink (it is blocked on the first event)...
     assert_eq!(

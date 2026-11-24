@@ -47,6 +47,9 @@ class LimitedWriter:
     def flush(self):
         self.stream.flush()
 
+    def tell(self):
+        return self.stream.tell()
+
 
 @contextmanager
 def atomic_file(cache_dir, suffix=".bin", *, limit=MAX_BYTES):

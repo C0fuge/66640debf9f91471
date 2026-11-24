@@ -260,3 +260,29 @@ def test_media_downloads_and_avatars(core):
     assert core.event("avatar.ready")["path"] == avatar["path"]
     assert not core.call("avatars.download", {"account_id": "a", "kind": "user", "id": "18"}).get("path")
     assert core.shutdown() == 0
+
+
+def test_file_and_album_upload_wire(core, tmp_path):
+    start(core)
+    path = tmp_path / "fixture.bin"
+    path.write_bytes(b"fixture")
+    p = {"account_id": "a", "chat_id": "17", "path": str(path), "caption": "**😀x**",
+         "entities": [{"type": "bold", "offset": 2, "length": 3}], "filename": "custom.bin",
+         "mime": "application/octet-stream", "silent": True, "as_file": True, "spoiler": True}
+    result = core.call("messages.send_file", p)["message"]
+    assert result["text"] == p["caption"] and result["entities"] == p["entities"]
+    assert result["media"]["filename"] == "custom.bin" and result["media"]["has_spoiler"]
+    assert core.event("transfer.progress", where=lambda e: e["direction"] == "upload")["request_id"] is not None
+    image = tmp_path / "fixture.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+    photo = core.call("messages.send_file", {"account_id": "a", "chat_id": "-1000000000008", "path": str(image),
+                         "kind": "photo", "topic_id": "42", "reply_to": {"message_id": "7"}, "spoiler": True})["message"]
+    assert photo["media"]["kind"] == "photo" and photo["topic_id"] == "42"
+    album = core.call("messages.send_album", {"account_id": "a", "chat_id": "17", "caption": "Album",
+              "items": [{"path": str(path), "as_file": True, "spoiler": True}, {"path": str(path), "caption": "Second"}]})["messages"]
+    assert len(album) == 2 and [m["text"] for m in album] == ["Album", "Second"]
+    assert album[0]["media"]["has_spoiler"] and album[0]["grouped_id"] == album[1]["grouped_id"]
+    assert core.error("messages.send_file", {**p, "kind": "video_note"})["data"]["code"] == "NOT_SUPPORTED"
+    assert core.error("messages.send_file", {**p, "kind": "video"})["data"]["code"] == "NOT_SUPPORTED"
+    assert core.error("messages.send_file", {**p, "duration": 3})["data"]["field"] == "duration"
+    assert core.shutdown() == 0
