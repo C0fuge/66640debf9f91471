@@ -92,12 +92,21 @@ fn choose_portal(
         "org.freedesktop.DBus",
     )
     .map_err(|error| unavailable_at("bus_proxy", error))?;
-    // Activating the desktop portal does not create a chooser. Resolve its unique owner
-    // before subscribing, so a later replacement cannot supply our response.
-    let _: u32 = bus
-        .call("StartServiceByName", &(PORTAL, 0_u32))
-        .map_err(|error| unavailable_at("activate_portal", error))?;
-    let owner: String = bus.call("GetNameOwner", &(PORTAL,)).map_err(|error| unavailable_at("resolve_owner", error))?;
+    // A running service can own its name without an activation .service file.
+    // Resolve it first: some bus implementations reject StartServiceByName for
+    // such a name before consulting the registry. Activate only an absent owner.
+    let owner: String = match bus.call("GetNameOwner", &(PORTAL,)) {
+        Ok(owner) => owner,
+        Err(zbus::Error::MethodError(name, _, _))
+            if name.as_str() == "org.freedesktop.DBus.Error.NameHasNoOwner" =>
+        {
+            let _: u32 = bus.call("StartServiceByName", &(PORTAL, 0_u32))
+                .map_err(|error| unavailable_at("activate_portal", error))?;
+            bus.call("GetNameOwner", &(PORTAL,))
+                .map_err(|error| unavailable_at("resolve_activated_owner", error))?
+        }
+        Err(error) => return Err(unavailable_at("resolve_owner", error)),
+    };
     let sender = connection.unique_name().ok_or(SaveDialogError::Unavailable)?;
     let token = format!("ch_{}", zbus::Guid::generate());
     let path = request_path(sender.as_str(), &token).ok_or(SaveDialogError::Internal)?;

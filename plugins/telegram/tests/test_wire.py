@@ -342,7 +342,8 @@ def test_messages_get_hydrates_sparse_personal_poll_results(core):
 def test_ordinary_reactions_wire_snapshot_paging_and_account_isolation(core):
     caps = core.initialize()["capabilities"]
     assert caps["reactions.set"]["max"] == 100 and caps["reactions.custom"] and caps["reactions.who"]
-    assert all(name not in caps for name in ("paid.react", "reactions.effects", "reactions.unread"))
+    assert caps["reactions.unread"] is True
+    assert all(name not in caps for name in ("paid.react", "reactions.effects"))
     start(core, mode=7)
     start(core, name="b")
     available = core.call("reactions.available", {"account_id": "a", "chat_id": "17"})
@@ -365,4 +366,50 @@ def test_ordinary_reactions_wire_snapshot_paging_and_account_isolation(core):
     error = core.error("reactions.set", {**p, "reactions": [{"emoji": "explode-reaction"}]})
     assert error["data"]["code"] == "NETWORK"
     assert "synthetic-private-reaction-error" not in str(error) + core.stderr_text
+    assert core.shutdown() == 0
+
+
+def test_unread_reactions_wire_oldest_batch_topic_read_and_account_isolation(core):
+    start(core)
+    start(core, name="b")
+    p = {"account_id": "a", "chat_id": "17"}
+    assert core.call("reactions.list_unread", {**p, "limit": 2}) == {"message_ids": ["2", "5"]}
+    assert core.call("reactions.read", p) == {}, "positive server acknowledgements must be finished before success"
+    assert core.call("reactions.list_unread", {**p, "limit": 3}) == {"message_ids": []}
+    assert core.call("reactions.list_unread", {**p, "account_id": "b", "limit": 3}) == {"message_ids": ["2", "5", "9"]}
+    topic = {"account_id": "a", "chat_id": "-1000000000008", "topic_id": "42"}
+    assert core.call("reactions.list_unread", {**topic, "topic_id": None, "limit": 3}) == {"message_ids": ["11", "41", "45"]}
+    assert core.call("reactions.list_unread", {**topic, "limit": 2}) == {"message_ids": ["41", "45"]}
+    assert core.call("reactions.read", topic) == {}
+    assert core.call("reactions.list_unread", {**topic, "limit": 2}) == {"message_ids": []}
+    assert core.call("reactions.list_unread", {**topic, "topic_id": "1", "limit": 2}) == {"message_ids": ["11"]}, "reading topic42 must not clear General"
+    assert core.call("reactions.read", {**topic, "topic_id": None}) == {}
+    assert core.call("reactions.list_unread", {**topic, "topic_id": None, "limit": 3}) == {"message_ids": []}
+    bot = {"account_id": "a", "chat_id": "18", "topic_id": "7"}
+    assert core.call("reactions.list_unread", {**bot, "limit": 2}) == {"message_ids": ["70", "72"]}
+    assert core.call("reactions.read", bot) == {}
+    assert core.call("reactions.list_unread", {**bot, "limit": 2}) == {"message_ids": []}
+    assert core.error("reactions.read", {**p, "topic_id": "42"})["data"]["field"] == "topic_id"
+    assert core.shutdown() == 0
+
+
+def test_unread_read_network_error_stays_unknown_and_redacted(core):
+    start(core, mode=8)
+    p = {"account_id": "a", "chat_id": "17"}
+    error = core.error("reactions.read", p)
+    assert error["data"] == {"code": "NETWORK", "outcome": "unknown", "retry_safe": False}
+    assert core.call("reactions.list_unread", {**p, "limit": 2}) == {"message_ids": ["2", "5"]}
+    assert "synthetic-private-unread-error" not in str(error) + core.stderr_text
+    assert core.shutdown() == 0
+
+
+def test_cancelling_dispatched_unread_write_preserves_unknown_through_sdk_wire(core):
+    start(core, mode=9)
+    p = {"account_id": "a", "chat_id": "17"}
+    request_id = core.send_request("reactions.read", p)
+    assert core.call("ping") == {}, "the later ping runs after the read handler has reached its client await"
+    core.cancel(request_id)
+    response = core.response(request_id)
+    assert response["error"]["data"] == {"code": "NETWORK", "outcome": "unknown", "retry_safe": False}
+    assert core.call("reactions.list_unread", {**p, "limit": 2}) == {"message_ids": ["2", "5"]}
     assert core.shutdown() == 0

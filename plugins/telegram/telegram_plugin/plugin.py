@@ -3,7 +3,7 @@ import asyncio
 from contact_hub_sdk import Plugin, errors as rpc, method
 from contact_hub_sdk import types as dto
 
-from . import actions, activity, downloads, history, polls, reactions, sync, uploads
+from . import actions, activity, downloads, history, polls, reactions, sync, unread_reactions, uploads
 from .auth import sign_in
 from .mapping import SEND_ENTITY_TYPES, contact
 from .send import send
@@ -23,6 +23,7 @@ class TelegramPlugin(Plugin):
         "polls.create": {"quiz": True, "multiple": True, "anonymous": True, "max_options": polls.MAX_OPTIONS},
         "polls.vote": True, "polls.close": True,
         "reactions.set": {"max": reactions.MAX_SELECTION}, "reactions.custom": True, "reactions.who": True,
+        "reactions.unread": True,
     }
 
     def __init__(self, factory=make_client):
@@ -264,3 +265,13 @@ class TelegramPlugin(Plugin):
     async def reaction_users(self, account, params):
         with platform_errors():
             return await reactions.who(self.ready(account), params)
+
+    @method("reactions.list_unread")
+    async def unread_reactions(self, account, params):
+        with platform_errors():
+            return await unread_reactions.list_unread(self.ready(account), params)
+
+    @method("reactions.read")
+    async def read_reactions(self, account, params):
+        with platform_errors():
+            await unread_reactions.read(account, self.ready(account), params)

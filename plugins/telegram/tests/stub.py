@@ -4,7 +4,7 @@ import copy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from telethon import errors, functions, types as tl
+from telethon import errors, functions, types as tl, utils
 from telethon.sessions import SQLiteSession
 
 NOW = datetime(2025, 1, 1, tzinfo=UTC)
@@ -36,6 +36,8 @@ class Stub:
         self.sent = {}
         self.uploaded, self.stored_media = {}, {}
         self.poll_solutions = {}
+        self.unread_reactions = {("17", None): {2, 5, 9}, ("-1000000000008", None): {11},
+                                 ("-1000000000008", "42"): {41, 45}, ("18", "7"): {70, 72}}
         self.messages = {i: row(i) for i in range(1, 11)}
         self.messages[100] = row(100, media=tl.MessageMediaDocument(document=document(tl.DocumentAttributeFilename("../../remote.bin"))))
         self.messages[101] = row(101, media=tl.MessageMediaPhoto(photo=photo(), spoiler=True))
@@ -157,9 +159,37 @@ class Stub:
         for i in ids[:limit]:
             yield row(i)
 
+    def unread_matches(self, req):
+        chat = str(utils.get_peer_id(req.peer))
+        return sorted((mid, key) for key, mids in self.unread_reactions.items() if key[0] == chat
+                      and (req.top_msg_id is None or str(req.top_msg_id) == (key[1] or "1")) for mid in mids)
+
     async def __call__(self, req):
         if isinstance(req, functions.contacts.GetContactsRequest):
             return tl.contacts.Contacts([tl.Contact(17, True)], 1, [USER])
+        if isinstance(req, functions.channels.GetChannelsRequest):
+            return tl.messages.Chats([tl.Channel(id=channel.channel_id, title="Forum fixture", photo=tl.ChatPhotoEmpty(), date=NOW,
+                                                 megagroup=True, forum=True) for channel in req.id])
+        if isinstance(req, functions.users.GetUsersRequest):
+            return [tl.User(user.user_id, first_name="Forum bot" if user.user_id == 18 else "Sample",
+                     bot=True if user.user_id == 18 else None, bot_info_version=1 if user.user_id == 18 else None,
+                     bot_forum_view=True if user.user_id == 18 else None) for user in req.id]
+        if isinstance(req, functions.messages.GetUnreadReactionsRequest):
+            assert (req.offset_id, req.add_offset, req.max_id, req.min_id) == (1, -req.limit, 0, 0) and req.saved_peer_id is None
+            matches = self.unread_matches(req)
+            peer = tl.PeerUser(req.peer.user_id) if isinstance(req.peer, tl.InputPeerUser) else tl.PeerChannel(req.peer.channel_id)
+            rows = [row(mid, peer, reply_to=tl.MessageReplyHeader(reply_to_msg_id=int(key[1]), forum_topic=True) if key[1] else None)
+                    for mid, key in reversed(matches[:req.limit])]
+            return tl.messages.MessagesSlice(len(matches), rows, [], [], [])
+        if isinstance(req, functions.messages.ReadReactionsRequest):
+            assert req.saved_peer_id is None
+            if self.mode == 8:
+                raise OSError("synthetic-private-unread-error")
+            if self.mode == 9:
+                await asyncio.Future()  # A dispatched write with no outcome yet.
+            for mid, key in self.unread_matches(req)[:2]:
+                self.unread_reactions[key].remove(mid)
+            return tl.messages.AffectedHistory(1, 1, len(self.unread_matches(req)))
         if isinstance(req, functions.help.GetAppConfigRequest):
             return tl.help.AppConfig(1, tl.JsonObject([tl.JsonObjectValue("reactions_user_max_default", tl.JsonNumber(1))]))
         if isinstance(req, functions.messages.GetAvailableReactionsRequest):
