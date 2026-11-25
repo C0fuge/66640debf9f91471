@@ -5,7 +5,7 @@ import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from contact_hub_sdk import types as T
+from contact_hub_sdk import Forbidden, NotFound, PluginError, types as T
 from max_plugin.plugin import MaxPlugin
 
 assert "pymax" not in sys.modules
@@ -89,6 +89,32 @@ class OfflineClient:
             await self.event("conversation", T.Conversation(id="10", kind="dm", title="Updated"))
             await self.event("deleted", ("10", ["19"]))
         return message
+
+    async def deletion_preflight(self, chat_id, message_ids, revoke):
+        self.store.identity["delete_reads"] = self.store.identity.get("delete_reads", 0) + 1
+        self.store.save_identity()
+        if chat_id == 99 or 404 in message_ids:
+            raise NotFound(kind="message")
+        if revoke and 20 in message_ids:
+            raise Forbidden("Synthetic incoming message")
+        if self.scenario == "delete-generation":
+            self.account.data["max"].generation += 1
+        if self.scenario == "delete-read-error":
+            raise ConnectionError("synthetic-private-delete-marker")
+        if self.scenario == "delete-read-pending":
+            await self.event("conversation", T.Conversation(id="10", kind="dm", title="Preflight pending"))
+            await asyncio.Event().wait()
+
+    async def delete(self, chat_id, message_ids, revoke):
+        self.store.identity["delete_count"] = self.store.identity.get("delete_count", 0) + 1
+        self.store.save_identity()
+        if self.scenario == "delete-pending":
+            await self.event("conversation", T.Conversation(id="10", kind="dm", title="Deletion dispatched"))
+            await asyncio.Event().wait()
+        if self.scenario == "delete-uncertain":
+            raise ConnectionError("synthetic-private-delete-marker")
+        if self.scenario == "delete-partial":
+            raise PluginError("Synthetic partial acknowledgment")
 
 
 MaxPlugin(OfflineClient, retry_delay=0.01).run()

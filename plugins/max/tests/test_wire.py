@@ -23,7 +23,7 @@ def sign_in(core, account="max", mode="phone_code"):
 def test_auth_order_accounts_events_send_and_pagination(core_factory, tmp_path):
     core = core_factory()
     core.start()
-    assert core.capabilities == {"auth.interactive": True}
+    assert core.capabilities == {"auth.interactive": True, "delete": True, "delete.for_me": True}
     core.event("status", state="auth_required")
     frames = [json.loads(line) for line in core.raw]
     start_reply = next(i for i, frame in enumerate(frames) if "result" in frame and frame["result"] == {})

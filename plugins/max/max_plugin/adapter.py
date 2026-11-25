@@ -12,7 +12,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from contact_hub_sdk import AuthRequired, PluginError
+from contact_hub_sdk import AuthRequired, Forbidden, NotFound, NotSupported, PluginError
 
 from . import mapping
 from .discovery import drain_chat_pages, marker
@@ -254,3 +254,73 @@ class PyMaxAdapter:
         if result.chat_id != str(chat_id) or raw.sender != self.me:
             raise PluginError("MAX send response did not confirm this conversation and sender")
         return result
+
+    async def deletion_preflight(self, chat_id: int, message_ids: list[int], revoke: bool) -> None:
+        from pymax.api.messages.payloads import GetMessagesPayload
+        from pymax.api.response import require_payload_dict
+        from pymax.protocol import Opcode
+        from pymax.types.domain.message import Message
+        if type(self.me) is not int:
+            raise AuthRequired("MAX account identity is unavailable")
+        response = await self.client._app.invoke(Opcode.MSG_GET,
+                    GetMessagesPayload(chat_id=chat_id, message_ids=message_ids).to_payload())
+        payload = require_payload_dict(response)
+        if "chatId" in payload and response_id(payload["chatId"]) != chat_id:
+            raise PluginError("MAX deletion preflight returned another conversation")
+        if "postId" in payload:
+            raise NotSupported("MAX comment deletion is not implemented")
+        rows = payload.get("messages")
+        if not isinstance(rows, list) or len(rows) > len(message_ids):
+            raise PluginError("MAX returned invalid deletion preflight data")
+        found = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise PluginError("MAX returned invalid deletion preflight data")
+            response_id(row.get("id"))
+            if row.get("chatId") is not None:
+                response_id(row["chatId"])
+            if row.get("sender") is not None:
+                response_id(row["sender"])
+            raw = Message.model_validate(row)
+            # The actual MSG_GET request supplies parent context when chatId is
+            # absent, just as the pinned wrapper does. Contradictions never move
+            # an otherwise valid message into the requested conversation.
+            if raw.id not in message_ids or raw.id in found or raw.chat_id not in {None, chat_id}:
+                raise PluginError("MAX deletion preflight contradicted the requested messages")
+            if raw.sender is None or raw.status == "REMOVED":
+                raise NotFound(kind="message")
+            if raw.type != "USER" or raw.post_id is not None or raw.delayed_attributes is not None:
+                raise NotSupported("MAX deletion of comments, scheduled or service messages is not implemented")
+            if revoke and raw.sender != self.me:
+                raise Forbidden("MAX deletion for everyone requires an outgoing message")
+            found.add(raw.id)
+        if found != set(message_ids):
+            raise NotFound(kind="message")
+
+    async def delete(self, chat_id: int, message_ids: list[int], revoke: bool) -> None:
+        from pymax.api.messages.payloads import DeleteMessagePayload
+        from pymax.api.response import require_payload_dict
+        from pymax.protocol import Opcode
+        response = await self.client._app.invoke(Opcode.MSG_DELETE,
+                    DeleteMessagePayload(chat_id=chat_id, message_ids=message_ids,
+                                         for_me=not revoke).to_payload())
+        payload = require_payload_dict(response)
+        # The pinned convenience wrapper discards this response and always returns
+        # True. The first-party command-66 ack instead identifies chat/message IDs;
+        # require the whole selected set before returning protocol Empty success.
+        rows = payload.get("messageIds")
+        if (response_id(payload.get("chatId")) != chat_id or "postId" in payload
+                or not isinstance(rows, list) or not rows or len(rows) > 200
+                or {response_id(value) for value in rows} != set(message_ids)):
+            raise PluginError("MAX deletion acknowledgment did not confirm the selected messages")
+
+
+def response_id(value: Any) -> int:
+    """Validate int64 wire IDs without accepting bool/float coercion."""
+    if type(value) is int and -(2**63) <= value < 2**63:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"-?(0|[1-9][0-9]{0,18})", value):
+        number = int(value)
+        if -(2**63) <= number < 2**63 and str(number) == value:
+            return number
+    raise PluginError("MAX returned an invalid message identity")

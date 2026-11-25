@@ -53,6 +53,7 @@ class Runtime:
     ready: bool = False
     revoked: bool = False
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     auth_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     live: bool = False
     events: list = field(default_factory=list)
@@ -64,8 +65,8 @@ class Runtime:
 class MaxPlugin(Plugin):
     version = "0.1.0"
     # Required send/recent/auth have handlers. Full chat/history reconciliation
-    # cannot be promised from timestamp-only library pages, so no optional caps.
-    capabilities: dict[str, Any] = {"auth.interactive": True}
+    # cannot be promised from timestamp-only library pages; those caps stay absent.
+    capabilities: dict[str, Any] = {"auth.interactive": True, "delete": True, "delete.for_me": True}
 
     def __init__(self, adapter_factory: Callable = PyMaxAdapter, *, retry_delay: float = 1):
         self.adapter_factory = adapter_factory
@@ -299,6 +300,40 @@ class MaxPlugin(Plugin):
                 raise AuthRequired()
             raise Unavailable()
         return state
+
+    @method("messages.delete")
+    async def delete(self, account: Account, params: T.MessagesDeleteParams) -> dict:
+        state = self._ready(account)
+        chat = numeric_id(params.chat_id, "chat_id")
+        if type(params.revoke) is not bool:
+            raise InvalidParams("revoke must be a boolean", field="revoke")
+        if not params.message_ids or len(params.message_ids) > 100:
+            raise InvalidParams("Select between 1 and 100 messages", field="message_ids")
+        # Duplicate input IDs are one selected message, never separate writes.
+        selected = list(dict.fromkeys(numeric_id(mid, "message_ids") for mid in params.message_ids))
+        async with state.mutation_lock:
+            state = self._ready(account)
+            adapter, generation = state.adapter, state.generation
+            try:
+                await adapter.deletion_preflight(chat, selected, params.revoke)
+            except Exception as exc:
+                error = failure(exc)
+                if error.code in {"NETWORK", "TIMEOUT", "INTERNAL"}:
+                    # This stage issued only MSG_GET. A failed read must never
+                    # imply an uncertain deletion or an already dispatched write.
+                    raise Unavailable("MAX deletion preflight could not be verified") from None
+                raise error from None
+            if not state.ready or state.adapter is not adapter or state.generation != generation:
+                raise Unavailable("MAX connection changed before deletion")
+            try:
+                # Exactly one mutation request. There is no server deduplication
+                # proof or client_id in this frozen method; never retry it here.
+                await adapter.delete(chat, selected, params.revoke)
+                await account.messages_deleted([str(mid) for mid in selected], chat_id=params.chat_id)
+            except (Exception, asyncio.CancelledError):
+                raise PluginError("MAX deletion outcome is unknown; automatic retry is unsafe",
+                                  code="NETWORK", outcome="unknown", retry_safe=False) from None
+        return {}
 
     @method("messages.fetch_recent")
     async def recent(self, account: Account, params: T.MessagesFetchRecentParams) -> dict:

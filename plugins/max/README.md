@@ -43,10 +43,11 @@ host; pytest execution belongs to CI. No real-server behavior has been verified.
 | Live data | New/edited message upserts, chat updates, scoped message deletions | No durable event replay, read/presence/reaction/contact-change projection or gap closing |
 | Text send | One literal-text request using pinned payload models; basic same-chat reply; confirm only the returned outgoing platform message; emit the confirmed upsert | Media, entities, silent/scheduled/topic/comment/effect sends are not advertised |
 | Local send journal | A supplied `client_id` binds to the exact chat/text/reply payload. Confirmed retries return and re-emit the stored message. Authoritative results/upserts preserve the exact ID in `ext.max.client_id`, including an empty ID. Pending/unknown retries fail without sending again, across restart | Does **not** claim server deduplication or exactly-once delivery. No `client_id` means no durable local replay protection. Journal is capped at 10,000 entries; every private state file has a 64 MiB limit. New keyed sends are refused when full |
+| Delete | Fresh chat-scoped message preflight, one delete request, exact chat/ID acknowledgment, then scoped `messages.deleted` and `{}` success. `revoke=false` supports incoming messages; `revoke=true` requires outgoing sender identity | At most 100 input IDs, duplicates normalized; regular `USER` messages only. Comments, scheduled/service messages, admin deletion of others' messages and automatic replay are unsupported. Server permissions still apply |
 | Recent history | Request a newest page, deduplicate IDs and sort by timestamp/numeric ID descending; bounded limit 1–200 | Continuation is unsupported; even short/empty pages cannot falsely close history |
 
-Only `auth.interactive` is advertised. Optional `chat.sync`, `contacts.list`,
-`history.fill_gap`, `history.jump_to_date`, attachments, search, mutation and other
+Only `auth.interactive`, `delete` and `delete.for_me` are advertised. Optional `chat.sync`, `contacts.list`,
+`history.fill_gap`, `history.jump_to_date`, attachments, search, editing and other
 capabilities remain absent. Account ghost mode and unsupported request parameters
 are rejected explicitly. Auto-download has no effect while media is unsupported.
 Full chat/contact reconciliation needs a separately proven enumeration strategy.
@@ -95,6 +96,48 @@ instead uses `SendMessagePayload`/`SendMessagePayloadMessage` with empty element
 then the same `App.invoke(MSG_SEND)` and response model path. This preserves literal
 text and sends once. A persisted monotonic `cid` preserves per-device sequence
 continuity; it is correlation metadata, **not proof of server idempotency**.
+
+## Confirmed deletion and editing boundary
+
+Deletion first sends pinned `GetMessagesPayload` through `App.invoke(MSG_GET)`.
+Every selected ID must be present exactly once, in the requested chat context,
+with a sender, regular message type and no scheduled/comment identity. Explicit
+envelope/message chat contradictions are rejected. An absent message `chatId`
+uses its request parent, as the pinned library does. For everyone, sender must
+match this account's authenticated self; for me, incoming messages are allowed.
+The account connection generation is checked again before the mutation. A failed
+preflight is a safe pre-dispatch failure; it does not report an uncertain write.
+
+`DeleteMessagePayload` sends `forMe = !revoke`. The pinned convenience method
+discards its response and unconditionally returns true, so it is not used.
+The actual first-party web command-66 binding instead requires acknowledgment
+`chatId` and `messageIds`, with optional comment `postId`. Its deletion caller
+maps `forAll` to inverse `forMe`, uses only returned IDs and rolls back missing
+ones. This adapter requires the exact whole selected ID set after normalizing
+duplicate/order differences, the same chat, and no comment field. Partial/empty,
+foreign, malformed or lost acknowledgments never become `{}` success or a
+fabricated full deletion event. Independent live notifications can still arrive.
+
+Exactly one mutation request is made; batches are never split or automatically
+retried. Cancellation after dispatch and any uncertain response use `NETWORK`,
+`outcome: "unknown"`, `retry_safe: false`. The frozen delete method has no request
+key; no durable replay/idempotency guarantee is added. A later explicit repeat
+must pass a fresh preflight and may return not-found. This is not a promise that
+the entire batch was unchanged when the result is unknown.
+
+These response and flag semantics come from the same hashed first-party bundle
+linked above: command schemas/bindings at decoded-character offsets 205230 and
+216323, actual deletion loop at 784470. Request models and the lossy wrapper are
+in the pinned `api/messages/payloads.py` and `api/messages/service.py`. All adapter
+logic is original; no minified source was copied. Live server behavior remains
+unverified.
+
+Editing remains undeclared and rejected before dispatch. The pinned edit helper
+parses Markdown; a direct literal-text payload is possible, but that alone does
+not prove editability. The first-party client also checks a no-edit bit, server
+`edit-timeout`, attachment/link category and chat write rights. The current
+adapter does not retain/reconcile that configuration or implement those chat
+permission rules. No timeout, edit window or rights fallback is guessed here.
 
 ## History safety and contract gap
 

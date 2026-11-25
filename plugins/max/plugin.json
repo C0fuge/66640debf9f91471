@@ -15,7 +15,7 @@
       "proxy": {"type": "string", "x-secret": true, "title": "Proxy URL"}
     }
   },
-  "description": "MAX phone/QR sign-in, login snapshots, live text events and confirmed text sending. History continuation is bounded; see README.",
+  "description": "MAX phone/QR sign-in, login snapshots, live text events, confirmed text sending and scoped deletion. History continuation remains unsupported; see README.",
   "homepage": "https://github.com/MaxApiTeam/PyMax",
   "license": "MIT"
 }
