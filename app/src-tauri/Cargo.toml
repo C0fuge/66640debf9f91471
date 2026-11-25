@@ -17,3 +17,6 @@ tauri = "2.12"
 ch-app = { path = "../../crates/ch-app" }
 serde_json.workspace = true
 tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }
