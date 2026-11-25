@@ -104,7 +104,7 @@ def test_unavailable_wrong_duplicate_or_oversized_unread_rows_are_not_partial_su
         p = dto.ChatTopicLimitParams(account_id="a", chat_id="17", limit=2)
         value = client()
         for result in [tl.messages.MessagesNotModified(2), tl.messages.Messages([row(2), row(3, tl.PeerUser(18))], [], [], []),
-                       tl.messages.Messages([row(2), row(2)], [], [], []), tl.messages.Messages([tl.MessageEmpty(2)], [], [], []),
+                       tl.messages.Messages([row(2), row(2)], [], [], []), tl.messages.Messages([tl.MessageEmpty(id=2, peer_id=None)], [], [], []),
                        tl.messages.Messages([row(0)], [], [], []), tl.messages.Messages([row(2), row(3), row(4)], [], [], [])]:
             value.return_value = result
             with pytest.raises(rpc.Internal):
