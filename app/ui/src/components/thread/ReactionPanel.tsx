@@ -146,7 +146,7 @@ export function ReactionPanel({ selection, client, plugin, account, unavailable,
     </section>}
     <section className="reaction-reactors" aria-label="Reactor metadata">
       <h3>Reactor metadata</h3>
-      <label>Reaction filter<select value={currentFilter} disabled={!session.canWho || !!confirmation} onChange={event => {
+      <label>Reaction filter<select aria-label="Reaction filter" value={currentFilter} disabled={!session.canWho || !!confirmation} onChange={event => {
         const key = event.target.value === "all" ? null : filterKeys.get(event.target.value);
         if (key !== undefined) { session.chooseFilter(key); redraw(); }
       }}><option value="all">All ordinary reactions</option>

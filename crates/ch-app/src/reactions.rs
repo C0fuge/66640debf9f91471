@@ -151,7 +151,8 @@ impl Worker {
         let answer=bounded(json!({"sessionId":self.session,"contextToken":id,"expiresAt":expires_at(),"snapshot":snapshot,"availability":policy.as_ref().map(Policy::project),"canSet":can_set}))?;
         let mut s=lock(&self.store);s.prune();if self.closed.load(Ordering::Acquire)||s.epoch!=self.epoch{return Err(Failure::Conflict);}
         s.supersede(&self.target);
-        if s.contexts.len()>=CONTEXTS{return Err(Failure::Conflict);}if s.contexts.contains_key(&id){return Err(Failure::Internal);}
+        if s.contexts.len()>=CONTEXTS{return Err(Failure::Conflict);}
+        if s.contexts.contains_key(&id){return Err(Failure::Internal);}
         s.contexts.insert(id,Context{target:self.target.clone(),expires:Instant::now()+TTL,selected,policy,baseline,busy:false,attempts:0,rows:0,seen:BTreeSet::new()});Ok(answer)
     }
     async fn set(&self,session:&str,id:&str,keys:Vec<Key>)->Result<Value>{
@@ -181,7 +182,10 @@ impl Worker {
         if !self.caps()?.has("reactions.who"){return Err(Failure::Unsupported);}self.check().await?;
         let (page_id,native)={let mut s=lock(&self.store);s.prune();let c=self.context(&s,id,session)?;
             let existing=if let Some(cursor)=&cursor{let p=s.pages.get(cursor).filter(|p|p.context==id&&p.key==key).ok_or(Failure::Invalid)?;Some((cursor.clone(),p.clone()))}else{s.pages.iter().find(|(_,p)|p.context==id&&p.key==key&&p.native.is_none()).map(|(id,p)|(id.clone(),p.clone()))};
-            if let Some((_,page))=&existing{if let Some(reply)=&page.reply{return reply.clone();}if page.busy{return Err(Failure::Conflict);}}
+            if let Some((_,page))=&existing{
+                if let Some(reply)=&page.reply{return reply.clone();}
+                if page.busy{return Err(Failure::Conflict);}
+            }
             if c.busy||c.attempts>=8||c.rows>=256{return Err(Failure::Conflict);}
             let (page_id,native)=match existing{Some((id,p))=>(id,p.native),None=>{if s.pages.len()>=PAGES{return Err(Failure::Conflict);}let page_id=token()?;if s.pages.contains_key(&page_id){return Err(Failure::Internal);}s.pages.insert(page_id.clone(),PageReceipt{context:id.into(),key:key.clone(),native:None,reply:None,busy:false});(page_id,None)}};
             let c=s.contexts.get_mut(id).ok_or(Failure::Conflict)?;c.busy=true;c.attempts+=1;s.pages.get_mut(&page_id).ok_or(Failure::Internal)?.busy=true;(page_id,native)
@@ -202,7 +206,9 @@ impl Worker {
         self.check().await?;self.caps()?;
         let mut s=lock(&self.store);let c=s.contexts.get(id).filter(|c|c.expires>Instant::now()).ok_or(Failure::Conflict)?;
         if c.rows+reply.reactors.len()>256{return Err(Failure::Conflict);}
-        if let Some(next)=&reply.next_cursor{if Some(next)==native.as_ref()||c.seen.contains(&(key.clone(),next.clone())){return Err(Failure::Internal);}}
+        if let Some(next)=&reply.next_cursor
+            && (Some(next)==native.as_ref()||c.seen.contains(&(key.clone(),next.clone())))
+        {return Err(Failure::Internal);}
         let next=if let Some(native)=&reply.next_cursor{if s.pages.len()>=PAGES{return Err(Failure::Conflict);}let next=token()?;if s.pages.contains_key(&next){return Err(Failure::Internal);}Some((next,native.clone()))}else{None};
         let answer=bounded(json!({"items":items,"nextCursor":next.as_ref().map(|(id,_)|id)}))?;
         let c=s.contexts.get_mut(id).ok_or(Failure::Conflict)?;c.rows+=reply.reactors.len();
@@ -210,7 +216,11 @@ impl Worker {
     }
 }
 struct Usage {store:Arc<Mutex<Store>>,context:String,page:String}
-impl Drop for Usage {fn drop(&mut self){let mut s=lock(&self.store);if let Some(c)=s.contexts.get_mut(&self.context){c.busy=false;}if let Some(p)=s.pages.get_mut(&self.page){p.busy=false;}}}
+impl Drop for Usage {fn drop(&mut self){
+    let mut s=lock(&self.store);
+    if let Some(c)=s.contexts.get_mut(&self.context){c.busy=false;}
+    if let Some(p)=s.pages.get_mut(&self.page){p.busy=false;}
+}}
 impl Policy {
     fn from_result(result:ReactionsAvailableResult)->Result<Self>{
         let keys=if let Some(keys)=result.reactions{if keys.len()>256{return Err(Failure::Unsupported);}let mut values=Vec::new();let mut unique=BTreeSet::new();for key in keys{if let Some(key)=Key::from_protocol(&key)?{if !unique.insert(key.clone()){return Err(Failure::Internal);}values.push(key);}}if values.len()>256{return Err(Failure::Unsupported);}Some(values)}else{None};
@@ -219,7 +229,11 @@ impl Policy {
 }
 fn fresh_snapshot(reactions:Option<&[Reaction]>)->Result<(Option<Value>,Option<BTreeSet<Key>>)>{
     let Some(reactions)=reactions else{return Ok((None,None));};if reactions.len()>128{return Err(Failure::Unsupported);}let mut items=Vec::new();let mut unique=BTreeSet::new();let mut selected=BTreeSet::new();let mut paid_seen=false;
-    for reaction in reactions{if let Some(key)=Key::from_protocol(&reaction.key)?{if !unique.insert(key.clone()){return Err(Failure::Internal);}if reaction.mine{selected.insert(key.clone());}items.push(json!({"key":key,"count":reaction.count.to_string(),"mine":reaction.mine}));}else{if paid_seen{return Err(Failure::Internal);}paid_seen=true;}}
+    for reaction in reactions{if let Some(key)=Key::from_protocol(&reaction.key)?{
+        if !unique.insert(key.clone()){return Err(Failure::Internal);}
+        if reaction.mine{selected.insert(key.clone());}
+        items.push(json!({"key":key,"count":reaction.count.to_string(),"mine":reaction.mine}));
+    }else{if paid_seen{return Err(Failure::Internal);}paid_seen=true;}}
     if items.len()>128{return Err(Failure::Unsupported);}Ok((Some(json!({"items":items})),Some(selected)))
 }
 fn wire_key(value:&Value)->Result<()>{let object=value.as_object().ok_or(Failure::Internal)?;let keys=["emoji","custom_emoji_id","paid"];if keys.into_iter().filter(|k|object.contains_key(*k)).count()!=1||object.get("paid").is_some_and(|v|v.as_bool()!=Some(true)){return Err(Failure::Internal);}Ok(())}
