@@ -1,25 +1,42 @@
-# Build plan
+# Build status
 
-Current execution instructions: [AGENTS.md](../AGENTS.md),
-[cloud task queue](../.github/cloud-tasks.md), and [cloud progress](cloud-progress.md).
-Product requirements: [REBUILD_PROMPT.md](REBUILD_PROMPT.md).
-Latest verified source, test counts and workflow link:
-[CLOUD_HANDOFF.md](CLOUD_HANDOFF.md). A later source must pass its own gates.
+Verified source snapshot: `2c09594`.
+[Verify45575407031](https://github.com/C0fuge/66640debf9f91471/actions/runs/45575407031)
+passed both jobs: Rust workspace251, no-default core113, two explicit fake
+integrations, isolated native-portal transport, Clippy, CLI conformance144/0/71,
+Linux desktop/CLI builds; UI49, PythonSDK48, fake8, MAX77 and Telegram84.
+Chromium account, action, metadata, attachment-job and poll scenarios passed.
 
-| Phase | Scope | Snapshot status |
-|---|---|---|
-| 1a | Plugin API, schemas and Rust protocol types | implemented and tested |
-| 1b | Python/Rust SDKs, fake plugin, templates, tutorial | implemented and tested |
-| 2 | Rust DB, ingest, plugin host, services, outbox, search/history, CLI | implemented and tested |
-| 3 | Tauri/React text demo on the fake plugin | implemented and tested |
-| 4 | Telegram parity and matching UI | partial30-handler plugin, generic auth, rich text, message actions, attachment metadata and poll interactions |
-| 5/6 | MAX, then WhatsApp according to current product priority | secure partial MAX auth/text foundation; WhatsApp pending |
-| 7 | Themes, settings, notifications, lock, backup, packaging, i18n | largely pending |
-| 8 | Safe legacy import and verified switch-over | pending; no real data in cloud |
+| Phase | Status |
+| --- | --- |
+| 1a/1b: protocol, SDKs, fake plugin, templates/tutorial | Done |
+| 2: Rust core, storage, ingest, host, outbox, search, CLI | Integrated and verified |
+| 3: Tauri/React skeleton and three-pane text demo | Integrated and verified |
+| 4: Telegram and matching UI | Partial:35 of119 plugin methods;84 pending |
+| 5/6: WhatsApp and MAX | WhatsApp pending; MAX partial auth/text/chat upserts and bounded deletion |
+| 7: remaining settings/themes/i18n, notifications, lock, backup, packaging/import | Pending |
+| 8: migration, working-app verification, switch-over | Pending |
 
-The current contract is frozen. API inventories identify gaps; an evidence-backed
-amendment proposal precedes protocol changes. Preserve independent platform chats,
-left-aligned bubbles, accent-only recoloring and isolated temporary test data.
+The app currently exposes27 typed operations. Media jobs add explicit bounded
+download, cache-only native Save-copy, scoped receipt listing and cancellation.
+Receipt keys are retained for the process lifetime; lost replies never cause
+an automatic replay. Native save uses held file descriptors and no-overwrite
+publication. Browser/demo save is unavailable without a native provider.
+A private D-Bus test verifies portal transport; a real desktop chooser and live
+messenger accounts have not been exercised by these CI runs.
 
-Completion means storage, plugin events/commands, core bridge, UI and meaningful
-tests agree. A library wrapper or capability flag alone does not establish parity.
+Telegram ordinary reactions, scoped unread-reaction IDs/read receipts, poll
+interactions and attachment APIs are tested offline. Paid/effect and remaining
+families are not claimed. MAX history continuation and authoritative full chat
+reconciliation remain unsupported; timestamp-tie safety is unproved. MAX delete
+requires exact scoped acknowledgment; edit remains undeclared.
+
+Next isolated work: ADR0008's three app reaction operations and matching explicit
+UI, plus the complete read-only base sticker-catalog capability. ADR0008 is accepted
+for implementation; its future30-operation API is not yet integrated or verified.
+Uploads, poll creation and broader messenger parity remain pending. Message bubbles
+stay left-aligned; accent changes affect accent tokens only.
+
+Builds/tests run in Actions against synthetic data. Development remains outside
+this mirror. No account state, credentials, private history or cloud model sessions
+are included. See [CLOUD_HANDOFF.md](CLOUD_HANDOFF.md) for verification entry points.

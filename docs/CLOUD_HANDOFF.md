@@ -1,38 +1,32 @@
-# Source mirror and build checkpoint
+# Verification handoff
 
-This is a clean source snapshot without private Git history. It combines the
-Rust/Tauri text demo, rich text, generic account settings/auth UI, and partial
-Telegram/MAX foundations and typed message actions. No real database, messenger login, .env or Anvil transcript
-is present.
+Latest verified source: `2c0959483edb9edae6f4f54e27987cee640c7e99`.
+[Successful workflow](https://github.com/C0fuge/66640debf9f91471/actions/runs/45575407031).
+Artifacts contain logs, synthetic browser screenshots and Linux debug binaries.
+These are build/test results, not a production deployment or live-account test.
 
-Development runs locally. GitHub Actions provides builds and tests only, with no
-API key, ChatGPT OAuth credentials, cloud coding job or publishing agent. Reports
-and packaged synthetic-demo artifacts are retained for later inspection.
+`Verify` runs on code pushes, manual dispatch and a configured daily schedule at
+00:23UTC (03:23 Moscow). Push execution was observed; scheduled execution has not
+been independently confirmed. Both jobs must be successful for the exact source
+SHA. A short SHA is not a valid prefix filter for GitHub's `head_sha` API query;
+resolve it to the full commit before matching a run. Do not infer completion from
+an older green run or a green job whose peer job failed.
 
-Latest verified source snapshot: `45343fc`, [Verify run45503307759](https://github.com/C0fuge/66640debf9f91471/actions/runs/45503307759), 2026-11-25.
+Rust gates include workspace/no-default tests, two explicit fake integrations,
+an opt-in native portal test on a fresh private D-Bus session, Clippy, fake-plugin
+conformance and desktop/CLI builds. UI/Python gates include dependency-locked
+suites and actual headless Chromium with synthetic account/action/media/poll data.
 
-- Workspace Rust199 passed; core without native keyring113; Clippy passed.
-- UI39; Python SDK48; fake8; MAX45; Telegram60 offline tests passed.
-- Actual headless Chromium account, message-action, attachment geometry/spoiler and poll scenarios passed.
-- Fake integrations and CLI conformance passed (144 passed, zero failed,71 skipped).
-- TypeScript/Vite and Linux desktop/CLI development builds passed.
+`Resolve dependency lock` is a separate manually triggered metadata-only workflow.
+Its artifact is a proposed Cargo lockfile and source hash, not build verification.
+Review exact dependency/version/feature changes before applying it.
 
-These counts describe that source snapshot; check the workflow for any later
-source revision. Telegram implements30 core-to-plugin operations; the registry
-contains119 such operations and2 host services. Full Telegram parity is
-incomplete. MAX has a secure partial auth/session/text foundation and bounded
-chat continuation upserts; required history continuation is explicitly
-unsupported. WhatsApp is pending. The app displays safe attachment metadata;
-native media access and upload selection remain pending. The app supports stored
-poll display, explicit vote/retract/close and targeted refresh (23 application
-operations). Each fresh poll panel requires a scoped read before writes; unknown
-choices remain unknown and lost writes are not automatically replayed.
+This public mirror accepts only reviewed sanitized source snapshots. Never push
+private history, account databases, messenger sessions, environment files, model
+credentials or subscription authentication. Actions builds/tests require no model
+API key. No cloud coding/model session is running or scheduled here.
 
-Recommended next work reviews bounded media downloads/native cache access and
-durable upload/poll-creation outbox designs, then remaining platform methods and
-matching UI. Poll creation UI, full MAX history and platform parity remain
-incomplete. Full platform API evidence and remaining contract
-gaps are described in platform-coverage.md and api-contract-gaps.md.
-.github/cloud-tasks.md is a development backlog, not an automated agent
-schedule. Real legacy import and deletion of the old app remain a later verified
-stage outside this public source repository.
+Next work is local development of ADR0008's app reactions and a read-only Telegram
+sticker catalog; neither candidate is included in the verified27-operation app.
+Migration and live-account verification remain pending. Preserve the existing app
+and its data until a separately verified switch-over.
