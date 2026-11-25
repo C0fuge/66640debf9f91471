@@ -4,6 +4,9 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, RunEvent};
 use tokio::sync::broadcast::error::RecvError;
 
+#[cfg(target_os = "linux")]
+mod save_dialog;
+
 #[tauri::command]
 async fn core_request(request: Value, app: tauri::State<'_, Arc<App>>) -> Result<Value, ()> {
     Ok(app.request(request).await)
@@ -22,9 +25,16 @@ fn main() {
     let app=tauri::Builder::default()
         .setup(move|tauri_app|{
             let plugins=tauri_app.path().resource_dir()?.join("plugins");
-            let app=tauri::async_runtime::block_on(async{
+            #[cfg(target_os = "linux")]
+            let is_demo = demo.is_some();
+            #[allow(unused_mut)] // Provider injection is Linux-only.
+            let mut app=tauri::async_runtime::block_on(async{
                 match demo{Some(root)=>App::demo(&root).await,None=>App::desktop(plugins).await}
             }).map_err(|_|std::io::Error::other("Could not open Contact Hub. Check the data directory, running instance, plugin installation and secret service."))?;
+            #[cfg(target_os = "linux")]
+            if !is_demo {
+                app.set_save_dialog(Arc::new(save_dialog::PortalSaveDialog::default()));
+            }
             let mut rx=app.subscribe();
             let stop=app.shutdown_signal();
             let handle=tauri_app.handle().clone();

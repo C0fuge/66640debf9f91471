@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { Attachment, Message, ThreadKey } from "../../core";
 
 const labels: Record<string, string> = {
@@ -48,7 +48,7 @@ function focusDetails(element: HTMLDivElement | null) {
   element?.focus({ preventScroll: true });
 }
 
-export function AttachmentSummary({ thread, message }: { thread: ThreadKey; message: Message }) {
+export function AttachmentSummary({ thread, message, children }: { thread: ThreadKey; message: Message; children?: ReactNode }) {
   const [revealed, setRevealed] = useState<string | null>(null);
   if (message.deleted) return null;
   if (message.messageId.startsWith("local:") || message.delivery === "sending" || message.delivery === "failed") {
@@ -57,7 +57,7 @@ export function AttachmentSummary({ thread, message }: { thread: ThreadKey; mess
   const attachment = message.attachment;
   if (!attachment) {
     const kind = message.mediaKind ? label(message.mediaKind) : null;
-    return kind ? <div className="thread-media">{kind === "Attachment" ? kind : `${kind} attachment`}</div> : null;
+    return kind ? <div className="thread-media">{kind === "Attachment" ? kind : `${kind} attachment`}{children}</div> : null;
   }
   const identity = attachmentRevealKey(thread, message);
   if (attachment.hasSpoiler && revealed !== identity) {
@@ -71,5 +71,6 @@ export function AttachmentSummary({ thread, message }: { thread: ThreadKey; mess
     <strong>{label(attachment.kind)}</strong>
     {attachment.name && <span className="thread-attachment-name" dir="auto">{attachment.name}</span>}
     {facts.length > 0 && <span className="thread-attachment-facts" dir="auto">{facts.join(" · ")}</span>}
+    {children}
   </div>;
 }

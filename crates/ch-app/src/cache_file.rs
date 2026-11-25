@@ -176,6 +176,10 @@ mod platform {
             CacheMetadata { byte_len: self.fingerprint.size }
         }
 
+        /// Recheck the held descriptor and original anchored pathname before a
+        /// separate publication step; no source bytes are reopened by pathname.
+        pub(crate) fn check_unchanged(&self) -> Result<()> { self.validate() }
+
         fn validate_file(&self) -> Result<()> {
             let meta = self.file.metadata().map_err(|_| CacheFileError::Io)?;
             if Fingerprint::of(&meta) != self.fingerprint || !meta.is_file() || meta.nlink() != 1 {
@@ -243,6 +247,7 @@ mod platform {
     impl CacheFile {
         pub(crate) fn open(_: &Path, _: &Path) -> Result<Self, CacheFileError> { Err(CacheFileError::Unsupported) }
         pub(crate) fn metadata(&self) -> CacheMetadata { CacheMetadata { byte_len: 0 } }
+        pub(crate) fn check_unchanged(&self) -> Result<(), CacheFileError> { Err(CacheFileError::Unsupported) }
         pub(crate) fn copy_to<W: Write>(&mut self, _: &mut W, _: u64, _: impl FnMut() -> bool) -> Result<u64, CacheFileError> {
             Err(CacheFileError::Unsupported)
         }

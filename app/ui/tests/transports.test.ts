@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createBrowserClient, takeToken } from "../src/core/adapters/browser";
 import { createClient } from "../src/core/adapters/client";
+import { createNativeClient } from "../src/core/adapters/native";
 
 class FakeSocket {
   protocol = "ch-core-v1";
@@ -64,8 +65,8 @@ test("browser correlates out-of-order replies, rejects pending sends and never r
   const inventory = client.inventory({});
   const chats = client.listChats({ accountId: "account", archived: false });
   first.receive({ id: first.sent[2].id, reply: { ok: true, value: [] } });
-  first.receive({ id: first.sent[1].id, reply: { ok: true, value: { plugins: [], accounts: [] } } });
-  assert.deepEqual(await inventory, { plugins: [], accounts: [] });
+  first.receive({ id: first.sent[1].id, reply: { ok: true, value: { plugins: [], accounts: [], mediaAccess: { saveCopy: false } } } });
+  assert.deepEqual(await inventory, { plugins: [], accounts: [], mediaAccess: { saveCopy: false } });
   assert.deepEqual(await chats, []);
   first.receive({ change: { kind: "inventory" } });
   const send = client.enqueueText({ thread: { accountId: "account", chatId: "chat", topicId: null }, text: "draft" });
@@ -111,7 +112,7 @@ test("browser retains all 16 server slots through local timeouts until a reply a
   assert.equal(socket.sent.length, 18);
   socket.receive({ id: socket.sent[2].id, reply: { ok: true, value: { id: "second" } } });
   assert.equal((await accepted).id, "second");
-  const inventory = { accounts: [], plugins: [] };
+  const inventory = { accounts: [], plugins: [], mediaAccess: { saveCopy: false } };
   for (const frame of socket.sent.slice(3)) {
     socket.receive({ id: frame.id, reply: { ok: true, value: inventory } });
   }
@@ -119,4 +120,38 @@ test("browser retains all 16 server slots through local timeouts until a reply a
   await Promise.all(reads);
   stop();
   socket.close();
+});
+
+test("native media starts and cancellation classify lost replies as unknown while listing stays a read", async () => {
+  const client = createNativeClient(async () => { throw new Error("private local path"); });
+  const thread = { accountId: "a", chatId: "c", topicId: "topic" };
+  const start = { thread, messageId: "m", sessionId: "session", requestKey: "intent" };
+  for (const request of [() => client.startMediaDownload(start), () => client.startMediaSave(start),
+    () => client.cancelMediaJob({ thread, sessionId: "session", jobId: "job" })]) {
+    await assert.rejects(request(), { code: "unavailable", outcomeUnknown: true });
+  }
+  await assert.rejects(client.listMediaJobs({ thread, cursor: null, requestKey: "intent" }), cause => {
+    const error = cause as { outcomeUnknown?: boolean; message: string };
+    return error.outcomeUnknown !== true && !error.message.includes("private");
+  });
+});
+
+test("browser disconnect never replays media side effects and keeps keys and thread on the wire", async () => {
+  const socket = new FakeSocket();
+  const client = createBrowserClient("ephemeral", () => socket as unknown as WebSocket);
+  const subscribed = client.subscribe(() => {});
+  socket.authenticate();
+  const stop = await subscribed;
+  const thread = { accountId: "a", chatId: "c", topicId: "topic" };
+  const start = { thread, messageId: "m", sessionId: "session", requestKey: "intent" };
+  const pending = [client.startMediaDownload(start), client.startMediaSave(start),
+    client.cancelMediaJob({ thread, sessionId: "session", jobId: "job" })]
+    .map(reply => assert.rejects(reply, { code: "unavailable", outcomeUnknown: true }));
+  assert.deepEqual((socket.sent[1].request as { params: unknown }).params, start);
+  const read = assert.rejects(client.listMediaJobs({ thread, cursor: null, requestKey: null }), cause =>
+    (cause as { outcomeUnknown?: boolean }).outcomeUnknown !== true);
+  socket.close();
+  await Promise.all([...pending, read]);
+  stop();
+  assert.equal(socket.sent.length, 5, "only explicit requests were sent");
 });

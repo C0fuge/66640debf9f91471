@@ -30,6 +30,7 @@ case "${1:-}" in
     cargo metadata --locked --no-deps --format-version 1 >/dev/null
     cargo build --locked -p ch-plugin-sdk --example echo
     cargo test --locked --workspace
+    dbus-run-session -- env CH_NATIVE_PORTAL_TEST_BUS=1 cargo test --locked -p contact-hub native_portal_private_bus_transport -- --ignored --test-threads=1
     cargo test --locked -p ch-core --no-default-features
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # The CLI's fake conformance needs the isolated synthetic Python environment.

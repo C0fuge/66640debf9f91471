@@ -72,6 +72,16 @@
 .thread-attachment-facts { font-size: .78rem; overflow-wrap: anywhere; }
 .thread-attachment-reveal { border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; background: transparent; color: var(--accent); font: inherit; font-size: .82rem; cursor: pointer; }
 .thread-attachment-reveal:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.thread-attachment-action { justify-self: start; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; color: var(--accent); background: transparent; font: inherit; }
+.media-jobs-panel { max-height: 85dvh; overflow-y: auto; }
+.media-jobs-panel > label { display: grid; gap: 5px; }
+.media-job-caption { white-space: pre-wrap; overflow-wrap: anywhere; }
+.media-job-starts, .media-job-recovery, .media-job { display: grid; gap: 6px; }
+.media-job-starts p, .media-job-recovery p, .media-job p { margin: 0; }
+.media-job-starts { margin: 12px 0; }
+.media-job-list { display: grid; gap: 10px; padding: 0; list-style: none; }
+.media-job, .media-job-recovery { border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow-wrap: anywhere; }
+.media-job progress { width: 100%; accent-color: var(--accent); }
 .thread-empty { display: grid; place-items: center; text-align: center; padding: 24px 12px; }
 .thread-pane.thread-empty { display: grid; }
 .thread-latest { position: absolute; right: 14px; bottom: 12px; box-shadow: 0 2px 8px #0002; }

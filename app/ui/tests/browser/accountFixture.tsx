@@ -25,11 +25,13 @@ function step(accountId: string, kind: string, stepId: string) {
 }
 const unused = async () => { throw new Error("Unexpected thread operation"); };
 const client: CoreClient = {
+  startMediaDownload: unused, startMediaSave: unused, cancelMediaJob: unused,
+  listMediaJobs: async () => ({ sessionId: "fixture-session", jobs: [], nextCursor: null, remainingRequestKeys: 4096 }),
   votePoll: unused, closePoll: unused, refreshPoll: unused,
   editText: unused, deleteMessages: unused, pinMessage: unused, unpinMessage: unused,
   history: unused, fillGap: unused, enqueueText: unused, listOutbox: unused, cancelOutbox: unused, retryOutbox: unused, search: unused,
   subscribe: async cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
-  inventory: async () => ({ plugins: [plugin], accounts: accounts.map(a => ({ ...a })) }),
+  inventory: async () => ({ mediaAccess: { saveCopy: false }, plugins: [plugin], accounts: accounts.map(a => ({ ...a })) }),
   listChats: async () => [],
   getSettings: async () => settings,
   saveSettings: async ({ values }) => { saved = values; return null; },

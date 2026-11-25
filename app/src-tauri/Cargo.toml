@@ -17,3 +17,7 @@ tauri = "2.12"
 ch-app = { path = "../../crates/ch-app" }
 serde_json.workspace = true
 tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "=4.4.0"
+url = "=2.5.9"

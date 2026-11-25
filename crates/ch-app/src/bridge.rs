@@ -54,6 +54,10 @@ impl App {
     pub(crate) async fn dispatch(&self, request: Request) -> Result<Value> {
         match request {
             Request::Inventory {} => self.inventory().await,
+            Request::StartMediaDownload { thread, message_id, session_id, request_key } => self.start_media(thread,message_id,session_id,request_key,crate::media::Kind::Download).await,
+            Request::StartMediaSave { thread, message_id, session_id, request_key } => self.start_media(thread,message_id,session_id,request_key,crate::media::Kind::Save).await,
+            Request::ListMediaJobs { thread, cursor, request_key } => self.list_media(thread,cursor,request_key).await,
+            Request::CancelMediaJob { thread, session_id, job_id } => self.cancel_media(thread,session_id,job_id).await,
             Request::VotePoll { thread, message_id, option_ids } => self.poll_action(thread, message_id, crate::polls::Operation::Vote(option_ids)).await,
             Request::ClosePoll { thread, message_id } => self.poll_action(thread, message_id, crate::polls::Operation::Close).await,
             Request::RefreshPoll { thread, message_id } => self.poll_action(thread, message_id, crate::polls::Operation::Refresh).await,

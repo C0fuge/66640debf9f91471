@@ -4,7 +4,7 @@ The TypeScript declarations in `app/ui/src/core/index.ts` define the Phase 3 wir
 
 ## Transport
 
-The Tauri adapter invokes `core_request` with one argument named `request`, containing a `CoreRequest`. The Rust dispatcher allowlists the methods in `CoreOperations`. Return the matching `CoreReply`. For example, `{"request":{"method":"inventory","params":{}}}` returns `{"ok":true,"value":{"plugins":[],"accounts":[]}}` on an empty installation. Client methods resolve to the value or reject with a `CoreFailure`. Adapter transport failures reject with `unavailable`. Never automatically replay a mutation after a lost reply.
+The Tauri adapter invokes `core_request` with one argument named `request`, containing a `CoreRequest`. The Rust dispatcher allowlists the methods in `CoreOperations`. Return the matching `CoreReply`. For example, `{"request":{"method":"inventory","params":{}}}` returns `{"ok":true,"value":{"plugins":[],"accounts":[],"mediaAccess":{"saveCopy":false}}}` on an empty browser installation. Client methods resolve to the value or reject with a `CoreFailure`. Adapter transport failures reject with `unavailable`. Never automatically replay a mutation after a lost reply.
 
 `subscribe` installs a listener on `core-change` and resolves once it is active. Its return value removes that listener idempotently. The future loopback, token-authenticated development server uses the same requests, replies and invalidations, with transport-level request correlation. Plugin RPC, SQL, native paths, arbitrary invoke names and secret-store operations are private to Rust.
 
@@ -40,7 +40,62 @@ withhold metadata from the DOM until a local reveal for the exact account, chat,
 topic, row, message ID and attachment metadata. A changed attachment requires a new
 reveal; switching conversations can reset reveals. Deleted/provisional messages
 never reveal metadata, and old `mediaKind`-only messages keep a generic summary.
-This view adds no operations, network fetches or file/upload controls.
+The metadata projection itself adds no operations or network fetches. Its separate
+attachment-job controls are defined below; no upload controls are added.
+
+## Attachment jobs
+
+ADR 0007 adds four short operations, bringing `CoreOperations` to 27:
+
+- `startMediaDownload({ thread, messageId, sessionId, requestKey })` reserves an explicit full-attachment download.
+- `startMediaSave({ thread, messageId, sessionId, requestKey })` reserves an explicit native Save-copy from the account cache. It never downloads implicitly.
+- `listMediaJobs({ thread, cursor, requestKey })` reads at most 16 receipts, newest creation first. Both nullable parameters are required; at most one can be non-null. Exact-key recovery returns zero or one job and no continuation.
+- `cancelMediaJob({ thread, sessionId, jobId })` requests cancellation promptly and returns the actual receipt. Completion can win a late cancellation.
+
+`Inventory.mediaAccess: { saveCopy: boolean }` is required. False means no reviewed
+native Save provider; browser production uses false. It says nothing about whether
+a particular attachment remains cached. No renderer path, URL, bytes, native command
+or file handle is accepted or returned. Save has no open/reveal/upload counterpart.
+
+`MediaStart` carries the exact stored message topic, including from whole-chat
+history, plus a session ID learned through listing and one fresh ASCII random
+request key for that explicit intent. A null-topic jobs list means exact null-topic
+receipts, not a union of topic jobs. List and cancel do not require the old message
+or chat row to remain present; account ownership still applies. UI recovery must
+retain observed exact topic scopes when switching views or deleting a message.
+
+Each `MediaJob` exposes only `id`, `sessionId`, `requestKey`, `thread`, `messageId`,
+`kind` (`download` or `save`), `state`, `cancelRequested`, nullable unsigned decimal
+`doneBytes`/`totalBytes`, and nullable `error`. State is one of `queued`, `running`,
+`choosing`, `committing`, `cancelling`, `succeeded`, `failed`, `cancelled`, `unknown`.
+`MediaJobError` has a normal `CoreFailure.code`, boolean `outcomeUnknown` and a safe
+reason enum: `notCached`, `unsafeCache`, `changed`, `tooLarge`, `destinationExists`,
+`unsupportedDestination`, `unavailable`, `internal`. It contains no raw error text.
+`MediaJobPage` carries `sessionId`, `jobs`, nullable `nextCursor` and
+`remainingRequestKeys` (0–4096). This quota counts accepted keys, not running slots.
+
+The core retains accepted keys and exact receipts for its entire session, up to
+4096, without eviction or replay. Starts and cancel are side effects in both
+transports; lost or malformed replies are outcome-unknown, while list is a read.
+A lost start retains its original key/session and is recovered only through a
+same-key list, never an automatic restart or a fresh key. A zero-result lookup may
+race admission and is still unresolved. A process-session change cannot prove
+that an earlier Save did not publish a copy. A new copy requires explicit review
+and another user intent. Existing files are never replaced in this batch.
+
+The UI subscribes before reading one bounded jobs page and rereads on the captured
+account's invalidations/reset. Earlier-page navigation remains an explicit local
+read and never changes history cursors or gaps. Starts occur only from explicit
+Download/Save-copy clicks after learning the session; mounting, reconnecting,
+revealing a spoiler or listing jobs never starts a transfer. Pending intent keys
+survive panel closure/account switches in a bounded per-client memory store.
+Returned late results cannot update an unmounted or different-account panel.
+Unknown cancellation requires a fresh receipt read before another cancellation.
+The attachment's exact-topic actions stay behind its local spoiler reveal, while
+header jobs access remains available for recovery after deletion. A changed
+visible attachment blocks new starts until its actions are reopened. Native Save
+can use an enabled account's safe cache while the plugin is stopped; a false
+provider hides Save. No cached-existence flag or future cache guarantee is shown.
 
 ## Sends
 

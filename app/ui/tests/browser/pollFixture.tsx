@@ -44,8 +44,10 @@ async function pollCall(request: CoreRequest) {
   return { poll: next === "missing" ? null : structuredClone(row.poll!) };
 }
 const client: CoreClient = {
+  startMediaDownload: unused, startMediaSave: unused, cancelMediaJob: unused,
+  listMediaJobs: async () => ({ sessionId: "fixture-session", jobs: [], nextCursor: null, remainingRequestKeys: 4096 }),
   subscribe: async listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-  inventory: async () => structuredClone({ plugins: [plugin], accounts }), listChats: async ({ accountId }) => [chat(accountId)],
+  inventory: async () => structuredClone({ mediaAccess: { saveCopy: false }, plugins: [plugin], accounts }), listChats: async ({ accountId }) => [chat(accountId)],
   history: async ({ thread }) => ({ items: structuredClone(records.get(thread.accountId)!).map(message => ({ kind: "message" as const, message })), moreOlder: false, moreNewer: false }),
   listOutbox: async () => [],
   votePoll: params => pollCall({ method: "votePoll", params }), closePoll: params => pollCall({ method: "closePoll", params }), refreshPoll: params => pollCall({ method: "refreshPoll", params }),

@@ -34,6 +34,41 @@ export interface AccountSummary {
 export interface Inventory {
   plugins: PluginSummary[];
   accounts: AccountSummary[];
+  mediaAccess: MediaAccess;
+}
+
+export interface MediaAccess { saveCopy: boolean }
+export interface MediaJobError {
+  code: CoreFailure["code"];
+  reason: "notCached" | "unsafeCache" | "changed" | "tooLarge" | "destinationExists"
+    | "unsupportedDestination" | "unavailable" | "internal";
+  outcomeUnknown: boolean;
+}
+export interface MediaJob {
+  id: string;
+  sessionId: string;
+  requestKey: string;
+  thread: ThreadKey;
+  messageId: string;
+  kind: "download" | "save";
+  state: "queued" | "running" | "choosing" | "committing" | "cancelling"
+    | "succeeded" | "failed" | "cancelled" | "unknown";
+  cancelRequested: boolean;
+  doneBytes: string | null;
+  totalBytes: string | null;
+  error: MediaJobError | null;
+}
+export interface MediaJobPage {
+  sessionId: string;
+  jobs: MediaJob[];
+  nextCursor: string | null;
+  remainingRequestKeys: number;
+}
+export interface MediaStart {
+  thread: ThreadKey;
+  messageId: string;
+  sessionId: string;
+  requestKey: string;
 }
 
 export interface ChatSummary {
@@ -187,6 +222,10 @@ export interface CoreOperations {
   votePoll(params: InThread & { messageId: string; optionIds: string[] }): Promise<PollResult>;
   closePoll(params: InThread & { messageId: string }): Promise<PollResult>;
   refreshPoll(params: InThread & { messageId: string }): Promise<PollResult>;
+  startMediaDownload(params: MediaStart): Promise<MediaJob>;
+  startMediaSave(params: MediaStart): Promise<MediaJob>;
+  listMediaJobs(params: InThread & { cursor: string | null; requestKey: string | null }): Promise<MediaJobPage>;
+  cancelMediaJob(params: InThread & { sessionId: string; jobId: string }): Promise<MediaJob>;
   listOutbox(params: InThread): Promise<OutboxItem[]>;
   cancelOutbox(params: OutboxTarget): Promise<OutboxItem>;
   retryOutbox(params: OutboxTarget): Promise<OutboxItem>;
@@ -225,6 +264,8 @@ export interface ThreadPaneProps {
   client: CoreClient;
   chat: ChatSummary | null;
   plugin?: PluginSummary | null;
+  account?: AccountSummary | null;
+  mediaAccess?: MediaAccess;
 }
 
 export type ComposerProps = ThreadPaneProps;

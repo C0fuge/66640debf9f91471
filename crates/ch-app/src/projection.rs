@@ -74,7 +74,7 @@ impl App {
                 "reconnecting":info.is_some_and(|i|i.reconnecting)
             }));
         }
-        Ok(json!({"plugins":plugins.into_values().collect::<Vec<_>>(),"accounts":rows}))
+        Ok(json!({"plugins":plugins.into_values().collect::<Vec<_>>(),"accounts":rows,"mediaAccess":{"saveCopy":self.media.save_available()}}))
     }
 }
 

@@ -113,7 +113,7 @@ export function App({ client, missingToken = false }: { client: CoreClient; miss
       </div>
       <div className="thread-column">
         {chat && <button className="back-to-chats" onClick={() => setShowThread(false)}><ArrowLeft size={16} />Chats</button>}
-        <ThreadPane client={client} chat={chat} plugin={platform} />
+        <ThreadPane client={client} chat={chat} plugin={platform} account={account} mediaAccess={inventory?.mediaAccess} />
         <Composer client={client} chat={chat} />
       </div>
     </div>

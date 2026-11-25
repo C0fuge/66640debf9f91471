@@ -39,9 +39,11 @@ function records(accountId: string): Message[] {
 }
 const unused = async () => { throw new Error("Unexpected fixture mutation"); };
 const client: CoreClient = {
+  startMediaDownload: unused, startMediaSave: unused, cancelMediaJob: unused,
+  listMediaJobs: async () => ({ sessionId: "fixture-session", jobs: [], nextCursor: null, remainingRequestKeys: 4096 }),
   votePoll: unused, closePoll: unused, refreshPoll: unused,
   subscribe: async listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-  inventory: async () => { requests.push("inventory"); return { plugins: [plugin], accounts }; },
+  inventory: async () => { requests.push("inventory"); return { mediaAccess: { saveCopy: false }, plugins: [plugin], accounts }; },
   listChats: async ({ accountId }) => { requests.push("listChats"); return [chat(accountId)]; },
   history: async ({ thread }) => { requests.push("history"); return { items: records(thread.accountId).map(message => ({ kind: "message" as const, message })), moreOlder: false, moreNewer: false }; },
   listOutbox: async () => { requests.push("listOutbox"); return []; },

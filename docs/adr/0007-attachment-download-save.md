@@ -164,25 +164,39 @@ establish that an otherwise trusted plugin could not copy sensitive bytes into i
 
 ## 6. Native provider and atomic no-overwrite publication
 
-Chosen dependency: Linux-target dependency in app/src-tauri/Cargo.toml:
-`rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }`.
-The native shell injects a small Rust-only SaveDialog provider before Arc<App> is managed;
-default/demo/browser provider is unsupported. Suggested internal seam: SaveDialog::choose
-(sanitized_name, callback(Result<Option<PathBuf>, static_error>)); App::set_save_dialog
-(&mut self, Arc<dyn SaveDialog>) is setup-only. A path exists only inside Rust callback/
-worker state. No new Tauri invoke command, JS dialog package or renderer permissions.
+Chosen backend (amended after exact dependency source review): direct Linux
+XDG Desktop Portal FileChooser.SaveFile using already-locked `zbus = "=4.4.0"`
+and `url = "=2.5.9"` in the native shell. Activate zbus's default async-io/blocking runtime for the new bounded portal
+worker. The old zbus lock entry was an inactive optional dependency: active
+keyring uses sync-secret-service (dbus-secret-service), while crypto-rust only
+weak-forwards optional async backends. The active keyring backend is unchanged;
+there was no active zbus runtime union to preserve. Do not add Tokio features. No rfd, GTK dialog plugin, ashpd, JS package or renderer
+filesystem/dialog/shell permissions are added.
 
-Construct AsyncFileDialog::save_file on AppHandle::run_on_main_thread; await its future
-on one bounded native worker, matching first-party Tauri Dialog's scheduling pattern.
-Never block GTK/Tauri's main loop, create a second GTK loop, or call a blocking chooser
-from the app RPC. Parent-window construction also belongs on the main thread. rfd's GTK
-backend does not promise Linux parent support (its documented Linux parent support is
-XDG-only), so do not claim true owner-modal behavior. The single main-window/provider
-reservation and captured target remain authoritative regardless of window focus. Remote
-native smoke must check GTK coexistence; a stub/compile alone cannot prove actual dialogs.
-[First-party scheduling source](https://raw.githubusercontent.com/tauri-apps/plugins-workspace/v2/plugins/dialog/src/desktop.rs),
-[pinned rfd API](https://docs.rs/rfd/0.17.2/rfd/struct.AsyncFileDialog.html),
-[Tauri main-thread API](https://docs.rs/tauri/2.12.7/tauri/struct.AppHandle.html).
+A bounded native worker owns a session-bus connection and response subscription
+installed before SaveFile. Use a fresh unguessable handle token, validate the
+returned request handle and matching portal sender/path, and classify response0
+as exactly one strictly local file URI, response1 as user cancellation, and
+response2/missing service/invalid response as explicit unavailable/error.
+Never invoke zenity, a shell, or another backend as a fallback. An empty parent
+identifier is allowed by the portal specification for this first single-window
+slice; do not claim window-parent modal integration.
+
+The Rust-only SaveDialog callback/setup seam is unchanged. The native shell
+injects the provider before managing Arc<App>; default/demo/browser provider
+remains unsupported. Callback paths stay inside Rust. Closing/admission and
+late-callback generation checks still apply; cancellation latches no-publish
+and retains the single provider reservation until the actual request settles.
+No blocking D-Bus wait is joined from Tauri's main Exit callback.
+
+The previously proposed rfd GTK path was rejected: its exact0.17.2 source starts
+an internal GTK loop even when constructed on Tauri's main thread. Its portal
+path was also rejected because missing/broken portals can invoke zenity fallback
+and some errors lose their distinct meaning. The temporary GTK lock-resolution
+artifact must not be applied as the chosen runtime dependency graph.
+[Portal FileChooser specification](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html),
+[pinned zbus blocking API](https://docs.rs/zbus/4.4.0/zbus/blocking/index.html),
+[pinned URL conversion](https://docs.rs/url/2.5.9/url/struct.Url.html#method.to_file_path).
 
 Hold a validated source fd across the chooser; filename is only a bounded suggestion
 (strip separators/NUL/control/bidi characters, safe attachment fallback), not authority.
@@ -222,33 +236,25 @@ preemptible; quotas/concurrency/copy length are hard bounds, cancellation is coo
 [Linux held-file/open semantics](https://man7.org/linux/man-pages/man2/open.2.html),
 [linkat no-overwrite and unprivileged fd publication](https://man7.org/linux/man-pages/man2/link.2.html).
 
-Native chooser cannot be forcibly closed by the selected API. Cancellation while choosing
-latches no-publish immediately, releases source bytes/FD when possible, and stays cancelling
-until the chooser exits. KEEP the native provider reservation until its callback actually
-runs, even after cancellation/window changes; never open a second chooser. A late selected
-path after cancellation is dropped, never copied. App shutdown closes admission, revokes
-callback generation and cancels workers; it must not await a native chooser on Tauri's
-main Exit callback. A bounded native waiter may detach at process exit; callbacks use
-weak/generation-checked job state and cannot resurrect jobs or publish after cancellation.
-Do not claim guaranteed crash durability/exactly-once across a lost final callback.
+Cancellation while choosing latches no-publish immediately and stays cancelling
+until the portal request settles or a supported close is positively acknowledged.
+Keep the provider reservation until then; never open a second chooser merely
+because the application cancelled its job. A late selected path after cancellation
+is dropped. App shutdown revokes callbacks and closes admission without waiting
+on the main thread. No cross-crash exactly-once guarantee is claimed.
 
 ## 7. Dependencies, locks, tests and split
 
 Cargo.lock currently has tauri2.12.7, libc0.2.191, rustix1.1.6, tempfile3.27.0, GTK,
 raw-window-handle and Tokio. It has neither rfd, tauri-plugin-dialog nor tauri-plugin-fs.
-Use existing libc.workspace=true for narrow Linux destination syscalls/helper (new direct
-edge only). Add only pinned rfd above to native shell; generate/review Cargo.lock via the
-root's dedicated remote Cargo metadata job, preserving existing pins wherever compatible.
-Report the actual new transitive graph/checksums from resolution, not an invented lock.
-No npm lock/dependency, filesystem/opener/shell permissions, CSP or asset-scope change.
-
-Tauri Dialog2.8.4 is a maintained first-party alternative, but its current manifest adds
-rfd0.17 plus tauri-plugin-fs. Direct rfd with the cited scheduling wrapper avoids those
-unused command surfaces/dependencies. If review selects the plugin instead, pin2.8.4,
-features gtk3, call Rust only and grant no dialog/fs permissions. This is an explicit
-alternative requiring a new lock review, not a second simultaneous backend.
-[Dialog dependency manifest](https://raw.githubusercontent.com/tauri-apps/plugins-workspace/v2/plugins/dialog/Cargo.toml),
-[Tauri capability boundary](https://v2.tauri.app/security/capabilities/).
+Use existing libc.workspace=true for destination syscalls. The selected portal backend adds direct native-shell zbus4.4.0/url2.5.9 edges.
+Remote metadata run45569383753/source5fce582 adds async-executor1.14.1 and
+async-fs2.2.0 for the newly active async-io runtime, with no removals or existing
+package-version/checksum changes. This graph is explicitly accepted. There is
+no rfd package in the selected design.
+[Keyring feature definitions](https://raw.githubusercontent.com/hwchen/keyring-rs/v3.6.3/Cargo.toml). No npm dependency,
+CSP, asset scope or renderer capability change is needed. The earlier GTK/rfd
+resolution was exploratory and is explicitly rejected above.
 
 Classify both start calls and cancel as side effects in TS/development worker failures;
 lost replies are outcomeUnknown, list is a read. UI keeps its requestKey through recovery,
@@ -271,7 +277,7 @@ cache eviction, symlink/hardlink/state/upload/FIFO/mutation rejection; no choose
 explicit click; delayed chooser plus cancel never opens another or publishes late;
 source/parent/temp substitution; destination exists/races; exact held inode commit; source
 change/disk-full/copy/sync failures leave no partial; unknown post-link failure no replay;
-missing O_TMPFILE/procfs false/unsupported behavior; offline cache Save; native main-thread
-stub scheduling; real-App account switch/lost reply/no automatic download; browser false
+missing O_TMPFILE/procfs false/unsupported behavior; offline cache Save; native portal subscription/reply/thread
+lifecycle; real-App account switch/lost reply/no automatic download; browser false
 provider. All temporary HOME/XDG/data/files synthetic. Heavy compilation/native/browser
 verification stays remote; actual native dialog interaction has not been exercised here.

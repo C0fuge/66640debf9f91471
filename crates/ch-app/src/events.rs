@@ -57,14 +57,21 @@ pub(crate) async fn pump(
     mut core: broadcast::Receiver<CoreChange>,
     mut outbox: broadcast::Receiver<OutboxChange>,
     steps: Steps,
+    media: Arc<crate::media::MediaJobs>,
     tx: broadcast::Sender<Invalidation>,
     stop: CancellationToken,
 ) {
+    let mut media_tick=tokio::time::interval(std::time::Duration::from_millis(250));
+    media_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _=stop.cancelled()=>break,
+            _=media_tick.tick()=>media.flush_progress(),
             event=core.recv()=>match event {
-                Ok(CoreChange::Ingested{plugin_id,applied:a})=>{applied(&steps,&plugin_id,&a);notify(&tx,&a.account_id);}
+                Ok(CoreChange::Ingested{plugin_id,applied:a})=>{
+                    media.applied(&plugin_id,&a);applied(&steps,&plugin_id,&a);
+                    if a.changes.iter().any(|c|!matches!(c,Change::TransferProgress(_))) {notify(&tx,&a.account_id);}
+                }
                 Ok(CoreChange::Local{applied,..})=>notify(&tx,&applied.account_id),
                 Ok(CoreChange::Host(StateChange::Account(a)))=>{
                     if matches!(a.phase,AccountPhase::Stopped|AccountPhase::Stopping) {
@@ -80,8 +87,10 @@ pub(crate) async fn pump(
                 }
                 Ok(CoreChange::Account(change))=>{
                     let id=match change {
-                        AccountChange::Added{account_id,..}|AccountChange::Enabled{account_id,..}|AccountChange::SettingsChanged{account_id}=>account_id,
+                        AccountChange::Added{account_id,..}|AccountChange::SettingsChanged{account_id}=>account_id,
+                        AccountChange::Enabled{account_id,enabled}=>{if !enabled {media.cancel_account(&account_id);}account_id},
                         AccountChange::Removed{account_id,..}=>{
+                            media.cancel_account(&account_id);
                             steps.lock().unwrap_or_else(|e|e.into_inner()).remove(&account_id);
                             account_id
                         }

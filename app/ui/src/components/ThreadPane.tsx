@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { ChatSummary, CoreClient, HistoryItem, HistoryPage, Message, PluginSummary, ThreadKey, ThreadPaneProps } from "../core";
+import type { AccountSummary, ChatSummary, CoreClient, HistoryItem, HistoryPage, MediaAccess, Message, PluginSummary, ThreadKey, ThreadPaneProps } from "../core";
 import { distinctItems, historyKey, messageDate, pageSize, prependPage } from "./thread/history";
 import { RichText } from "./thread/RichText";
 import { watchLocalHistory } from "./thread/historySignal";
@@ -8,8 +8,9 @@ import { failureCode, failureText, threadId } from "./thread/shared";
 import { useAccountReads } from "./thread/useAccountReads";
 import { actionSession, type MessageAction } from "./thread/actions";
 import { MessageActionButtons, MessageActionDialog, type ActionSelection } from "./thread/MessageActionDialog";
-import { AttachmentSummary } from "./thread/AttachmentSummary";
+import { AttachmentSummary, attachmentRevealKey } from "./thread/AttachmentSummary";
 import { PollPanel, PollSummary, type PollSelection } from "./thread/PollCard";
+import { AttachmentActions, MediaJobsPanel, type MediaSelection } from "./thread/MediaJobsPanel";
 import "./thread.css";
 
 function chatKind(kind: string) {
@@ -21,15 +22,18 @@ function chatKind(kind: string) {
   }
 }
 
-function Bubble({ thread, message, date, showSender, client, plugin, disabled, select, selectPoll }: {
+function Bubble({ thread, message, date, showSender, client, plugin, mediaAccess, disabled, select, selectPoll, selectMedia }: {
   thread: ThreadKey; message: Message; date: ReturnType<typeof messageDate>; showSender: boolean;
   client: CoreClient; plugin?: PluginSummary | null; disabled: boolean; select: (action: ActionSelection) => void; selectPoll: (poll: PollSelection) => void;
+  mediaAccess?: MediaAccess; selectMedia: (media: MediaSelection) => void;
 }) {
   const sender = message.direction === "out" ? "You" : message.senderName;
   return <article className={'thread-bubble thread-bubble-' + message.direction} aria-label={sender || "Incoming message"}>
     {showSender && sender && <div className="thread-sender" dir="auto">{sender}</div>}
     {message.deleted ? <span className="thread-secondary">Deleted message</span> : <>
-      <AttachmentSummary thread={thread} message={message} />
+      <AttachmentSummary thread={thread} message={message}>
+        <AttachmentActions thread={thread} message={message} client={client} plugin={plugin} mediaAccess={mediaAccess} disabled={disabled} select={selectMedia} />
+      </AttachmentSummary>
       <PollSummary thread={thread} message={message} disabled={disabled} select={selectPoll} />
       {message.text && <div className="thread-message-body" dir="auto">
         <RichText text={message.text} entities={message.entities} />
@@ -48,13 +52,16 @@ function Bubble({ thread, message, date, showSender, client, plugin, disabled, s
 
 type ScrollTarget = { bottom: true } | { key: string; inset: number };
 
-function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: ChatSummary; plugin?: PluginSummary | null }) {
+function SelectedThread({ client, chat, plugin, account, mediaAccess }: {
+  client: CoreClient; chat: ChatSummary; plugin?: PluginSummary | null; account?: AccountSummary | null; mediaAccess?: MediaAccess;
+}) {
   const { thread } = chat;
   const [page, setPage] = useState<HistoryPage | null>(null);
   const latestLimit = useRef(pageSize);
   const [notice, setNotice] = useState("");
   const [action, setAction] = useState<ActionSelection | null>(null);
   const [poll, setPoll] = useState<PollSelection | null>(null);
+  const [media, setMedia] = useState<MediaSelection | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [reloadRequired, setReloadRequired] = useState(false);
   const actions = useMemo(() => actionSession(client, thread), [client, thread.accountId, thread.chatId, thread.topicId]);
@@ -224,6 +231,11 @@ function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: Ch
   }
 
   const title = chat.title || thread.chatId;
+  const currentMedia = media?.message && page?.items.find(item => item.kind === "message" && item.message.messageId === media.message?.messageId
+    && item.message.topicId === media.thread.topicId);
+  const mediaChanged = !!(media?.message && currentMedia?.kind === "message" &&
+    (currentMedia.message.deleted || ["sending", "failed"].includes(currentMedia.message.delivery ?? "") ||
+      attachmentRevealKey(media.thread, currentMedia.message) !== attachmentRevealKey(media.thread, media.message)));
   const initials = title.trim().split(/\s+/u).slice(0, 2).map(word => Array.from(word)[0]).join("");
   return <section className="thread-pane" aria-label="Conversation">
     <header className="thread-header">
@@ -231,6 +243,7 @@ function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: Ch
       <div className="thread-heading"><h2 dir="auto">{title}</h2>
         <span>{chatKind(chat.kind)}{thread.topicId !== null && " · Topic " + thread.topicId}</span>
       </div>
+      {typeof client.listMediaJobs === "function" && <button type="button" className="thread-action" onClick={() => setMedia({ thread, message: null })}>Attachment jobs</button>}
       <button type="button" className="thread-action" onClick={refresh} disabled={reads.busy || !reads.subscribed}>Refresh</button>
     </header>
     {(reads.error || notice) && <div className="thread-status" role="status">
@@ -256,8 +269,8 @@ function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: Ch
                 : row.item.kind === "gap" ? <button type="button" className="thread-page-button" disabled={reads.busy}
                   onClick={() => { if (row.item.kind === "gap") fillGap(row.item.gapId); }}>Load missing messages</button>
                 : <>{row.day && <div className="thread-day">{row.day}</div>}
-                  <Bubble thread={thread} message={row.item.message} date={row.date} showSender={row.showSender} client={client} plugin={plugin}
-                    disabled={reads.busy || !reads.subscribed || actionBusy || reloadRequired} select={setAction} selectPoll={setPoll} /></>}
+                  <Bubble thread={thread} message={row.item.message} date={row.date} showSender={row.showSender} client={client} plugin={plugin} mediaAccess={mediaAccess}
+                    disabled={reads.busy || !reads.subscribed || actionBusy || reloadRequired} select={setAction} selectPoll={setPoll} selectMedia={setMedia} /></>}
             </div>;
           })}
         </div>
@@ -270,11 +283,13 @@ function SelectedThread({ client, chat, plugin }: { client: CoreClient; chat: Ch
       }}>Latest ↓</button>}
     </div>
     {poll && <PollPanel selection={poll} client={client} plugin={plugin} close={() => setPoll(null)} />}
+    {media && <MediaJobsPanel selection={media} client={client} plugin={plugin} account={account} mediaAccess={mediaAccess}
+      changed={mediaChanged} close={() => setMedia(null)} />}
     {action && <MessageActionDialog selection={action} busy={actionBusy} close={() => setAction(null)} submit={submitAction} />}
   </section>;
 }
 
-export function ThreadPane({ client, chat, plugin }: ThreadPaneProps) {
+export function ThreadPane({ client, chat, plugin, account, mediaAccess }: ThreadPaneProps) {
   if (!chat) return <section className="thread-pane thread-empty" aria-label="Conversation">Select a conversation</section>;
-  return <SelectedThread key={threadId(chat.thread)} client={client} chat={chat} plugin={plugin} />;
+  return <SelectedThread key={threadId(chat.thread)} client={client} chat={chat} plugin={plugin} account={account} mediaAccess={mediaAccess} />;
 }

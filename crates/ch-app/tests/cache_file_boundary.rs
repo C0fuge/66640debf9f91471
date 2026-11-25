@@ -36,6 +36,7 @@ mod unix {
         let (_temporary, cache, candidate) = fixture();
         let mut source = CacheFile::open(&cache, &candidate).unwrap();
         let mut copied = Vec::new();
+        assert_eq!(source.check_unchanged(), Ok(()));
         assert_eq!(source.metadata().byte_len, 21);
         assert_eq!(source.copy_to(&mut copied, 21, || false).unwrap(), 21);
         assert_eq!(copied, b"synthetic cache bytes");

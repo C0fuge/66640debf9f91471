@@ -2,6 +2,10 @@
 mod bridge;
 mod actions;
 mod polls;
+mod cache_file;
+mod save_file;
+mod media;
+pub use media::{SaveDialog, SaveDialogCallback, SaveDialogError};
 mod events;
 mod projection;
 mod wire;
@@ -30,6 +34,7 @@ use wire::{Failure, Request};
 
 pub struct App {
     core: Arc<Core>,
+    media: Arc<media::MediaJobs>,
     history: History,
     search: Search,
     db: Arc<Mutex<ch_db::Db>>,
@@ -143,19 +148,23 @@ impl App {
         let (changes, _) = broadcast::channel(256);
         let steps = Steps::default();
         let stop = CancellationToken::new();
+        let db = Arc::new(Mutex::new(db));
+        let media = media::MediaJobs::new(core.clone(), db.clone(), changes.clone())?;
         let pump = tokio::spawn(events::pump(
             core.subscribe(),
             outbox.subscribe(),
             steps.clone(),
+            media.clone(),
             changes.clone(),
             stop.clone(),
         ));
         let app = Self {
             core,
+            media,
             history,
             outbox,
             search,
-            db: Arc::new(Mutex::new(db)),
+            db,
             steps,
             auth_locks: Mutex::default(),
             action_locks: Mutex::default(),
@@ -201,6 +210,7 @@ impl App {
         let mut pump = self.pump.lock().await;
         if let Some(task) = pump.take() {
             self.stop.cancel();
+            self.media.close();
             self.outbox.shutdown().await;
             self.core.shutdown().await;
             let _ = task.await;
