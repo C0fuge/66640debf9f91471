@@ -1,7 +1,7 @@
 """Initial snapshots and sparse live events."""
 from telethon import events, functions, types as tl
 
-from . import polls
+from . import polls, reactions
 
 from .mapping import contact, conversation, draft, message, peer_id, sid
 
@@ -46,6 +46,8 @@ async def sync_all(account, client):
 async def raw_update(account, update, client=None):
     if isinstance(update, tl.UpdateMessagePoll) and client is not None:
         await polls.refresh_live(account, client, update)
+    elif isinstance(update, tl.UpdateMessageReactions) and client is not None:
+        await reactions.refresh_live(account, client, update)
     elif isinstance(update, (tl.UpdateDeleteMessages, tl.UpdateDeleteChannelMessages)):
         chat = peer_id(tl.PeerChannel(update.channel_id)) if isinstance(update, tl.UpdateDeleteChannelMessages) else None
         await account.messages_deleted([str(i) for i in update.messages], chat_id=chat)

@@ -337,3 +337,32 @@ def test_messages_get_hydrates_sparse_personal_poll_results(core):
     assert [value["chosen"] for value in read["options"]] == [True, False]
     assert read["total_voters"] == 1
     assert core.shutdown() == 0
+
+
+def test_ordinary_reactions_wire_snapshot_paging_and_account_isolation(core):
+    caps = core.initialize()["capabilities"]
+    assert caps["reactions.set"]["max"] == 100 and caps["reactions.custom"] and caps["reactions.who"]
+    assert all(name not in caps for name in ("paid.react", "reactions.effects", "reactions.unread"))
+    start(core, mode=7)
+    start(core, name="b")
+    available = core.call("reactions.available", {"account_id": "a", "chat_id": "17"})
+    assert available == {"reactions": [{"emoji": "❤️"}, {"emoji": "👍"}], "allow_custom": False, "max_per_message": 1}
+    p = {"account_id": "a", "chat_id": "17", "message_id": "4"}
+    selected = core.call("reactions.set", {**p, "reactions": [{"emoji": "❤️"}], "big": True})["message"]
+    assert selected["reactions"] == [{"key": {"emoji": "❤️"}, "count": 1, "mine": True}]
+    assert core.call("messages.get", p)["message"]["reactions"] == selected["reactions"], "get hydrates the stub's minimal view"
+    assert "reactions" not in core.call("messages.get", {**p, "account_id": "b"})["message"]
+    custom = core.call("reactions.set", {**p, "reactions": [{"custom_emoji_id": "9007199254740993"}]})["message"]
+    assert custom["reactions"][0]["key"] == {"custom_emoji_id": "9007199254740993"}
+    assert core.call("reactions.set", {**p, "reactions": []})["message"]["reactions"] == []
+    first = core.call("reactions.who", {**p, "limit": 2})
+    assert first["reactors"][0]["user_id"] == "17" and first["reactors"][0]["name"] == "Sample"
+    assert first["next_cursor"], "a short page with a server continuation is not exhausted"
+    assert core.error("reactions.who", {**p, "account_id": "b", "limit": 2, "cursor": first["next_cursor"]})["data"]["field"] == "cursor"
+    assert core.call("reactions.who", {**p, "limit": 2, "cursor": first["next_cursor"]}) == {"reactors": []}
+    assert core.error("reactions.set", {**p, "reactions": [{"paid": True}]})["data"]["code"] == "NOT_SUPPORTED"
+    assert core.error("reactions.set", {**p, "message_id": "99", "reactions": []})["data"]["code"] == "NOT_FOUND"
+    error = core.error("reactions.set", {**p, "reactions": [{"emoji": "explode-reaction"}]})
+    assert error["data"]["code"] == "NETWORK"
+    assert "synthetic-private-reaction-error" not in str(error) + core.stderr_text
+    assert core.shutdown() == 0

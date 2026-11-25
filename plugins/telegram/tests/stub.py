@@ -111,6 +111,9 @@ class Stub:
         if self.mode == 6 and raw is not None and isinstance(raw.media, tl.MessageMediaPoll):
             raw = copy.deepcopy(raw)
             raw.media.results = tl.PollResults(min=True, total_voters=raw.media.results.total_voters)
+        if self.mode == 7 and raw is not None and raw.reactions is not None:
+            raw = copy.deepcopy(raw)
+            raw.reactions.min = True
         return raw
 
     async def download_media(self, message, *, file, thumb, progress_callback):
@@ -157,6 +160,30 @@ class Stub:
     async def __call__(self, req):
         if isinstance(req, functions.contacts.GetContactsRequest):
             return tl.contacts.Contacts([tl.Contact(17, True)], 1, [USER])
+        if isinstance(req, functions.help.GetAppConfigRequest):
+            return tl.help.AppConfig(1, tl.JsonObject([tl.JsonObjectValue("reactions_user_max_default", tl.JsonNumber(1))]))
+        if isinstance(req, functions.messages.GetAvailableReactionsRequest):
+            def available(emoji, **flags):
+                doc = tl.DocumentEmpty(1)
+                return tl.AvailableReaction(emoji, "Fixture", doc, doc, doc, doc, doc, **flags)
+            return tl.messages.AvailableReactions(1, [available("❤️"), available("👍"),
+                                                       available("inactive", inactive=True), available("premium", premium=True)])
+        if isinstance(req, functions.messages.SendReactionRequest):
+            if any(isinstance(key, tl.ReactionEmoji) and key.emoticon == "explode-reaction" for key in req.reaction):
+                raise OSError("synthetic-private-reaction-error")
+            raw = self.messages[req.msg_id]
+            raw.reactions = tl.MessageReactions([tl.ReactionCount(key, 1, chosen_order=index)
+                                                for index, key in enumerate(req.reaction)], recent_reactions=[])
+            return tl.Updates([tl.UpdateMessageReactions(raw.peer_id, raw.id, raw.reactions)], [], [], NOW, 1)
+        if isinstance(req, functions.messages.GetMessagesReactionsRequest):
+            return tl.Updates([tl.UpdateMessageReactions(self.messages[mid].peer_id, mid, self.messages[mid].reactions)
+                               for mid in req.id], [], [], NOW, 1)
+        if isinstance(req, functions.messages.GetMessageReactionsListRequest):
+            if req.offset is None:
+                return tl.messages.MessageReactionsList(2, [tl.MessagePeerReaction(tl.PeerUser(17), NOW, tl.ReactionEmoji("❤️"), unread=True)],
+                         [], [USER], next_offset="fixture:next")
+            assert req.offset == "fixture:next"
+            return tl.messages.MessageReactionsList(2, [], [], [])
         if isinstance(req, functions.messages.SendMediaRequest) and isinstance(req.media, tl.InputMediaPoll):
             if req.media.poll.question.text == "explode-poll":
                 raise OSError("synthetic-private-poll-error")

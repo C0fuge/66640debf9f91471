@@ -3,7 +3,7 @@ import asyncio
 from contact_hub_sdk import Plugin, errors as rpc, method
 from contact_hub_sdk import types as dto
 
-from . import actions, activity, downloads, history, polls, sync, uploads
+from . import actions, activity, downloads, history, polls, reactions, sync, uploads
 from .auth import sign_in
 from .mapping import SEND_ENTITY_TYPES, contact
 from .send import send
@@ -22,6 +22,7 @@ class TelegramPlugin(Plugin):
         "send.voice": True, "send.ttl": True, "send.album": {"max": 10},
         "polls.create": {"quiz": True, "multiple": True, "anonymous": True, "max_options": polls.MAX_OPTIONS},
         "polls.vote": True, "polls.close": True,
+        "reactions.set": {"max": reactions.MAX_SELECTION}, "reactions.custom": True, "reactions.who": True,
     }
 
     def __init__(self, factory=make_client):
@@ -165,8 +166,10 @@ class TelegramPlugin(Plugin):
 
     @method("messages.get")
     async def get(self, account, params):
+        async def hydrate(client, peer, raw):
+            return await reactions.hydrate(client, peer, await polls.hydrate(client, peer, raw))
         with platform_errors():
-            result = await actions.get(self.ready(account), params, hydrate=polls.hydrate)
+            result = await actions.get(self.ready(account), params, hydrate=hydrate)
             polls.observe(account, [result.message])
             return result
 
@@ -246,3 +249,18 @@ class TelegramPlugin(Plugin):
     async def close_poll(self, account, params):
         with platform_errors():
             return await polls.close(account, self.ready(account), params)
+
+    @method("reactions.available")
+    async def available_reactions(self, account, params):
+        with platform_errors():
+            return await reactions.available(self.ready(account), params)
+
+    @method("reactions.set")
+    async def set_reactions(self, account, params):
+        with platform_errors():
+            return await reactions.set_reactions(account, self.ready(account), params)
+
+    @method("reactions.who")
+    async def reaction_users(self, account, params):
+        with platform_errors():
+            return await reactions.who(self.ready(account), params)

@@ -17,3 +17,6 @@ tokio-util.workspace = true
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-tungstenite = "0.29"
 getrandom = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

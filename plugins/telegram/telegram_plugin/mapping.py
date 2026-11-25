@@ -5,6 +5,7 @@ from telethon import types as tl, utils
 
 from .media_info import media_info
 from .poll_info import poll_info
+from .reaction_info import reaction_info, recent_reactors
 
 
 def identifier(value, field, *, peer=False):
@@ -193,6 +194,8 @@ def message(raw):
                        entities=entities_from_tl(getattr(raw, "entities", None)) if text is not None else None,
                        media=media_info(getattr(raw, "media", None)),
                        poll=poll_info(getattr(raw, "media", None), entities_from_tl),
+                       reactions=reaction_info(getattr(raw, "reactions", None)),
+                       reactors=recent_reactors(getattr(raw, "reactions", None)),
                        reply_to=reply, forward_from=forward,
                        grouped_id=sid(getattr(raw, "grouped_id", None)), views=getattr(raw, "views", None),
                        action=service_action(raw, sender, reply_id), mentioned=getattr(raw, "mentioned", None),
