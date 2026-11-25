@@ -44,6 +44,7 @@ async function pollCall(request: CoreRequest) {
   return { poll: next === "missing" ? null : structuredClone(row.poll!) };
 }
 const client: CoreClient = {
+  refreshMessageReactions: unused, setMessageReactions: unused, listMessageReactors: unused,
   startMediaDownload: unused, startMediaSave: unused, cancelMediaJob: unused,
   listMediaJobs: async () => ({ sessionId: "fixture-session", jobs: [], nextCursor: null, remainingRequestKeys: 4096 }),
   subscribe: async listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },

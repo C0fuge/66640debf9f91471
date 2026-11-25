@@ -155,3 +155,16 @@ test("browser disconnect never replays media side effects and keeps keys and thr
   stop();
   assert.equal(socket.sent.length, 5, "only explicit requests were sent");
 });
+
+test("reaction replacement alone is a write; refresh and reactor-page transport failures stay ordinary reads", async () => {
+  const client = createNativeClient(async () => { throw new Error("private reaction details"); });
+  const target = { thread: { accountId: "a", chatId: "c", topicId: "42" }, messageId: "m" };
+  const proof = { ...target, sessionId: "reaction-session", contextToken: "proof" };
+  await assert.rejects(client.setMessageReactions({ ...proof, keys: [{ kind: "emoji", emoji: "❤️" }] }), { code: "unavailable", outcomeUnknown: true });
+  for (const read of [() => client.refreshMessageReactions(target), () => client.listMessageReactors({ ...proof, key: null, cursor: null })]) {
+    await assert.rejects(read(), cause => {
+      const error = cause as { outcomeUnknown?: boolean; message: string };
+      return error.outcomeUnknown !== true && !error.message.includes("private");
+    });
+  }
+});

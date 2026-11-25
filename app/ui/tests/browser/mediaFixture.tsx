@@ -39,6 +39,7 @@ function records(accountId: string): Message[] {
 }
 const unused = async () => { throw new Error("Unexpected fixture mutation"); };
 const client: CoreClient = {
+  refreshMessageReactions: unused, setMessageReactions: unused, listMessageReactors: unused,
   startMediaDownload: unused, startMediaSave: unused, cancelMediaJob: unused,
   listMediaJobs: async () => ({ sessionId: "fixture-session", jobs: [], nextCursor: null, remainingRequestKeys: 4096 }),
   votePoll: unused, closePoll: unused, refreshPoll: unused,

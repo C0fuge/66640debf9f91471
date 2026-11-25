@@ -129,8 +129,10 @@ slice.
 ## Ordinary policy and full-set write semantics
 
 reactions.available and reactions.set BOTH require capability reactions.set;
-reactions.who separately requires reactions.who. Every custom key also requires
-reactions.custom through the registry parameter gate. Backend gates are authoritative.
+reactions.who separately requires reactions.who. A custom key submitted to
+reactions.set additionally requires reactions.custom through its registry parameter
+gate. That gate does not apply to a read-only reactions.who filter. Backend gates
+are authoritative.
 An object-valued reactions.set.max is a declared upper bound; the per-account
 max_per_message is separately reported and may be unknown. Never turn unknown into
 0/1/unlimited. Known bounds and local selection ceiling 16 are checked independently;

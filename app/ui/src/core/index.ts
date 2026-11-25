@@ -121,6 +121,24 @@ export interface PollSnapshot {
 }
 export interface PollResult { poll: PollSnapshot | null }
 
+export type OrdinaryReactionKey = { kind: "emoji"; emoji: string } | { kind: "custom"; id: string };
+export interface ReactionItem { key: OrdinaryReactionKey; count: string | null; mine: boolean | null }
+export interface ReactionSnapshot { items: ReactionItem[] }
+export interface ReactionAvailability {
+  keys: OrdinaryReactionKey[] | null;
+  allowCustom: boolean;
+  maxPerMessage: string | null;
+}
+export interface ReactionContext {
+  sessionId: string;
+  contextToken: string | null;
+  expiresAt: Millis | null;
+  snapshot: ReactionSnapshot | null;
+  availability: ReactionAvailability | null;
+  canSet: boolean;
+}
+export interface ReactorItem { userId: string; key: OrdinaryReactionKey; name: string | null; at: Millis | null }
+
 export interface Message {
   rowKey: string;
   messageId: string;
@@ -133,6 +151,7 @@ export interface Message {
   mediaKind: string | null;
   attachment?: Attachment | null;
   poll?: PollSnapshot | null;
+  reactions?: ReactionSnapshot | null;
   edited: boolean;
   deleted: boolean;
   delivery: string | null;
@@ -222,6 +241,11 @@ export interface CoreOperations {
   votePoll(params: InThread & { messageId: string; optionIds: string[] }): Promise<PollResult>;
   closePoll(params: InThread & { messageId: string }): Promise<PollResult>;
   refreshPoll(params: InThread & { messageId: string }): Promise<PollResult>;
+  refreshMessageReactions(params: InThread & { messageId: string }): Promise<ReactionContext>;
+  setMessageReactions(params: InThread & { messageId: string; sessionId: string; contextToken: string;
+    keys: OrdinaryReactionKey[] }): Promise<{ snapshot: ReactionSnapshot | null }>;
+  listMessageReactors(params: InThread & { messageId: string; sessionId: string; contextToken: string;
+    key: OrdinaryReactionKey | null; cursor: string | null }): Promise<{ items: ReactorItem[]; nextCursor: string | null }>;
   startMediaDownload(params: MediaStart): Promise<MediaJob>;
   startMediaSave(params: MediaStart): Promise<MediaJob>;
   listMediaJobs(params: InThread & { cursor: string | null; requestKey: string | null }): Promise<MediaJobPage>;

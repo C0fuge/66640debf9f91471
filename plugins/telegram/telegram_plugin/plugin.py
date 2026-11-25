@@ -3,7 +3,7 @@ import asyncio
 from contact_hub_sdk import Plugin, errors as rpc, method
 from contact_hub_sdk import types as dto
 
-from . import actions, activity, downloads, history, polls, reactions, sync, unread_reactions, uploads
+from . import actions, activity, downloads, history, polls, reactions, sticker_thumbs, stickers, sync, unread_reactions, uploads
 from .auth import sign_in
 from .mapping import SEND_ENTITY_TYPES, contact
 from .send import send
@@ -24,6 +24,7 @@ class TelegramPlugin(Plugin):
         "polls.vote": True, "polls.close": True,
         "reactions.set": {"max": reactions.MAX_SELECTION}, "reactions.custom": True, "reactions.who": True,
         "reactions.unread": True,
+        "stickers": True,
     }
 
     def __init__(self, factory=make_client):
@@ -37,7 +38,8 @@ class TelegramPlugin(Plugin):
             if any(a is not account and a.data.get("path") == path.resolve() for a in self.accounts.values()):
                 raise rpc.InvalidParams("The state directory is already open.", field="state_dir")
             client = self.factory(path, *config)
-            account.data.update(path=path.resolve(), client=client, signed_in=asyncio.Event(), sync_lock=asyncio.Lock())
+            account.data.update(path=path.resolve(), client=client, signed_in=asyncio.Event(), sync_lock=asyncio.Lock(),
+                                sticker_catalog=stickers.Catalog())
             try:
                 sync.bind_updates(account, client)
             except BaseException:
@@ -100,6 +102,7 @@ class TelegramPlugin(Plugin):
             await account.status("connecting", reconnecting=live)
 
     async def on_account_stop(self, account):
+        account.data.pop("sticker_catalog", None)
         with platform_errors():
             await disconnect(account.data["client"])
 
@@ -123,6 +126,26 @@ class TelegramPlugin(Plugin):
         if account.state != "connected":
             raise rpc.Unavailable()
         return account.data["client"]
+
+    @method("stickers.recent")
+    async def sticker_recent(self, account, params):
+        with platform_errors():
+            return await stickers.recent(account, self.ready(account), params)
+
+    @method("stickers.packs")
+    async def sticker_packs(self, account, params):
+        with platform_errors():
+            return await stickers.packs(account, self.ready(account))
+
+    @method("stickers.pack")
+    async def sticker_pack(self, account, params):
+        with platform_errors():
+            return await stickers.pack(account, self.ready(account), params)
+
+    @method("stickers.thumb")
+    async def sticker_thumb(self, account, params):
+        with platform_errors():
+            return await sticker_thumbs.thumbnail(account, self.ready(account), params)
 
     @method("chats.sync")
     async def chats_sync(self, account, params):

@@ -54,6 +54,9 @@ impl App {
     pub(crate) async fn dispatch(&self, request: Request) -> Result<Value> {
         match request {
             Request::Inventory {} => self.inventory().await,
+            Request::RefreshMessageReactions { thread, message_id } => self.reaction_operation(thread,message_id,crate::reactions::Operation::Refresh).await,
+            Request::SetMessageReactions { thread, message_id, session_id, context_token, keys } => self.reaction_operation(thread,message_id,crate::reactions::Operation::Set{session:session_id,context:context_token,keys}).await,
+            Request::ListMessageReactors { thread, message_id, session_id, context_token, key, cursor } => self.reaction_operation(thread,message_id,crate::reactions::Operation::Who{session:session_id,context:context_token,key,cursor}).await,
             Request::StartMediaDownload { thread, message_id, session_id, request_key } => self.start_media(thread,message_id,session_id,request_key,crate::media::Kind::Download).await,
             Request::StartMediaSave { thread, message_id, session_id, request_key } => self.start_media(thread,message_id,session_id,request_key,crate::media::Kind::Save).await,
             Request::ListMediaJobs { thread, cursor, request_key } => self.list_media(thread,cursor,request_key).await,
@@ -94,7 +97,7 @@ impl App {
                     Window::Older { before } => h.older(&ck, before.as_deref(), limit).await?,
                     Window::Newer { after } => h.newer(&ck, &after, limit).await?,
                 };
-                Ok(projection::history(page))
+                self.project_reaction_history(page).await
             }
             Request::FillGap { thread, gap_id } => {
                 let (c, _) = self.thread(&thread).await?;

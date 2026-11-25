@@ -42,6 +42,7 @@ function target(thread: ThreadKey, messageId: string) {
 }
 const unused = async () => { throw new Error("Unexpected fixture operation"); };
 const client: CoreClient = {
+  refreshMessageReactions: unused, setMessageReactions: unused, listMessageReactors: unused,
   startMediaDownload: unused, startMediaSave: unused, cancelMediaJob: unused,
   listMediaJobs: async () => ({ sessionId: "fixture-session", jobs: [], nextCursor: null, remainingRequestKeys: 4096 }),
   votePoll: unused, closePoll: unused, refreshPoll: unused,

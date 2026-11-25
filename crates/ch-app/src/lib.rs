@@ -2,6 +2,7 @@
 mod bridge;
 mod actions;
 mod polls;
+mod reactions;
 mod cache_file;
 mod save_file;
 mod media;
@@ -35,6 +36,7 @@ use wire::{Failure, Request};
 pub struct App {
     core: Arc<Core>,
     media: Arc<media::MediaJobs>,
+    reactions: Arc<reactions::Service>,
     history: History,
     search: Search,
     db: Arc<Mutex<ch_db::Db>>,
@@ -150,17 +152,20 @@ impl App {
         let stop = CancellationToken::new();
         let db = Arc::new(Mutex::new(db));
         let media = media::MediaJobs::new(core.clone(), db.clone(), changes.clone())?;
+        let reactions = Arc::new(reactions::Service::new()?);
         let pump = tokio::spawn(events::pump(
             core.subscribe(),
             outbox.subscribe(),
             steps.clone(),
             media.clone(),
+            reactions.clone(),
             changes.clone(),
             stop.clone(),
         ));
         let app = Self {
             core,
             media,
+            reactions,
             history,
             outbox,
             search,
@@ -211,8 +216,10 @@ impl App {
         if let Some(task) = pump.take() {
             self.stop.cancel();
             self.media.close();
+            self.reactions.close();
             self.outbox.shutdown().await;
             self.core.shutdown().await;
+            self.reactions.drain().await;
             let _ = task.await;
         }
     }

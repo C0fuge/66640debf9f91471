@@ -11,6 +11,7 @@ import { MessageActionButtons, MessageActionDialog, type ActionSelection } from 
 import { AttachmentSummary, attachmentRevealKey } from "./thread/AttachmentSummary";
 import { PollPanel, PollSummary, type PollSelection } from "./thread/PollCard";
 import { AttachmentActions, MediaJobsPanel, type MediaSelection } from "./thread/MediaJobsPanel";
+import { ReactionPanel, ReactionSummary, type ReactionSelection } from "./thread/ReactionPanel";
 import "./thread.css";
 
 function chatKind(kind: string) {
@@ -22,10 +23,11 @@ function chatKind(kind: string) {
   }
 }
 
-function Bubble({ thread, message, date, showSender, client, plugin, mediaAccess, disabled, select, selectPoll, selectMedia }: {
+function Bubble({ thread, message, date, showSender, client, plugin, mediaAccess, disabled, select, selectPoll, selectMedia, selectReactions }: {
   thread: ThreadKey; message: Message; date: ReturnType<typeof messageDate>; showSender: boolean;
   client: CoreClient; plugin?: PluginSummary | null; disabled: boolean; select: (action: ActionSelection) => void; selectPoll: (poll: PollSelection) => void;
   mediaAccess?: MediaAccess; selectMedia: (media: MediaSelection) => void;
+  selectReactions: (selection: ReactionSelection) => void;
 }) {
   const sender = message.direction === "out" ? "You" : message.senderName;
   return <article className={'thread-bubble thread-bubble-' + message.direction} aria-label={sender || "Incoming message"}>
@@ -38,6 +40,7 @@ function Bubble({ thread, message, date, showSender, client, plugin, mediaAccess
       {message.text && <div className="thread-message-body" dir="auto">
         <RichText text={message.text} entities={message.entities} />
       </div>}
+      <ReactionSummary client={client} thread={thread} message={message} plugin={plugin} disabled={disabled} select={selectReactions} />
       {!message.mediaKind && !message.attachment && !message.poll && !message.text && <span className="thread-secondary">Empty message</span>}
     </>}
     <footer className="thread-message-meta">
@@ -62,6 +65,7 @@ function SelectedThread({ client, chat, plugin, account, mediaAccess }: {
   const [action, setAction] = useState<ActionSelection | null>(null);
   const [poll, setPoll] = useState<PollSelection | null>(null);
   const [media, setMedia] = useState<MediaSelection | null>(null);
+  const [reaction, setReaction] = useState<ReactionSelection | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [reloadRequired, setReloadRequired] = useState(false);
   const actions = useMemo(() => actionSession(client, thread), [client, thread.accountId, thread.chatId, thread.topicId]);
@@ -236,6 +240,10 @@ function SelectedThread({ client, chat, plugin, account, mediaAccess }: {
   const mediaChanged = !!(media?.message && currentMedia?.kind === "message" &&
     (currentMedia.message.deleted || ["sending", "failed"].includes(currentMedia.message.delivery ?? "") ||
       attachmentRevealKey(media.thread, currentMedia.message) !== attachmentRevealKey(media.thread, media.message)));
+  const currentReaction = reaction && page?.items.find(item => item.kind === "message" && item.message.messageId === reaction.message.messageId
+    && item.message.topicId === reaction.thread.topicId);
+  const reactionUnavailable = !!(currentReaction?.kind === "message" && (currentReaction.message.deleted
+    || currentReaction.message.messageId.startsWith("local:") || ["sending", "failed"].includes(currentReaction.message.delivery ?? "")));
   const initials = title.trim().split(/\s+/u).slice(0, 2).map(word => Array.from(word)[0]).join("");
   return <section className="thread-pane" aria-label="Conversation">
     <header className="thread-header">
@@ -270,7 +278,7 @@ function SelectedThread({ client, chat, plugin, account, mediaAccess }: {
                   onClick={() => { if (row.item.kind === "gap") fillGap(row.item.gapId); }}>Load missing messages</button>
                 : <>{row.day && <div className="thread-day">{row.day}</div>}
                   <Bubble thread={thread} message={row.item.message} date={row.date} showSender={row.showSender} client={client} plugin={plugin} mediaAccess={mediaAccess}
-                    disabled={reads.busy || !reads.subscribed || actionBusy || reloadRequired} select={setAction} selectPoll={setPoll} selectMedia={setMedia} /></>}
+                    disabled={reads.busy || !reads.subscribed || actionBusy || reloadRequired} select={setAction} selectPoll={setPoll} selectMedia={setMedia} selectReactions={setReaction} /></>}
             </div>;
           })}
         </div>
@@ -285,6 +293,7 @@ function SelectedThread({ client, chat, plugin, account, mediaAccess }: {
     {poll && <PollPanel selection={poll} client={client} plugin={plugin} close={() => setPoll(null)} />}
     {media && <MediaJobsPanel selection={media} client={client} plugin={plugin} account={account} mediaAccess={mediaAccess}
       changed={mediaChanged} close={() => setMedia(null)} />}
+    {reaction && <ReactionPanel selection={reaction} client={client} plugin={plugin} account={account} unavailable={reactionUnavailable} close={() => setReaction(null)} />}
     {action && <MessageActionDialog selection={action} busy={actionBusy} close={() => setAction(null)} submit={submitAction} />}
   </section>;
 }

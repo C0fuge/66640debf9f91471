@@ -98,7 +98,7 @@ pub(crate) fn history(page: Page) -> Value {
             json!({"kind":"message","message":{"rowKey":m.id.to_string(),"messageId":m.message_id,
                 "topicId":m.topic_id,"direction":m.direction,"sentAt":m.sent_at.to_string(),
                 "senderName":m.sender_name.or(m.sender_title),"text":m.text,"entities":entities,
-                "mediaKind":media,"attachment":attachment,"poll":poll,"edited":m.edited,"deleted":m.deleted_at.is_some(),"delivery":m.delivery,"isPinned":m.is_pinned.unwrap_or(false)}})
+                "mediaKind":media,"attachment":attachment,"poll":poll,"reactions":null,"edited":m.edited,"deleted":m.deleted_at.is_some(),"delivery":m.delivery,"isPinned":m.is_pinned.unwrap_or(false)}})
         }
     }).collect::<Vec<_>>();
     json!({"items":items,"moreOlder":page.more_older,"moreNewer":page.more_newer})

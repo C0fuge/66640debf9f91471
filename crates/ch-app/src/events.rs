@@ -58,6 +58,7 @@ pub(crate) async fn pump(
     mut outbox: broadcast::Receiver<OutboxChange>,
     steps: Steps,
     media: Arc<crate::media::MediaJobs>,
+    reactions: Arc<crate::reactions::Service>,
     tx: broadcast::Sender<Invalidation>,
     stop: CancellationToken,
 ) {
@@ -81,6 +82,7 @@ pub(crate) async fn pump(
                 }
                 Ok(CoreChange::Host(StateChange::Plugin{plugin_id,state}))=>{
                     if !state.is_running() {
+                        reactions.invalidate_plugin(&plugin_id);
                         steps.lock().unwrap_or_else(|e|e.into_inner()).retain(|_,(owner,_)|owner!=&plugin_id);
                         let _=tx.send(Invalidation::Reset);
                     } else {let _=tx.send(Invalidation::Inventory);}
@@ -88,9 +90,10 @@ pub(crate) async fn pump(
                 Ok(CoreChange::Account(change))=>{
                     let id=match change {
                         AccountChange::Added{account_id,..}|AccountChange::SettingsChanged{account_id}=>account_id,
-                        AccountChange::Enabled{account_id,enabled}=>{if !enabled {media.cancel_account(&account_id);}account_id},
+                        AccountChange::Enabled{account_id,enabled}=>{if !enabled {media.cancel_account(&account_id);reactions.invalidate_account(&account_id);}account_id},
                         AccountChange::Removed{account_id,..}=>{
                             media.cancel_account(&account_id);
+                            reactions.invalidate_account(&account_id);
                             steps.lock().unwrap_or_else(|e|e.into_inner()).remove(&account_id);
                             account_id
                         }
@@ -99,6 +102,7 @@ pub(crate) async fn pump(
                 }
                 Ok(CoreChange::Host(StateChange::PluginsRescanned))=>{let _=tx.send(Invalidation::Inventory);}
                 Ok(_) | Err(RecvError::Lagged(_))=>{
+                    reactions.invalidate_all();
                     steps.lock().unwrap_or_else(|e|e.into_inner()).clear();
                     let _=tx.send(Invalidation::Reset);
                 }

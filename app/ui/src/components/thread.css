@@ -82,6 +82,18 @@
 .media-job-list { display: grid; gap: 10px; padding: 0; list-style: none; }
 .media-job, .media-job-recovery { border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow-wrap: anywhere; }
 .media-job progress { width: 100%; accent-color: var(--accent); }
+.reaction-summary { display: grid; gap: 4px; margin-top: 6px; font-size: .8rem; }
+.reaction-summary ul { display: flex; flex-wrap: wrap; gap: 4px; padding: 0; margin: 0; list-style: none; }
+.reaction-summary li { border: 1px solid var(--border); border-radius: 7px; padding: 3px 6px; overflow-wrap: anywhere; }
+.reaction-summary > button { justify-self: start; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; background: transparent; color: var(--accent); font: inherit; }
+.reaction-panel { max-height: 85dvh; overflow-y: auto; }
+.reaction-caption { white-space: pre-wrap; overflow-wrap: anywhere; }
+.reaction-panel fieldset, .reaction-reactors { display: grid; gap: 7px; margin: 12px 0; }
+.reaction-panel fieldset > label { display: flex; align-items: start; gap: 7px; }
+.reaction-panel ul { overflow-wrap: anywhere; }
+.reaction-literal { display: grid; gap: 7px; }
+.reaction-literal label, .reaction-reactors > label { display: grid; gap: 5px; }
+.reaction-confirmation { border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
 .thread-empty { display: grid; place-items: center; text-align: center; padding: 24px 12px; }
 .thread-pane.thread-empty { display: grid; }
 .thread-latest { position: absolute; right: 14px; bottom: 12px; box-shadow: 0 2px 8px #0002; }

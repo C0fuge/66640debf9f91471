@@ -34,6 +34,7 @@ Enter the numeric `api_id` in account settings and the application’s `api_hash
 | `polls.create`, `polls.vote`, `polls.close` | `polls.create`, `polls.vote`, `polls.close` | Two-to-ten-answer plain/multiple-choice polls and quizzes, anonymity, correct-answer index, literal explanations with UTF-16 entities, relative closing period, replies/topics and silent creation. Vote/retract using returned opaque answer IDs; confirm the actual selection and closed state. Scheduling/quote replies remain unsupported. Closing polls with attached poll/solution media is explicitly rejected. |
 | `reactions.set`, `reactions.custom`, `reactions.who` | `reactions.available`, `reactions.set`, `reactions.who` | Account limits and explicit chat reaction policy; full ordinary emoji/custom-emoji selection, clear and big reactions; scoped reactor pages with actual server continuation; full personal snapshots and addressed live updates. |
 | `reactions.unread` | `reactions.list_unread`, `reactions.read` | One bounded oldest-first unread-message ID batch; acknowledged mark-as-read for a whole chat or a verified group/bot forum topic. Confirmed server continuations finish before success; errors/cancellation are never replayed. |
+| `stickers` | `stickers.recent`, `stickers.packs`, `stickers.pack`, `stickers.thumb` | Fresh ordinary-sticker catalog, server-order installed packs, complete verified pack documents and explicit static thumbnail reads. Account/runtime-scoped opaque references; no search, sending, management, emoji/mask catalogs or animated playback. |
 
 Entity ranges use UTF-16 units. The handshake lists each supported outbound entity type. Incoming named mentions carry the Telegram user ID. Message and draft events preserve Telegram’s marked peer IDs and forum topic IDs where supplied. Forward attribution, quote entities/offsets, service actions, pin/silent flags, reply counts, TTL and bot/effect IDs retain their known fields. Incoming photos/documents retain kind, dimensions, size, filename, MIME, duration, packed voice waveform, audio title/performer, spoiler and sticker metadata without probing files. Poll snapshots preserve questions, answers, known counts/selection/correctness, quiz explanations and server-reported close dates. Unmapped service action types stay visible as an `other` action with their type name. The new/edit/delete, inbox/outbox read and draft listeners forward the fields they know. A DM deletion can omit the chat ID. Other unimplemented message fields remain absent. The server may report a duplicate random ID without returning the original message after an interrupted send. The plugin requires a matching acknowledgement before reporting success. [Telegram sendMessage](https://core.telegram.org/method/messages.sendMessage) · [Plugin contract](../../docs/plugin-api.md)
 
@@ -57,9 +58,70 @@ Scoped requests verify a full matching peer using the locked `channel.forum` or 
 
 `reactions.read` sends only [readReactions](https://core.telegram.org/method/messages.readReactions), without also marking messages or mentions read. Success requires a real `messages.AffectedHistory` with zero remaining offset. A positive [affected-history offset](https://core.telegram.org/constructor/messages.affectedHistory) triggers another same-scope call only after that confirmed continuation, with a hard budget of **128 total read requests including the initial request**. A still-positive offset at that budget, nondecreasing/invalid acknowledgement, timeout, cancellation or other failure after dispatch becomes `NETWORK` with `outcome: "unknown"` and `retry_safe: false`; no completion is claimed and no write is automatically replayed. Read-only peer lookup and parameter validation before dispatch retain their original error classification. Cancellation releases the account's reaction lock, and no local reaction array, personal choice, or unread counter is reset from a guessed outcome. The same locked 1.46.0/layer-233 artifact cited below supplies both request constructors.
 
+## Read-only sticker catalog
+
+The base `stickers` capability implements all four frozen handlers. Each catalog
+request sends hash zero and requires a full typed response. An unexpected
+`NotModified`, missing/duplicate/foreign document, count mismatch or reference
+budget failure is an error, never a fabricated empty/full catalog. Recent results
+preserve server order and honor the supplied 1–200 limit (default 200); this method
+has no completion field. Installed pack order is returned unchanged. Full packs
+must match the requested numeric set/access-hash identity and contain exactly the
+declared document count. Explicit document/emoji-group pack contradictions fail.
+[Recent stickers](https://core.telegram.org/method/messages.getRecentStickers) ·
+[Installed packs](https://core.telegram.org/method/messages.getAllStickers) ·
+[Pack contents](https://core.telegram.org/method/messages.getStickerSet)
+
+Public IDs are opaque receipts scoped to this account runtime. A maximum 4096
+immutable references totaling 16 MiB are retained with LRU eviction; each reference
+is capped at 2 MiB. Whole responses are staged and checked against a 192 KiB wire
+budget before references are committed, so a successful response cannot evict its
+own entries. At most 16 catalog operations may be active/waiting per account.
+Evicted/foreign/stopped-runtime IDs return not-found. An evicted ID is never reused
+when the same object is fetched again. Reference issuance is bounded by a 64-bit
+counter; overflow requires an explicit account restart. There is no disk reference
+map, arbitrary TL deserialization from public IDs or renderer path/URL resolution.
+
+`pack_id` can be followed when an actual stable input-set ID/access hash was
+observed. A recent short-name/special reference leaves its numeric pack identity
+unknown. These methods accept their issued opaque IDs; the older numeric
+`Media.sticker.pack_id` projection is unchanged and is not treated as an access
+hash substitute. No message-pack-link UI integration is claimed by this slice.
+Normal sticker documents are supported; custom-emoji and mask pack families stay
+unadvertised. Known canonical MIME types map to static WebP, animated TGS and video
+WebM. Unknown required formats fail explicitly rather than becoming static.
+Missing dimensions/emoji stay absent; premium is derived from the documented
+`videoSize.type=f` marker. No animation/effect is fetched during projection.
+[Canonical formats and premium markers](https://core.telegram.org/api/stickers)
+
+Thumbnail reads resolve only an issued immutable document reference. They select
+explicit static PhotoSize/Cached/Stripped/Progressive previews; vector outlines,
+video/effect thumbs and the main sticker file are never fallback sources. When no
+supported static preview is available, the optional path is absent. Network reads share the
+account download queue and use exact InputDocumentFileLocation scope, with a 2 MiB
+byte cap and exact known-size check. Cached/stripped previews use the same cap.
+Pinned Telethon's public `download_file` returns None on successful custom-stream
+writes; actual bytes establish completion, not that return value.
+[Preview constructors](https://core.telegram.org/api/files#handling-audio-video-and-vector-previews)
+
+Only JPEG/static PNG/static WebP containers are published. Container signatures,
+PNG chunk bounds/CRCs and PNG/WebP animation flags are checked; image decoding is
+not performed. The bounded download finishes in memory before the existing held
+directory/atomic cache writer publishes a private 0600 file. The returned inode is
+checked against its held descriptor. Cancellation/error before publication leaves
+no partial cache file. Paths stay inside this account's cache; no external URL
+download, SVG/TGS/WebM execution or renderer asset permissions are added.
+
+Constructors and custom-stream behavior were inspected in the locked
+Telethon 1.46.0/layer 233 artifact cited below. Synthetic tests exercise real TL
+serialization, model projection, stale/foreign/evicted receipts, whole-response
+budgets, malformed/NotModified data, bounded waiters, static thumbnails,
+cancellation and schema-checked stdio. These new tests await remote CI; no live
+Telegram catalog/download or actual sticker rendering has been exercised.
+
 ## Remaining method groups
 
-The frozen registry contains 121 methods. The table above covers 35 core-to-plugin methods. The 84 core-to-plugin methods below remain unimplemented. The final two, `secrets.set` and `secrets.delete`, are host services for plugin callers. [Method registry](../../schemas/methods/registry.json)
+The frozen registry contains 121 methods. The table above covers 39 core-to-plugin methods. The 80 core-to-plugin methods below remain unimplemented. The final two, `secrets.set` and `secrets.delete`, are host services for plugin callers. [Method registry](../../schemas/methods/registry.json)
 
 | Follow-up group | Pending methods |
 | --- | --- |
@@ -73,7 +135,7 @@ The frozen registry contains 121 methods. The table above covers 35 core-to-plug
 | Chat settings and folders | `chats.set_flags`, `chats.clear_history`, `chats.leave`, `chats.set_auto_delete`, `chats.reorder_pinned`, `folders.list`, `folders.create`, `folders.rename`, `folders.delete`, `folders.set_chats`, `folders.set_rules` |
 | Groups and members | `group.create`, `group.join_by_link`, `group.invite_link`, `group.edit_title`, `group.edit_about`, `group.edit_photo`, `group.set_permissions`, `group.set_slow_mode`, `members.list`, `members.ban`, `members.set_admin`, `members.invite`, `join_requests.list`, `join_requests.answer` |
 | Contacts, profile, privacy and sessions | `lookup.username`, `lookup.phone`, `contacts.set`, `contacts.info`, `contacts.common_chats`, `blocked.list`, `blocked.set`, `profile.get`, `profile.update`, `profile.photos`, `stories.list`, `privacy.get`, `privacy.set`, `two_factor.get`, `two_factor.set`, `sessions.list`, `sessions.terminate`, `ghost.apply`, `account.sign_out` |
-| Stickers, GIFs and emoji | `stickers.recent`, `stickers.favorites`, `stickers.packs`, `stickers.pack`, `stickers.search`, `stickers.install`, `stickers.set_favorite`, `stickers.thumb`, `stickers.clip`, `stickers.send`, `gifs.list`, `gifs.search`, `gifs.thumb`, `gifs.clip`, `gifs.send`, `emoji.custom_files`, `emoji.packs`, `emoji.pack`, `emoji.animated` |
+| Stickers, GIFs and emoji | `stickers.favorites`, `stickers.search`, `stickers.install`, `stickers.set_favorite`, `stickers.clip`, `stickers.send`, `gifs.list`, `gifs.search`, `gifs.thumb`, `gifs.clip`, `gifs.send`, `emoji.custom_files`, `emoji.packs`, `emoji.pack`, `emoji.animated` |
 
 ## Verification boundary
 

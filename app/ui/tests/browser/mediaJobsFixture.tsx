@@ -46,6 +46,7 @@ function reserve(params: MediaStart, kind: "download" | "save"): MediaJob {
 }
 const unused = async () => { throw new Error("Unexpected fixture mutation"); };
 const client: CoreClient = {
+  refreshMessageReactions: unused, setMessageReactions: unused, listMessageReactors: unused,
   subscribe: async listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
   inventory: async () => structuredClone({ plugins: [plugin], accounts, mediaAccess: { saveCopy } }),
   listChats: async ({ accountId }) => [chat(accountId)],

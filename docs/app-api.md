@@ -97,6 +97,72 @@ visible attachment blocks new starts until its actions are reopened. Native Save
 can use an enabled account's safe cache while the plugin is stopped; a false
 provider hides Save. No cached-existence flag or future cache guarantee is shown.
 
+## Ordinary reaction interactions
+
+ADR0008 adds exactly three operations, bringing `CoreOperations` to 30:
+
+- `refreshMessageReactions({ thread, messageId })` explicitly reads that exact
+  stored target and its account/chat policy, returning a `ReactionContext`.
+- `setMessageReactions({ thread, messageId, sessionId, contextToken, keys })`
+  replaces the complete ordinary key membership, including `[]` to clear.
+- `listMessageReactors({ thread, messageId, sessionId, contextToken, key, cursor })`
+  explicitly reads one bounded page; both nullable filter/cursor fields are required.
+
+`OrdinaryReactionKey` is exactly `{ kind: "emoji", emoji }` or `{ kind: "custom", id }`.
+Literal sequences and opaque IDs retain exact identity; paid input and chosen-order
+claims are outside this slice. `ReactionItem` contains `key`, nullable unsigned
+decimal `count`, and nullable `mine`; `ReactionSnapshot` contains `items`. Optional
+`Message.reactions` is read-only cached metadata: absent/zero stored rows are unknown,
+negative stored counts become null, and cached personal choice stays null. It is
+never a write proof or permission to infer a chip-toggle from missing state.
+
+`ReactionContext` carries its own reaction-service `sessionId`, nullable
+`contextToken`/`expiresAt`, nullable `snapshot`/`availability`, and `canSet`.
+`ReactionAvailability` contains nullable `keys`, `allowCustom`, and nullable decimal
+`maxPerMessage`. A null catalog permits literal ordinary emoji; a finite catalog
+remains authoritative even if `allowCustom` is true. Listed custom keys are allowed
+with the live custom capability even when `allowCustom` is false; arbitrary custom
+ID entry and assets are deferred. The frozen handshake default for `reactions.set: true` or `{}` is a known plugin bound of 1; a valid explicit integer `max >= 1` is respected. A malformed explicit maximum, including null, disables writes rather than becoming a default or an unbounded allowance. Runtime unknown `maxPerMessage` never becomes 0, 1 or unlimited.
+
+Refresh is explicit, never a mount, invalidation or checkbox effect. Only the newest
+matching local generation can install a proof. A token expires after 60 seconds,
+belongs to the exact account/chat/message topic, and is unrelated to media-job
+sessions. A write consumes the proof before dispatch, invalidating reactor cursors;
+every subsequent write requires another explicit refresh. The result is
+`{ snapshot: ReactionSnapshot | null }`: a missing reported snapshot stays unknown,
+while an explicit empty array is known-empty. Lost/malformed writes use
+`outcomeUnknown`; both transports classify replacement as a write and the other two
+operations as reads. Neither automatically replays work.
+
+Each reactor page contains `items` and nullable `nextCursor`. A `ReactorItem` exposes
+only `userId`, ordinary `key`, nullable escaped `name`, and nullable `at: Millis`.
+Backend pages use 32 rows, at most 8 RPC attempts/256 rows per context and 128 global
+cursor/page receipts. Changing a filter does not reset its context budget. A short
+or empty page with a continuation remains pageable; absence alone ends traversal.
+No paged data is written into `Message.reactors`, and no exhaustive stable-list
+claim, asset URL, avatar or unread/paid control is added.
+
+The thread shows at most eight cached ordinary chips, labels them a partial view,
+and offers explicit View/refresh. Opening the panel, selecting checkboxes/changing
+the reactor filter, history invalidation and reconnect send no reaction RPC. Initial
+choices are unselected; cached mine/count never grants a proof. Finite catalogs use
+checkboxes and unrestricted ordinary catalogs use bounded literal emoji input;
+there is no custom-ID text input. Confirmations list the entire new ordinary set
+and every current choice that will be removed, including custom keys. No-op clears
+and order-only proposals are disabled. Local ceiling16 and all known plugin/runtime
+limits are enforced independently; empty/limit0 policy still permits an explicit
+clear of a known nonempty selection. Read-only custom reactor filters may use
+reported keys without the separate custom WRITE capability.
+
+Panel proofs/generations never survive unmount/account switch. The UI evaluates
+expiry using current `Date.now` on rendering/actions and repaints expiry locally;
+it never refreshes automatically. A consumed/lost write remains blocked until a
+new explicit refresh. Each context retains at most eight local page receipts;
+filter changes do not restore its request/row budget, cached pages can be reviewed
+without another RPC, and a reached local limit preserves the continuation rather
+than presenting a false end. Late pages or refresh replies cannot replace a newer
+filter, account, target or expired context.
+
 ## Sends
 
 `enqueueText` validates a nonblank body and thread ownership, checks known posting restrictions and delegates to `Outbox::enqueue(SendText)`. Preserve the original text. An empty entity list is omitted when constructing the plugin request. Formatted sends require `send.entities`. Keep the original draft until acceptance. An ambiguous transport error requires reloading outbox and history before another user-initiated send.

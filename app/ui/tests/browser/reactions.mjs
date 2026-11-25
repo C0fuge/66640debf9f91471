@@ -1,0 +1,148 @@
+// Remote Chromium only. Real App/ThreadPane and synthetic proof/receipt provider.
+import assert from "node:assert/strict";
+import { mkdir } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { join, resolve } from "node:path";
+import { createServer } from "vite";
+const { chromium } = createRequire(import.meta.url)("playwright-core");
+const server = await createServer({ server: { host: "127.0.0.1", port: 53179, strictPort: false, open: false } });
+let browser;
+try {
+  await server.listen();
+  browser = await chromium.launch({ executablePath: process.env.CH_CHROMIUM, headless: true });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.name + ": " + error.message));
+  await page.route("**/src/main.tsx", route => route.fulfill({ contentType: "text/javascript", body: 'import "/tests/browser/reactionFixture.tsx";' }));
+  await page.goto(server.resolvedUrls.local[0]);
+  const choose = async account => {
+    await page.getByRole("button", { name: `${account}, Fixture, connected`, exact: true }).click();
+    await page.getByRole("button").filter({ hasText: `${account} reactions` }).click();
+    await page.getByRole("heading", { name: `${account} reactions`, exact: true }).waitFor();
+    await page.getByText(`${account} reaction caption`, { exact: true }).waitFor();
+  };
+  const bubble = caption => page.getByRole("article").filter({ hasText: caption });
+  const panel = () => page.getByRole("dialog");
+  const open = caption => bubble(caption).getByRole("button", { name: "View/refresh reactions", exact: true }).click();
+  const close = () => panel().getByRole("button", { name: "Close panel", exact: true }).click();
+  const requests = () => page.evaluate(() => window.reactionFixture.requests());
+  const count = async method => (await requests()).filter(request => request.method === method).length;
+  const refresh = () => panel().getByRole("button", { name: "Refresh reactions", exact: true }).click();
+  const clear = () => panel().getByRole("button", { name: "Clear ordinary set", exact: true });
+  const review = () => panel().getByRole("button", { name: "Review complete replacement", exact: true });
+  const confirm = () => panel().getByRole("button", { name: "Confirm replacement", exact: true }).click();
+  const capture = async name => {
+    if (!process.env.CH_SCREENSHOT_DIR) return;
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      const deadline = performance.now() + 5000;
+      let previous = "", stable = 0, snapshot;
+      while (performance.now() < deadline) {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        snapshot = [...document.querySelectorAll(".thread-row[data-index]")].sort((a,b) => Number(a.dataset.index) - Number(b.dataset.index))
+          .map(row => { const rect = row.getBoundingClientRect(); return [rect.top, rect.bottom]; });
+        const valid = snapshot.length === 4 && snapshot.every(([top,bottom], i) => bottom > top && (!i || top >= snapshot[i-1][1] - .5));
+        const next = JSON.stringify(snapshot); stable = valid ? next === previous ? stable + 1 : 1 : 0; previous = next;
+        if (stable >= 3) return;
+      }
+      throw Error("Reaction rows did not settle without overlap: " + JSON.stringify(snapshot));
+    });
+    await panel().evaluate(element => { element.scrollTop = 0; });
+    const directory = resolve(process.env.CH_SCREENSHOT_DIR); await mkdir(directory, { recursive: true });
+    await page.screenshot({ path: join(directory, name), fullPage: true });
+  };
+
+  await choose("Alpha");
+  assert.equal(await bubble("Alpha reaction caption").locator(".reaction-summary li").count(), 8);
+  assert.match(await bubble("Alpha reaction caption").textContent(), /partial view.*9007199254740993.*your choice unknown/s);
+  assert.equal(await bubble("Pending reaction caption").getByRole("button", { name: "View/refresh reactions", exact: true }).count(), 0);
+  assert.deepEqual(await requests(), []);
+  await open("Alpha reaction caption");
+  assert.deepEqual(await requests(), [], "opening the actual panel sends no reaction RPC");
+  assert.equal(await clear().isDisabled(), true);
+  await refresh();
+  await panel().getByText("Review the full ordinary set before choosing a replacement.", { exact: true }).waitFor();
+  assert.equal(await panel().getByRole("checkbox").evaluateAll(inputs => inputs.every(input => !input.checked)), true, "fresh selection is built explicitly");
+  const custom = panel().getByRole("checkbox", { name: "Custom emoji 9007199254740993", exact: true });
+  assert.equal(await custom.isEnabled(), true, "listed custom remains offered under allowCustom=false");
+  const beforeSelection = (await requests()).length;
+  await panel().getByRole("checkbox", { name: "❤", exact: true }).check(); await custom.check();
+  assert.equal((await requests()).length, beforeSelection, "checkbox changes make no reaction RPC");
+  assert.equal(await count("setMessageReactions"), 0);
+  assert.equal(await panel().getByLabel("Literal emoji sequence", { exact: true }).count(), 0, "finite catalog offers no arbitrary emoji/custom input");
+  await review().click();
+  const confirmation = panel().locator(".reaction-confirmation");
+  assert.match(await confirmation.getByRole("list").nth(0).textContent(), /❤.*Custom emoji 9007199254740993/s);
+  assert.match(await confirmation.getByRole("list").nth(1).textContent(), /❤️/);
+  assert.equal(await count("setMessageReactions"), 0, "reviewing every removal is not a write");
+  await capture("reactions-replacement-review.png");
+  await confirm();
+  await panel().getByText("The reported ordinary membership is shown. Another write requires an explicit refresh.", { exact: true }).waitFor();
+  const firstWrite = (await requests()).find(request => request.method === "setMessageReactions");
+  assert.deepEqual(firstWrite.params.thread, { accountId: "Alpha", chatId: "same-chat", topicId: "42" });
+  assert.equal(firstWrite.params.sessionId, "reaction-fixture-session");
+  assert.deepEqual(firstWrite.params.keys, [{ kind: "emoji", emoji: "❤" }, { kind: "custom", id: "9007199254740993" }]);
+  assert.equal(await review().isDisabled(), true);
+  await refresh(); await clear().click();
+  assert.match(await panel().locator(".reaction-confirmation").textContent(), /No ordinary choices will remain.*Custom emoji 9007199254740993/s);
+  await confirm(); await panel().getByText("The snapshot reports no ordinary reactions.", { exact: true }).waitFor();
+  assert.equal(await clear().isDisabled(), true);
+
+  await page.evaluate(() => window.reactionFixture.absentNext()); await refresh();
+  await panel().getByText("Reaction state is unknown. Missing state is not a known-empty selection.", { exact: true }).waitFor();
+  assert.equal(await review().isDisabled(), true); assert.equal(await clear().isDisabled(), true);
+  await capture("reactions-unknown-readonly.png");
+  await panel().getByRole("button", { name: "Load reactors", exact: true }).click();
+  await panel().getByRole("button", { name: "Load more reactors", exact: true }).waitFor();
+  assert.equal(await count("listMessageReactors"), 1, "empty first page keeps its explicit continuation");
+  await page.evaluate(() => window.reactionFixture.custom(false));
+  const filter = panel().getByLabel("Reaction filter", { exact: true });
+  await filter.selectOption({ label: "Custom emoji 9007199254740993" });
+  assert.equal(await count("listMessageReactors"), 1, "filter selection does not read");
+  await panel().getByRole("button", { name: "Load reactors", exact: true }).click();
+  assert.equal(await count("listMessageReactors"), 2, "custom metadata filtering is independent of custom writes");
+  await filter.selectOption("all"); await panel().getByRole("button", { name: "Load reactors", exact: true }).click();
+  assert.equal(await count("listMessageReactors"), 2, "cached page can be explicitly reviewed without another call");
+  for (let i = 0; i < 6; i++) await panel().getByRole("button", { name: "Load more reactors", exact: true }).click();
+  await panel().getByText("Reactor view limit reached. Refresh explicitly for a fresh view; more results may exist.", { exact: true }).waitFor();
+  assert.equal(await count("listMessageReactors"), 8);
+  assert.equal(await panel().getByRole("button", { name: "Load more reactors", exact: true }).isDisabled(), true);
+  assert.equal(await panel().locator("img").count(), 0, "reactor names remain literal text");
+  await capture("reactions-reactor-limit.png");
+  const beforeExpiry = (await requests()).length;
+  await page.evaluate(() => { window.reactionFixture.advance(); window.reactionFixture.reset(); });
+  await panel().getByText("This reaction view expired. Refresh explicitly.", { exact: true }).waitFor();
+  assert.equal((await requests()).length, beforeExpiry, "expiry/reset never refreshes automatically");
+
+  await page.evaluate(() => window.reactionFixture.custom(true)); await refresh();
+  await panel().getByRole("checkbox", { name: "❤️", exact: true }).check();
+  await page.evaluate(() => window.reactionFixture.loseNextWrite());
+  await review().click(); await confirm();
+  await panel().getByText("The replacement may have completed. Refresh and review before another action.", { exact: true }).waitFor();
+  assert.equal(await count("setMessageReactions"), 3); assert.equal(await review().isDisabled(), true);
+  await close(); await open("Alpha reaction caption");
+  assert.equal(await review().isDisabled(), true); assert.equal(await count("setMessageReactions"), 3);
+  await refresh(); await panel().getByText("Review the full ordinary set before choosing a replacement.", { exact: true }).waitFor();
+  assert.match(await panel().locator(".reaction-state").textContent(), /❤️.*your choice/s);
+  await close();
+
+  await page.evaluate(() => window.reactionFixture.delayNextRefresh());
+  await open("Alpha reaction caption"); await refresh();
+  await close(); await choose("Beta"); await open("Beta reaction caption"); await refresh();
+  await panel().getByText("Review the full ordinary set before choosing a replacement.", { exact: true }).waitFor();
+  await page.evaluate(() => window.reactionFixture.releaseDelayed());
+  assert.match(await panel().textContent(), /Beta reaction caption/); assert.doesNotMatch(await panel().locator(".reaction-state").textContent(), /Custom emoji|❤️/);
+  await close(); await open("Other topic caption"); await refresh();
+  await panel().getByText("Review the full ordinary set before choosing a replacement.", { exact: true }).waitFor();
+  const topicRead = (await requests()).filter(request => request.method === "refreshMessageReactions").at(-1);
+  assert.deepEqual(topicRead.params.thread, { accountId: "Beta", chatId: "same-chat", topicId: "84" });
+  await page.evaluate(() => window.reactionFixture.malformedMax(true));
+  await refresh(); await panel().getByText("Review the reported reactions. Replacing the set is unavailable for this view.", { exact: true }).waitFor();
+  assert.equal(await clear().isDisabled(), true); assert.equal(await review().isDisabled(), true);
+  await close();
+  const left = await page.locator(".thread-bubble").evaluateAll(rows => rows.map(row => Math.round(row.getBoundingClientRect().left)));
+  assert.equal(new Set(left).size, 1);
+  assert.equal(await page.locator(".reaction-summary img, a[href^='file:']").count(), 0);
+  assert.deepEqual(errors, []);
+  console.log("Explicit ordinary reaction proof, replacement, readonly snapshots and scoped reactor views passed Chromium checks.");
+} finally { await browser?.close(); await server.close(); }

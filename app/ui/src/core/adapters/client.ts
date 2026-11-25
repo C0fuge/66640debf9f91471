@@ -37,7 +37,7 @@ function unpack(reply: unknown, mutation: boolean): unknown {
 }
 
 const messageMutations = new Set<keyof CoreOperations>(["editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll",
-  "startMediaDownload", "startMediaSave", "cancelMediaJob"]);
+  "startMediaDownload", "startMediaSave", "cancelMediaJob", "setMessageReactions"]);
 
 export function createClient(send: Request, subscribe: CoreClient["subscribe"]): CoreClient {
   function method<K extends keyof CoreOperations>(name: K) {
@@ -65,6 +65,9 @@ export function createClient(send: Request, subscribe: CoreClient["subscribe"]):
     votePoll: method("votePoll"),
     closePoll: method("closePoll"),
     refreshPoll: method("refreshPoll"),
+    refreshMessageReactions: method("refreshMessageReactions"),
+    setMessageReactions: method("setMessageReactions"),
+    listMessageReactors: method("listMessageReactors"),
     startMediaDownload: method("startMediaDownload"),
     startMediaSave: method("startMediaSave"),
     listMediaJobs: method("listMediaJobs"),
