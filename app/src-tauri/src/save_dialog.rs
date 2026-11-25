@@ -84,33 +84,33 @@ fn choose_portal(
     suggested_name: &str,
     settled: &mut bool,
 ) -> Result<Option<PathBuf>, SaveDialogError> {
-    let connection = Connection::session().map_err(unavailable)?;
+    let connection = Connection::session().map_err(|error| unavailable_at("session_connection", error))?;
     let bus = Proxy::new(
         &connection,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
     )
-    .map_err(unavailable)?;
+    .map_err(|error| unavailable_at("bus_proxy", error))?;
     // Activating the desktop portal does not create a chooser. Resolve its unique owner
     // before subscribing, so a later replacement cannot supply our response.
     let _: u32 = bus
         .call("StartServiceByName", &(PORTAL, 0_u32))
-        .map_err(unavailable)?;
-    let owner: String = bus.call("GetNameOwner", &(PORTAL,)).map_err(unavailable)?;
+        .map_err(|error| unavailable_at("activate_portal", error))?;
+    let owner: String = bus.call("GetNameOwner", &(PORTAL,)).map_err(|error| unavailable_at("resolve_owner", error))?;
     let sender = connection.unique_name().ok_or(SaveDialogError::Unavailable)?;
     let token = format!("ch_{}", zbus::Guid::generate());
     let path = request_path(sender.as_str(), &token).ok_or(SaveDialogError::Internal)?;
     let request = Proxy::new(&connection, owner.as_str(), path.as_str(), REQUEST)
-        .map_err(unavailable)?;
-    let mut responses = request.receive_signal("Response").map_err(unavailable)?;
+        .map_err(|error| unavailable_at("request_proxy", error))?;
+    let mut responses = request.receive_signal("Response").map_err(|error| unavailable_at("subscribe_response", error))?;
     let chooser = Proxy::new(
         &connection,
         owner.as_str(),
         DESKTOP,
         "org.freedesktop.portal.FileChooser",
     )
-    .map_err(unavailable)?;
+    .map_err(|error| unavailable_at("chooser_proxy", error))?;
     let name = safe_name(suggested_name);
     let options = HashMap::from([
         ("handle_token", Value::from(token.as_str())),
@@ -122,7 +122,7 @@ fn choose_portal(
     *settled = false;
     let handle: OwnedObjectPath = chooser
         .call("SaveFile", &("", "Save a new copy", options))
-        .map_err(unavailable)?;
+        .map_err(|error| unavailable_at("save_file_reply", error))?;
     if handle.as_str() != path {
         // The spec permits old portals to return another path, but subscription would
         // race there. We cannot establish ownership of that other handle to Close it.
@@ -138,7 +138,7 @@ fn choose_portal(
         return Err(SaveDialogError::Unavailable);
     }
     let (response, results): (u32, HashMap<String, OwnedValue>) =
-        message.body().deserialize().map_err(unavailable)?;
+        message.body().deserialize().map_err(|error| unavailable_at("response_body", error))?;
     decode_response(response, results, settled)
 }
 
@@ -153,7 +153,7 @@ fn decode_response(
         0 => {
             *settled = true;
             let uris = results.remove("uris").ok_or(SaveDialogError::Unavailable)?;
-            let uris = Vec::<String>::try_from(uris).map_err(unavailable)?;
+            let uris = Vec::<String>::try_from(uris).map_err(|error| unavailable_at("response_uris", error))?;
             selected_path(&uris).map(Some)
         }
         1 => {
@@ -168,7 +168,13 @@ fn decode_response(
     }
 }
 
-fn unavailable<E>(_: E) -> SaveDialogError {
+fn unavailable_at<E: std::fmt::Debug>(_stage: &'static str, _error: E) -> SaveDialogError {
+    // Only the explicit synthetic private-bus test can print transport details.
+    // This block does not exist in the production binary.
+    #[cfg(test)]
+    if std::env::var("CH_NATIVE_PORTAL_TEST_BUS").as_deref() == Ok("1") {
+        eprintln!("private portal fixture stage {_stage}: {_error:?}");
+    }
     SaveDialogError::Unavailable
 }
 
@@ -268,6 +274,17 @@ mod tests {
         let mut settled = false;
         let results = HashMap::from([("uris".into(), OwnedValue::from(42_u32))]);
         assert!(decode_response(0, results, &mut settled).is_err());
+        assert!(settled);
+    }
+
+    #[test]
+    fn positive_response_round_trips_the_actual_dbus_variant_array() {
+        let results = HashMap::from([("uris", Value::new(vec!["file:///synthetic/new-copy".to_owned()]))]);
+        let message = zbus::Message::signal("/synthetic/request", REQUEST, "Response")
+            .unwrap().build(&(0_u32, results)).unwrap();
+        let (code, values): (u32, HashMap<String, OwnedValue>) = message.body().deserialize().unwrap();
+        let mut settled = false;
+        assert_eq!(decode_response(code, values, &mut settled).unwrap(), Some(PathBuf::from("/synthetic/new-copy")));
         assert!(settled);
     }
 

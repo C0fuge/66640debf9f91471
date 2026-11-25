@@ -130,6 +130,8 @@ fn native_portal_private_bus_transport() {
         let result = receiver.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| {
             panic!("provider did not settle within private-bus bound: {scenario:?}")
         });
+        assert_eq!(portal.calls.load(Ordering::Relaxed), 1,
+            "provider returned {result:?} before expected SaveFile dispatch: {scenario:?}");
         match scenario {
             Scenario::EarlyResponse(0) => assert_eq!(result.unwrap(), Some(PathBuf::from("/synthetic/new-copy"))),
             Scenario::EarlyResponse(1) | Scenario::ForgedSender => assert!(matches!(result, Ok(None))),
