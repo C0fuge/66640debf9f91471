@@ -237,5 +237,5 @@ mod linux {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-#[path = "../tests/save_file_tests.rs"]
+#[path = "../tests/support/save_file_tests.rs"]
 mod tests;
