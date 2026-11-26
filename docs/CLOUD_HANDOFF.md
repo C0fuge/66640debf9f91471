@@ -1,9 +1,9 @@
-# Owner pause
+# Owner resumed
 
-Development paused by the owner. Verify is disabled remotely and no run remains
-active. Do not resume automatically. On explicit resume inspect exact source/run
-state and re-enable the workflow. This docs-only checkpoint may have no CI run;
-use the successful source SHA below.
+Development resumed on explicit owner instruction. Verify is active again.
+Development runs locally; Actions builds/tests only. The verified source below
+remains the baseline. Next candidate is the frozen Telegram dialog pin/manual
+unread subset; no new application operation has been approved yet.
 
 # Verification handoff
 

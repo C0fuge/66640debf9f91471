@@ -1,7 +1,8 @@
-# Build progress — paused
+# Build progress — resumed
 
-The owner paused development. Verify is disabled remotely; no build is active.
-Resume only on a new owner instruction, inspect state and re-enable the workflow.
+The owner resumed development. Verify is active again. Telegram dialog pin/manual
+unread implementation is in progress, not yet a verified candidate. The source
+checkpoint below remains the last fully verified build.
 
 Exact source `db11338a2b54cb4bc820fe6b130925c5e8fb6ffb` passed
 [Verify45807435282](https://github.com/C0fuge/66640debf9f91471/actions/runs/45807435282). Rust workspace309, core no-default126, private native
