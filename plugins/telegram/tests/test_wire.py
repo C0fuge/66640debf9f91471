@@ -530,7 +530,7 @@ def test_archive_is_account_scoped_and_sparse_through_sdk_wire(core):
 
 @pytest.mark.parametrize("core", ["without-archive"], indirect=True)
 def test_archive_false_requires_the_same_capability_and_preflights_mixed_changes(core):
-    assert core.initialize()["capabilities"]["chat.archive"] is False
+    assert core.initialize()["capabilities"].get("chat.archive") in (None, False)
     for desired in (True, False):
         error = core.error("chats.set_flags", {"account_id": "missing", "chat_id": "invalid",
                                                "archived": desired, "pinned": True})

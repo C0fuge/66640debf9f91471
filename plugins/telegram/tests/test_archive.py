@@ -18,7 +18,7 @@ from telegram_plugin.mapping import archive_state, conversation
 @pytest.mark.parametrize("folder,expected", [(None, False), (0, False), (1, True)])
 def test_raw_folder_default_and_archive_are_consistent(folder, expected):
     raw = snapshot(folder=folder).dialogs[0]
-    dialog = Dialog(None, raw, {17: tl.User(17)}, None)
+    dialog = Dialog(None, raw, {17: tl.User(17, access_hash=0)}, None)
     assert archive_state(folder) is expected
     assert to_wire(conversation(dialog))["archived"] is expected
     if folder == 0:
@@ -132,7 +132,7 @@ def test_full_sync_uses_raw_zero_and_never_closes_invalid_folder_snapshot():
     async def exercise():
         for folder in (0, 1, 2):
             raw = snapshot(folder=folder).dialogs[0]
-            item = Dialog(None, raw, {17: tl.User(17)}, None)
+            item = Dialog(None, raw, {17: tl.User(17, access_hash=0)}, None)
             async def dialogs():
                 yield item
             client = SimpleNamespace(iter_dialogs=dialogs)

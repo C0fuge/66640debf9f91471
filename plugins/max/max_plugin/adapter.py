@@ -12,10 +12,11 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from contact_hub_sdk import AuthRequired, Forbidden, NotFound, NotSupported, PluginError
+from contact_hub_sdk import AuthRequired, Forbidden, NotFound, NotSupported, PluginError, Unavailable
 
 from . import mapping
 from .discovery import drain_chat_pages, marker
+from .editing import EditPolicy, EditTarget, plain_message, writable_chat
 
 
 class InteractiveAuth:
@@ -81,7 +82,7 @@ class InteractiveAuth:
 
 
 class PyMaxAdapter:
-    def __init__(self, account: Any, store: Any, settings: Any, event: Any, *, sleep=asyncio.sleep):
+    def __init__(self, account: Any, store: Any, settings: Any, event: Any, *, sleep=asyncio.sleep, clock=time.time):
         self.account, self.store, self.settings, self.event = account, store, settings, event
         self.client: Any = None
         self.me: int | None = None
@@ -89,6 +90,8 @@ class PyMaxAdapter:
         self._sleep = sleep
         self._login_observed = asyncio.Event()
         self._chat_marker: int | None = None
+        self.edit_policy = EditPolicy(clock)
+        self._editing_active = False
 
     async def connect(self, mode: str, interactive: bool) -> None:
         from pymax import Client, WebClient
@@ -96,6 +99,8 @@ class PyMaxAdapter:
         from pymax.api.session.payloads import MobileUserAgentPayload
         from pymax.types.domain.sync import SyncOverrides
         from pymax.protocol import Command, Opcode
+        self.edit_policy.reset()
+        self._editing_active = True
         session = await self.store.load_session()
         if session:
             self.account.plugin._redact.add(session.token)
@@ -170,6 +175,17 @@ class PyMaxAdapter:
         async def on_raw(frame: Any, client: Any) -> None:
             # Public pinned hook receives matched response frames too. App.start
             # consumes the LOGIN model but otherwise discards this metadata.
+            if not self._editing_active:
+                return
+            if frame.opcode in {Opcode.LOGIN, Opcode.LOGIN2} and frame.cmd == Command.RESPONSE:
+                config = frame.payload.get("config") if isinstance(frame.payload, dict) else None
+                if config is not None:
+                    self.edit_policy.observe(config)
+                elif not isinstance(frame.payload, dict) or "config" in frame.payload:
+                    self.edit_policy.reset()
+            elif frame.opcode == Opcode.NOTIF_CONFIG and frame.cmd in {Command.REQUEST, Command.EVENT}:
+                config = frame.payload.get("config") if isinstance(frame.payload, dict) else None
+                self.edit_policy.observe(config, patch=True)
             if frame.opcode != Opcode.LOGIN or frame.cmd != Command.RESPONSE:
                 return
             if self._login_observed.is_set():
@@ -227,8 +243,80 @@ class PyMaxAdapter:
         await self.client._connection.wait_closed()
 
     async def close(self) -> None:
+        self._editing_active = False
+        self.edit_policy.reset()
         if self.client is not None:
             await self.client.close()
+
+    async def edit_preflight(self, chat_id: int, message_id: int) -> EditTarget:
+        from pymax.api.chats.payloads import GetChatInfoPayload
+        from pymax.api.messages.payloads import GetMessagesPayload
+        from pymax.api.response import require_payload_dict
+        from pymax.protocol import Opcode
+        from pymax.types.domain.chat import Chat
+        from pymax.types.domain.message import Message
+
+        if type(self.me) is not int:
+            raise AuthRequired("MAX account identity is unavailable")
+        if not self._editing_active:
+            raise Unavailable("MAX edit connection is unavailable")
+        generation = self.edit_policy.check()
+        response = await self.client._app.invoke(Opcode.MSG_GET,
+                        GetMessagesPayload(chat_id=chat_id, message_ids=[message_id]).to_payload())
+        payload = require_payload_dict(response)
+        if "chatId" in payload and response_id(payload["chatId"]) != chat_id or "postId" in payload:
+            raise PluginError("MAX edit preflight contradicted the requested conversation")
+        rows = payload.get("messages")
+        if rows == []:
+            raise NotFound(kind="message")
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise PluginError("MAX edit preflight did not return one message")
+        row = rows[0]
+        plain_message(row, chat_id, message_id, self.me)
+        Message.model_validate(row)
+        response = await self.client._app.invoke(Opcode.CHAT_INFO,
+                        GetChatInfoPayload(chat_ids=[chat_id]).to_payload())
+        payload = require_payload_dict(response)
+        if "chatId" in payload and response_id(payload["chatId"]) != chat_id or "postId" in payload:
+            raise PluginError("MAX edit conversation preflight contradicted the requested conversation")
+        chats = payload.get("chats")
+        if not isinstance(chats, list) or len(chats) != 1:
+            raise PluginError("MAX edit preflight did not return one conversation")
+        writable_chat(chats[0], chat_id, self.me)
+        Chat.model_validate(chats[0])
+        self.edit_policy.check(row["time"], generation)
+        return EditTarget(chat_id, message_id, row["time"], generation)
+
+    def edit(self, target: EditTarget, text: str) -> Any:
+        from pymax.api.messages.payloads import EditMessagePayload
+
+        # These checks run before invoke can write. There is no await between
+        # the last policy/age check and entering the single transport request.
+        if not self._editing_active:
+            raise Unavailable("MAX edit connection is unavailable")
+        self.edit_policy.check(target.sent_at, target.policy_generation)
+        payload = EditMessagePayload(chat_id=target.chat_id, message_id=target.message_id,
+                                     text=text, elements=[]).to_payload()
+        payload.pop("attachments", None)
+        return self._edit(target, text, payload)
+
+    async def _edit(self, target: EditTarget, text: str, payload: dict) -> Any:
+        from pymax.api.response import require_payload_dict
+        from pymax.protocol import Opcode
+        from pymax.types.domain.message import Message
+
+        response = await self.client._app.invoke(Opcode.MSG_EDIT, payload)
+        payload = require_payload_dict(response)
+        if "chatId" in payload and response_id(payload["chatId"]) != target.chat_id or "postId" in payload:
+            raise PluginError("MAX edit acknowledgment contradicted the requested conversation")
+        row = payload.get("message")
+        plain_message(row, target.chat_id, target.message_id, self.me, edited=True)
+        if row["text"] != text or row["time"] != target.sent_at:
+            raise PluginError("MAX edit acknowledgment did not confirm the requested text")
+        if not self._editing_active:
+            raise Unavailable("MAX edit connection changed")
+        self.edit_policy.check(generation=target.policy_generation)
+        return mapping.message(Message.model_validate(row), self.me, target.chat_id)
 
     async def recent(self, chat_id: int, limit: int) -> list:
         rows = await self.client.fetch_history(chat_id, backward=limit)

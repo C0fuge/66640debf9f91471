@@ -5,7 +5,7 @@ import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from contact_hub_sdk import Forbidden, NotFound, PluginError, types as T
+from contact_hub_sdk import Forbidden, NotFound, NotSupported, PluginError, types as T
 from max_plugin.plugin import MaxPlugin
 
 assert "pymax" not in sys.modules
@@ -115,6 +115,41 @@ class OfflineClient:
             raise ConnectionError("synthetic-private-delete-marker")
         if self.scenario == "delete-partial":
             raise PluginError("Synthetic partial acknowledgment")
+
+    async def edit_preflight(self, chat_id, message_id):
+        self.store.identity["edit_reads"] = self.store.identity.get("edit_reads", 0) + 1
+        self.store.save_identity()
+        if chat_id not in {0, 11}:
+            raise NotSupported("Synthetic unsupported dialog")
+        if message_id == 20:
+            raise Forbidden("Synthetic incoming message")
+        if self.scenario == "edit-read-error":
+            raise ConnectionError("synthetic-private-edit-marker")
+        if self.scenario == "edit-generation":
+            self.account.data["max"].generation += 1
+        if self.scenario == "edit-read-pending":
+            await self.event("conversation", T.Conversation(id=str(chat_id), kind="dm", title="Edit preflight pending"))
+            await asyncio.Event().wait()
+        return SimpleNamespace(chat_id=chat_id, message_id=message_id)
+
+    def edit(self, target, text):
+        if self.scenario == "edit-prepare":
+            raise Forbidden("Synthetic expired edit window")
+        return self._edit(target, text)
+
+    async def _edit(self, target, text):
+        self.store.identity["edit_count"] = self.store.identity.get("edit_count", 0) + 1
+        self.store.save_identity()
+        if self.scenario == "edit-pending":
+            await self.event("conversation", T.Conversation(id=str(target.chat_id), kind="dm", title="Edit dispatched"))
+            await asyncio.Event().wait()
+        if self.scenario == "edit-unknown":
+            raise ConnectionError("synthetic-private-edit-marker")
+        if self.scenario == "edit-post-generation":
+            self.account.data["max"].generation += 1
+        return T.Message(id=str(target.message_id), chat_id=str(target.chat_id), sender_id="1",
+                         direction="out", sent_at=STAMP, text="wrong" if self.scenario == "edit-malformed" else text,
+                         edited=True)
 
 
 MaxPlugin(OfflineClient, retry_delay=0.01).run()

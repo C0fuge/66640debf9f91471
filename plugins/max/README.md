@@ -41,13 +41,15 @@ host; pytest execution belongs to CI. No real-server behavior has been verified.
 | Auth | Generic SDK phone, code, optional server-requested password challenge (three attempts), QR link/expiry/poll/confirmation; cancel/restart and rejected-input steps; no console providers | Existing accounts only; no registration, logout/settings for 2FA, email recovery or imported sessions |
 | Initial data | Emit login contacts/chats/messages and additional validated chat pages seeded by a present LOGIN `chatMarker`; buffer live events until discovery finishes | Absent login marker remains unknown/partial; no `conversations.synced` deletion/reconciliation signal or claim of exhaustive membership |
 | Live data | New/edited message upserts, chat updates, scoped message deletions | No durable event replay, read/presence/reaction/contact-change projection or gap closing |
-| Text send | One literal-text request using pinned payload models; basic same-chat reply; confirm only the returned outgoing platform message; emit the confirmed upsert | Media, entities, silent/scheduled/topic/comment/effect sends are not advertised |
+| Text send | One literal-text request using pinned payload models; basic same-chat reply; confirm only the returned outgoing platform message; emit the confirmed upsert | Only absent/empty entities are accepted; the advertised entity-type list is empty. Media, formatting, silent/scheduled/topic/comment/effect sends are unsupported |
 | Local send journal | A supplied `client_id` binds to the exact chat/text/reply payload. Confirmed retries return and re-emit the stored message. Authoritative results/upserts preserve the exact ID in `ext.max.client_id`, including an empty ID. Pending/unknown retries fail without sending again, across restart | Does **not** claim server deduplication or exactly-once delivery. No `client_id` means no durable local replay protection. Journal is capped at 10,000 entries; every private state file has a 64 MiB limit. New keyed sends are refused when full |
 | Delete | Fresh chat-scoped message preflight, one delete request, exact chat/ID acknowledgment, then scoped `messages.deleted` and `{}` success. `revoke=false` supports incoming messages; `revoke=true` requires outgoing sender identity | At most 100 input IDs, duplicates normalized; regular `USER` messages only. Comments, scheduled/service messages, admin deletion of others' messages and automatic replay are unsupported. Server permissions still apply |
+| Edit | Fresh single-message and single-chat preflight; literal plain text; one request with unchanged attachments omitted; required exact returned edited message | Saved Messages and explicitly writable ordinary member groups only. Observed per-run server timeout, strict message age and no-edit flags are required; no media/formatting/links, channels, other DMs, scheduled/comments/service messages or replay |
 | Recent history | Request a newest page, deduplicate IDs and sort by timestamp/numeric ID descending; bounded limit 1–200 | Continuation is unsupported; even short/empty pages cannot falsely close history |
 
-Only `auth.interactive`, `delete` and `delete.for_me` are advertised. Optional `chat.sync`, `contacts.list`,
-`history.fill_gap`, `history.jump_to_date`, attachments, search, editing and other
+Only `auth.interactive`, `delete`, `delete.for_me`, `edit` and `send.entities:{types:[]}`
+are advertised. Optional `chat.sync`, `contacts.list`,
+`history.fill_gap`, `history.jump_to_date`, attachments, search and other
 capabilities remain absent. Account ghost mode and unsupported request parameters
 are rejected explicitly. Auto-download has no effect while media is unsupported.
 Full chat/contact reconciliation needs a separately proven enumeration strategy.
@@ -132,12 +134,40 @@ in the pinned `api/messages/payloads.py` and `api/messages/service.py`. All adap
 logic is original; no minified source was copied. Live server behavior remains
 unverified.
 
-Editing remains undeclared and rejected before dispatch. The pinned edit helper
-parses Markdown; a direct literal-text payload is possible, but that alone does
-not prove editability. The first-party client also checks a no-edit bit, server
-`edit-timeout`, attachment/link category and chat write rights. The current
-adapter does not retain/reconcile that configuration or implement those chat
-permission rules. No timeout, edit window or rights fallback is guessed here.
+Text editing is deliberately narrower than the full MAX client. Raw LOGIN/LOGIN2
+configuration and notification134 retain an explicit validated server
+`edit-timeout` for the current adapter run. Missing or invalid policy denies edits;
+close/reconnect revokes it. Full server-map replacement and notification patches
+have separate semantics. An edit proof records the policy generation; an updated
+policy invalidates it before dispatch. The clock is local wall time, matching the
+first-party client's Date.now(), with no inferred server-clock offset from login
+sync timestamps. Expired and future-dated messages cannot authorize a write.
+
+Fresh MSG_GET and CHAT_INFO reads target exactly one requested message/chat,
+bypassing the library's cached get_chat helper. Only authenticated outgoing plain
+USER text with no old formatting, attachment, link, scheduling or comment fields
+is accepted; no-edit bit32 denies it. Fresh DIALOG/ID0 establishes Saved Messages.
+An ordinary CHAT additionally needs explicit active membership and input
+restriction64 clear. Other DMs/bots and channels are unsupported in this slice.
+
+The pinned EditMessagePayload is used for one command67, literal text and empty
+elements. Its default attachments field is removed so unchanged media is never
+replaced by a hidden default. The convenience edit helper is bypassed: it parses
+Markdown, prepares uploads and retries an attachment error. Pinned App.invoke and
+ConnectionManager.request perform one transport send; no wrapper retry is used.
+The response must confirm the exact message/chat, authenticated sender, original
+creation time, requested text and edited status. Preflight/config/clock failures
+are definite. Once the invoke coroutine is entered, cancellation, stale run,
+malformed/foreign/partial/lost responses are NETWORK with unknown outcome and
+retry_safe:false. A successful reply is a required MessageResult, not a local
+requested-value write. Independent live edit notifications may still arrive.
+
+The same first-party bundle establishes this bounded policy: decoded-character
+offsets313868 (clock),508368 (timeout),588902/592530 (message flags/policy),
+655266/659765/671937 (group input/member rights),666395 (Saved Messages),
+518400/767112/862494 (config merge/notification dispatch), and852450–853350
+(ordinary edit request/returned message). No fixed edit window or rights fallback
+is invented. Real server acceptance is unverified.
 
 ## History safety and contract gap
 

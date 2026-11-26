@@ -23,7 +23,8 @@ def sign_in(core, account="max", mode="phone_code"):
 def test_auth_order_accounts_events_send_and_pagination(core_factory, tmp_path):
     core = core_factory()
     core.start()
-    assert core.capabilities == {"auth.interactive": True, "delete": True, "delete.for_me": True}
+    assert core.capabilities == {"auth.interactive": True, "delete": True, "delete.for_me": True,
+                                 "edit": True, "send.entities": {"types": []}}
     core.event("status", state="auth_required")
     frames = [json.loads(line) for line in core.raw]
     start_reply = next(i for i, frame in enumerate(frames) if "result" in frame and frame["result"] == {})
@@ -36,7 +37,7 @@ def test_auth_order_accounts_events_send_and_pagination(core_factory, tmp_path):
     core.event("messages.upsert")
     assert core.error("auth.begin", {**A, "method": "phone_code"})["data"]["code"] == "INVALID_PARAMS"
     assert core.call("auth.cancel", {**A, "flow": "sign_in"}) == {}
-    sent = core.call("messages.send", {**A, "chat_id": "10", "text": "**literal**", "client_id": "send-1"})
+    sent = core.call("messages.send", {**A, "chat_id": "10", "text": "**literal**", "entities": [], "client_id": "send-1"})
     assert sent["message"]["text"] == "**literal**"
     assert sent["message"]["ext"]["max"] == {
         "message_type": "USER", "has_attachments": False, "client_id": "send-1"}
@@ -46,7 +47,7 @@ def test_auth_order_accounts_events_send_and_pagination(core_factory, tmp_path):
     assert replay == sent
     err = core.error("messages.send", {**A, "chat_id": "10", "text": "different", "client_id": "send-1"})
     assert err["data"]["code"] == "INVALID_PARAMS"
-    for optional in ({"silent": False}, {"entities": []}, {"topic_id": "1"}, {"no_webpage": False}):
+    for optional in ({"silent": False}, {"entities": [{"type": "bold", "offset": 0, "length": 1}]}, {"topic_id": "1"}, {"no_webpage": False}):
         assert core.error("messages.send", {**A, "chat_id": "10", "text": "x", **optional})["data"]["code"] == "NOT_SUPPORTED"
     core.call("messages.send", {**A, "chat_id": "10", "text": "live"})
     core.event("messages.upsert", lambda p: p["messages"][0]["id"] == "200")

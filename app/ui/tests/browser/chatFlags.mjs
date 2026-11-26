@@ -58,6 +58,7 @@ try {
   assert.deepEqual((await requests()).at(-1).params.thread, { accountId: "Beta", chatId: "0", topicId: null });
   // Only the committed fixture row moves it between tabs; a lost reply survives that unmount.
   await control("Archive chat").click(); await dialog.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.activeElement?.id === "chat-filter");
   await button("Archive").click(); await menu("Beta").click(); await refresh();
   await control("Move to inbox").waitFor();
   await page.evaluate(() => window.flagFixture.lose());

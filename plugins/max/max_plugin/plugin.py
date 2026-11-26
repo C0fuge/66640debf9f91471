@@ -66,7 +66,8 @@ class MaxPlugin(Plugin):
     version = "0.1.0"
     # Required send/recent/auth have handlers. Full chat/history reconciliation
     # cannot be promised from timestamp-only library pages; those caps stay absent.
-    capabilities: dict[str, Any] = {"auth.interactive": True, "delete": True, "delete.for_me": True}
+    capabilities: dict[str, Any] = {"auth.interactive": True, "delete": True, "delete.for_me": True,
+                                    "edit": True, "send.entities": {"types": []}}
 
     def __init__(self, adapter_factory: Callable = PyMaxAdapter, *, retry_delay: float = 1):
         self.adapter_factory = adapter_factory
@@ -301,6 +302,46 @@ class MaxPlugin(Plugin):
             raise Unavailable()
         return state
 
+    @method("messages.edit")
+    async def edit(self, account: Account, params: T.MessagesEditParams) -> dict:
+        state = self._ready(account)
+        chat = numeric_id(params.chat_id, "chat_id")
+        message = numeric_id(params.message_id, "message_id")
+        if not isinstance(params.text, str) or not params.text.strip():
+            raise InvalidParams("Text must not be empty", field="text")
+        if params.entities or params.path is not None or params.no_webpage is not None:
+            raise NotSupported("MAX editing media, formatting and link previews is not implemented")
+        adapter, generation = state.adapter, state.generation
+        async with state.mutation_lock:
+            if self._ready(account) is not state or state.adapter is not adapter or state.generation != generation:
+                raise Unavailable("MAX connection changed while editing was queued")
+            try:
+                target = await adapter.edit_preflight(chat, message)
+            except Exception as exc:
+                error = failure(exc)
+                if error.code in {"NETWORK", "TIMEOUT", "INTERNAL"}:
+                    raise Unavailable("MAX edit preflight could not be verified") from None
+                raise error from None
+            if account.data.get("max") is not state or not state.ready or state.adapter is not adapter or state.generation != generation:
+                raise Unavailable("MAX connection changed before editing")
+            # Preparation is synchronous: a last policy/clock rejection is a
+            # definite pre-dispatch failure. The returned coroutine owns the
+            # single invoke; no automatic retry follows its first await.
+            try:
+                mutation = adapter.edit(target, params.text)
+            except Exception as exc:
+                raise failure(exc) from None
+            try:
+                result = await mutation
+                if result.id != params.message_id or result.chat_id != params.chat_id or result.direction != "out" or result.text != params.text or result.edited is not True:
+                    raise PluginError("MAX did not confirm the requested text edit")
+                if account.data.get("max") is not state or not state.ready or state.adapter is not adapter or state.generation != generation:
+                    raise PluginError("MAX connection changed after editing")
+            except (Exception, asyncio.CancelledError):
+                raise PluginError("MAX edit outcome is unknown; automatic retry is unsafe", code="NETWORK",
+                                  outcome="unknown", retry_safe=False) from None
+        return {"message": result}
+
     @method("messages.delete")
     async def delete(self, account: Account, params: T.MessagesDeleteParams) -> dict:
         state = self._ready(account)
@@ -367,6 +408,8 @@ class MaxPlugin(Plugin):
         chat = numeric_id(params.chat_id, "chat_id")
         if params.topic_id is not None:
             raise NotSupported("MAX topic sending is not implemented")
+        if params.entities:
+            raise NotSupported("MAX text formatting is not implemented")
         if not params.text:
             raise InvalidParams("Text must not be empty", field="text")
         reply = numeric_id(params.reply_to.message_id, "reply_to.message_id") if params.reply_to else None

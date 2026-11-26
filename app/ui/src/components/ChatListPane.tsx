@@ -67,6 +67,12 @@ function AccountChats({ accountId, selectedThread, onSelectChat, onSnapshot, cli
     (!term || (row.title || row.thread.chatId).toLocaleLowerCase().includes(term) ||
       row.lastMessagePreview?.toLocaleLowerCase().includes(term)));
   const target = rows.find(row => row.thread.chatId === menu && row.thread.accountId === accountId && row.thread.topicId === null);
+  useEffect(() => {
+    if (menu !== null && data && !target) {
+      setMenu(null);
+      searchInput.current?.focus();
+    }
+  }, [menu, data, target]);
   const virtual = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scroller.current,
