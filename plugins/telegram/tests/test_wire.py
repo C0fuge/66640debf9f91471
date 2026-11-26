@@ -34,6 +34,8 @@ elif sys.argv[1] == 'empty-object':
     plugin.capabilities = {**plugin.capabilities, 'chat.get': {}}
 elif sys.argv[1] == 'without-archive':
     plugin.capabilities = {**plugin.capabilities, 'chat.archive': False}
+elif sys.argv[1] == 'without-mentions':
+    plugin.capabilities = {k: v for k, v in plugin.capabilities.items() if k != 'mentions.unread'}
 plugin.run()
 """
     with FakeCore([sys.executable, "-c", bootstrap, getattr(request, "param", "default")], plugin_dir=ROOT, tmp=tmp_path,
@@ -539,4 +541,65 @@ def test_archive_false_requires_the_same_capability_and_preflights_mixed_changes
         assert error["data"] == {"code": "NOT_SUPPORTED", "capability": "chat.archive"}
     assert len(core.all_events) == before
     assert core.call("chats.get", {"account_id": "a", "chat_id": "17"})["conversation"]["pinned"] is False
+    assert core.shutdown() == 0
+
+
+def test_mentions_are_scoped_oldest_bounded_and_clear_only_the_requested_topic(core):
+    assert core.initialize()["capabilities"]["mentions.unread"] is True
+    start(core, name="a")
+    start(core, name="b")
+    p = {"account_id": "a", "chat_id": "-1000000000008", "topic_id": "42"}
+    before = len(core.all_events)
+    assert core.call("mentions.list_unread", {**p, "limit": 1}) == {"message_ids": ["41"]}
+    assert core.call("mentions.list_unread", {**p, "limit": 200}) == {"message_ids": ["41", "45"]}
+    assert core.call("mentions.read", p) == {}
+    assert core.call("mentions.list_unread", {**p, "limit": 2}) == {"message_ids": []}
+    assert core.call("mentions.list_unread", {**p, "topic_id": "43", "limit": 2}) == {"message_ids": ["50"]}
+    assert core.call("mentions.list_unread", {**p, "topic_id": "1", "limit": 2}) == {"message_ids": ["11"]}
+    assert core.call("mentions.list_unread", {**p, "account_id": "b", "limit": 2}) == {"message_ids": ["41", "45"]}
+    assert core.call("mentions.read", {**p, "account_id": "b", "topic_id": None}) == {}
+    assert core.call("mentions.list_unread", {**p, "account_id": "b", "topic_id": None, "limit": 200}) == {"message_ids": []}
+    assert core.call("mentions.list_unread", {**p, "chat_id": "-8", "topic_id": None, "limit": 200}) == {"message_ids": ["2", "5"]}
+    assert core.call("mentions.read", {**p, "chat_id": "-8", "topic_id": None}) == {}
+    assert len(core.all_events) == before, "mention acknowledgements never fabricate counters or message changes"
+    assert core.shutdown() == 0
+
+
+@pytest.mark.parametrize("core", ["without-mentions"], indirect=True)
+def test_missing_mentions_capability_rejects_before_owner_or_scope_lookup(core):
+    assert not core.initialize()["capabilities"].get("mentions.unread")
+    for method in ("mentions.list_unread", "mentions.read"):
+        p = {"account_id": "missing", "chat_id": "invalid", "limit": 2} if method.endswith("list_unread") else {
+            "account_id": "missing", "chat_id": "invalid"}
+        assert core.error(method, p)["data"] == {"code": "NOT_SUPPORTED", "capability": "mentions.unread"}
+    assert core.shutdown() == 0
+
+
+def test_mention_writes_refuse_ghost_and_unavailable_scopes_without_success(core):
+    core.start("ghost", CONFIG, SECRETS, ghost=True)
+    core.event("status", account_id="ghost", state="connected")
+    p = {"account_id": "ghost", "chat_id": "-1000000000008"}
+    assert core.error("mentions.read", p)["data"] == {"code": "NOT_SUPPORTED", "capability": "mentions.unread"}
+    assert core.call("mentions.list_unread", {**p, "topic_id": "42", "limit": 2}) == {"message_ids": ["41", "45"]}
+    start(core, name="a")
+    assert core.error("mentions.read", {**p, "account_id": "a", "chat_id": "17"})["data"]["code"] == "NOT_SUPPORTED"
+    core.stop("a")
+    assert core.error("mentions.read", {**p, "account_id": "a"})["data"]["code"] == "UNKNOWN_ACCOUNT"
+    assert core.shutdown() == 0
+
+
+def test_lost_and_cancelled_mention_writes_remain_unknown_through_sdk(core):
+    start(core, mode=11, name="failed")
+    p = {"account_id": "failed", "chat_id": "-1000000000008", "topic_id": "42"}
+    error = core.error("mentions.read", p)
+    assert error["data"] == {"code": "NETWORK", "outcome": "unknown", "retry_safe": False}
+    assert "synthetic-private-mention-error" not in str(error) + core.stderr_text
+    assert core.call("mentions.list_unread", {**p, "limit": 2}) == {"message_ids": ["41", "45"]}
+    start(core, mode=12, name="cancelled")
+    p["account_id"] = "cancelled"
+    request = core.send_request("mentions.read", p)
+    assert core.call("ping") == {}
+    core.cancel(request)
+    assert core.response(request)["error"]["data"] == {"code": "NETWORK", "outcome": "unknown", "retry_safe": False}
+    assert core.call("mentions.list_unread", {**p, "limit": 2}) == {"message_ids": ["41", "45"]}
     assert core.shutdown() == 0

@@ -30,6 +30,7 @@ Enter the numeric `api_id` in account settings and the application’s `api_hash
 | `chat.flags`, `chat.pin`, `chat.mark_unread`, `chat.archive` | `chats.set_flags` | Pins, manual unread marks and archive moves on ordinary dialogs. A single-dialog observation confirms the requested flags. A partial or interrupted write can require a refresh. |
 | `pin`, `unpin` | `messages.pin`, `messages.unpin` | Silent and personal private-chat pins, one-message or all-message unpinning, including paged unpin acknowledgements. |
 | `read_receipts`, `typing`, `drafts.sync` | `read.send_receipt`, `typing.send`, `drafts.save` | Explicit chat/topic receipts and supported typing actions; formatted chat drafts and explicit clearing. Topic draft writes are rejected until their clearing semantics are verified. Server timestamps are authoritative. |
+| `mentions.unread` | `mentions.list_unread`, `mentions.read` | One bounded oldest-first incoming mention-ID batch and explicit whole-group or verified-topic read-all. Acknowledged continuation is bounded; ambiguous writes are never replayed. Ordinary groups/megagroups only. |
 | `media.download`, `avatars` | `media.download`, `avatars.download` | MTProto photo/document full files and static thumbnails, plus small/big user/chat avatars. Private atomic cache writes, cancellation cleanup, per-account download queue (larger priorities first), 2 GiB attachment and 16 MiB avatar limits. External web-document URL downloads are rejected. |
 | `send.file`, `send.as_file`, `send.spoiler`, `send.voice`, `send.ttl` | `messages.send_file` | Validated local regular files up to 2 GiB, JPEG/PNG photos, and voice notes with supplied duration. Literal captions with explicit UTF-16 entities, MIME/name overrides for documents, replies/topics, silent delivery, spoilers and TTL fields. Automatic mode selects JPEG/PNG photos and sends other files as documents. Video/video-note uploads and scheduling are rejected. |
 | `send.album` | `messages.send_album` | Two to ten photos or documents, with per-item captions/entities/spoilers/file flags, optional first-item caption, replies/topics and silent delivery. Whole-batch validation precedes upload. Mixed photo/document albums, voice/video items, conflicting first-item captions/entities and scheduling are rejected. |
@@ -153,7 +154,7 @@ Telegram catalog/download or actual sticker rendering has been exercised.
 
 ## Remaining method groups
 
-The registry contains 122 methods. The table above covers 41 core-to-plugin methods. The 79 core-to-plugin methods below remain unimplemented. The final two, `secrets.set` and `secrets.delete`, are host services for plugin callers. Archive extends an existing setter rather than adding another method. [Method registry](../../schemas/methods/registry.json)
+The registry contains 122 methods. The table above covers 43 core-to-plugin methods. The 77 core-to-plugin methods below remain unimplemented. The final two, `secrets.set` and `secrets.delete`, are host services for plugin callers. Archive extends an existing setter rather than adding another method. [Method registry](../../schemas/methods/registry.json)
 
 | Follow-up group | Pending methods |
 | --- | --- |
@@ -161,7 +162,7 @@ The registry contains 122 methods. The table above covers 41 core-to-plugin meth
 | Media search | `media.search` |
 | Reactions | `reactions.paid`, `reactions.paid_balance`, `reactions.effect` |
 | Bots | `bots.commands`, `bots.press_button` |
-| Mentions and pins | `mentions.list_unread`, `mentions.read`, `pins.list` |
+| Pins | `pins.list` |
 | Scheduling | `scheduled.list`, `scheduled.edit`, `scheduled.delete`, `scheduled.send_now` |
 | Replies and forums | `replies.list`, `topics.list`, `topics.create`, `topics.edit`, `topics.pin` |
 | Chat settings and folders | Mute fields of `chats.set_flags`, `chats.clear_history`, `chats.leave`, `chats.set_auto_delete`, `chats.reorder_pinned`, `folders.list`, `folders.create`, `folders.rename`, `folders.delete`, `folders.set_chats`, `folders.set_rules` |
@@ -178,3 +179,41 @@ Requests and flags were checked against the pinned 1.46.0 package source and Tel
 Uploads use public `upload_file` and explicit [sendMedia](https://core.telegram.org/method/messages.sendMedia) / [sendMultiMedia](https://core.telegram.org/method/messages.sendMultiMedia) requests. This preserves topic/spoiler fields that the pinned high-level convenience method does not expose. Uploaded bytes have no client id in the frozen `send_file`/`send_album` contract, so a lost send confirmation is ambiguous. Cancelling closes local descriptors; uploaded server-side temporary chunks may expire later. Photos use server-defined MIME; explicit MIME overrides require document mode. Voice notes require an explicit duration; waveform and duration on other outgoing types are rejected. No external encoder, metadata scanner, URL uploader or user-file cache path is used.
 
 Poll constructors were checked byte-for-byte against the locked Telethon 1.46.0 wheel, SHA-256 `c56e55e4a1f95fde556fe13459a542fc758e8ba501c0bf76f2fc5d8409fa81cb`, whose `alltlobjects.py` declares **layer 233**. In this artifact `InputMediaPoll.correct_answers` contains integer indices and `Poll.hash` is required; earlier byte-array examples are incompatible. The primary descriptions of [polls](https://core.telegram.org/api/poll), [minimal results](https://core.telegram.org/constructor/pollResults), and [poll result refresh](https://core.telegram.org/method/messages.getPollResults) supplement that pinned source. No dependency pin or frozen schema was changed.
+
+## Unread mentions
+
+The paired methods support exact ordinary basic-group and megagroup peers. Full
+matching entity validation excludes minimal/forbidden/foreign peers, migrated
+basic groups, broadcast channels and monoforums, including whole-chat requests.
+A topic requires the verified `channel.forum` flag; General is topic `1` and may
+lack a message topic header. Private/bot-forum mention scopes are not claimed.
+[Read-mentions scope](https://core.telegram.org/method/messages.readMentions)
+
+Listing sends one locked-layer `GetUnreadMentionsRequest` with `offset_id=1`,
+`add_offset=-limit`, explicit peer/topic and zero min/max ID bounds. It returns at
+most 200 ascending unique IDs. Messages must belong to that scope and have the
+incoming mention/media-unread flags; service mentions are allowed. An empty or
+short/inexact batch is never described as a complete list, and the result has no
+cursor or count. No counter/event is invented from returned IDs.
+[Desktop's oldest-batch request](https://github.com/telegramdesktop/tdesktop/blob/c263e5aaf90b30ae928c9d053296b569165cdc75/Telegram/SourceFiles/api/api_unread_things.cpp#L108-L139) ·
+[Listing API](https://core.telegram.org/method/messages.getUnreadMentions)
+
+Reading uses only direct `ReadMentionsRequest`, never a history/read-content or
+reaction receipt helper. A real `AffectedHistory.offset=0` establishes completion.
+Strictly decreasing positive offsets authorize same-scope continuation, bounded
+to 128 total calls. Malformed, nondecreasing, still-positive-at-budget, cancelled
+or failed dispatched operations remain unknown with no automatic replay or local
+counter reset. The pinned Telethon convenience read helper can also issue a
+history receipt and is deliberately not used.
+[Affected-history continuation](https://core.telegram.org/constructor/messages.affectedHistory)
+
+Both methods share a four-operation admission limit per account; excess calls are
+refused before joining a queue. Writes serialize within that bounded admission,
+and the 60-second total method deadline includes scope lookup and lock waiting.
+A stopped account cannot authorize later work. `account.ghost=true` rejects
+marking mentions read before a write and is rechecked before each continuation; a
+mid-sequence ghost switch leaves the partial result unknown. Listing is allowed
+in that state, but this does not implement full Telegram ghost mode or guarantee
+that the platform keeps the account offline. The `ghost_mode` capability remains
+unadvertised. Dependency-backed offline tests and actual server behavior are
+separate verification boundaries; no real account was used for this slice.

@@ -3,7 +3,7 @@ import asyncio
 from contact_hub_sdk import METHODS, Plugin, errors as rpc, method
 from contact_hub_sdk import types as dto
 
-from . import actions, activity, chat_flags, downloads, history, polls, reactions, sticker_thumbs, stickers, sync, unread_reactions, uploads
+from . import actions, activity, chat_flags, downloads, history, mentions, polls, reactions, sticker_thumbs, stickers, sync, unread_reactions, uploads
 from .auth import sign_in
 from .mapping import SEND_ENTITY_TYPES, contact
 from .send import send
@@ -25,6 +25,7 @@ class TelegramPlugin(Plugin):
         "polls.vote": True, "polls.close": True,
         "reactions.set": {"max": reactions.MAX_SELECTION}, "reactions.custom": True, "reactions.who": True,
         "reactions.unread": True,
+        "mentions.unread": True,
         "stickers": True,
     }
 
@@ -313,3 +314,15 @@ class TelegramPlugin(Plugin):
     async def read_reactions(self, account, params):
         with platform_errors():
             await unread_reactions.read(account, self.ready(account), params)
+
+    @method("mentions.list_unread")
+    async def unread_mentions(self, account, params):
+        with platform_errors():
+            async with asyncio.timeout(METHODS["mentions.list_unread"].timeout_seconds):
+                return await mentions.list_unread(account, self.ready(account), params)
+
+    @method("mentions.read")
+    async def read_mentions(self, account, params):
+        with platform_errors():
+            async with asyncio.timeout(METHODS["mentions.read"].timeout_seconds):
+                await mentions.read(account, self.ready(account), params)

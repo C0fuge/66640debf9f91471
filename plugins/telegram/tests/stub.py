@@ -39,6 +39,8 @@ class Stub:
         self.poll_solutions = {}
         self.unread_reactions = {("17", None): {2, 5, 9}, ("-1000000000008", None): {11},
                                  ("-1000000000008", "42"): {41, 45}, ("18", "7"): {70, 72}}
+        self.unread_mentions = {("-8", None): {2, 5}, ("-1000000000008", None): {11},
+                                ("-1000000000008", "42"): {41, 45}, ("-1000000000008", "43"): {50}}
         self.messages = {i: row(i) for i in range(1, 11)}
         self.messages[100] = row(100, media=tl.MessageMediaDocument(document=document(tl.DocumentAttributeFilename("../../remote.bin"))))
         self.messages[101] = row(101, media=tl.MessageMediaPhoto(photo=photo(), spoiler=True))
@@ -105,6 +107,8 @@ class Stub:
             return tl.InputPeerUser(chat.user_id, 0)
         if chat == tl.PeerChannel(8):
             return tl.InputPeerChannel(8, 0)
+        if chat == tl.PeerChat(8):
+            return tl.InputPeerChat(8)
         raise ValueError("synthetic-private-error")
 
     async def get_messages(self, peer, *, ids):
@@ -161,9 +165,10 @@ class Stub:
         for i in ids[:limit]:
             yield row(i)
 
-    def unread_matches(self, req):
+    def unread_matches(self, req, *, mentions=False):
         chat = str(utils.get_peer_id(req.peer))
-        return sorted((mid, key) for key, mids in self.unread_reactions.items() if key[0] == chat
+        source = self.unread_mentions if mentions else self.unread_reactions
+        return sorted((mid, key) for key, mids in source.items() if key[0] == chat
                       and (req.top_msg_id is None or str(req.top_msg_id) == (key[1] or "1")) for mid in mids)
 
     async def __call__(self, req):
@@ -193,6 +198,8 @@ class Stub:
         if isinstance(req, functions.channels.GetChannelsRequest):
             return tl.messages.Chats([tl.Channel(id=channel.channel_id, title="Forum fixture", photo=tl.ChatPhotoEmpty(), date=NOW,
                                                  megagroup=True, forum=True) for channel in req.id])
+        if isinstance(req, functions.messages.GetChatsRequest):
+            return tl.messages.Chats([tl.Chat(chat, "Basic group", tl.ChatPhotoEmpty(), 1, NOW, 1) for chat in req.id])
         if isinstance(req, functions.users.GetUsersRequest):
             return [tl.User(user.user_id, first_name="Forum bot" if user.user_id == 18 else "Sample",
                      bot=True if user.user_id == 18 else None, bot_info_version=1 if user.user_id == 18 else None,
@@ -213,6 +220,22 @@ class Stub:
             for mid, key in self.unread_matches(req)[:2]:
                 self.unread_reactions[key].remove(mid)
             return tl.messages.AffectedHistory(1, 1, len(self.unread_matches(req)))
+        if isinstance(req, functions.messages.GetUnreadMentionsRequest):
+            assert (req.offset_id, req.add_offset, req.max_id, req.min_id) == (1, -req.limit, 0, 0)
+            matches = self.unread_matches(req, mentions=True)
+            peer = tl.PeerChat(req.peer.chat_id) if isinstance(req.peer, tl.InputPeerChat) else tl.PeerChannel(req.peer.channel_id)
+            rows = [row(mid, peer, out=False, mentioned=True, media_unread=True,
+                        reply_to=tl.MessageReplyHeader(reply_to_msg_id=int(key[1]), forum_topic=True) if key[1] else None)
+                    for mid, key in reversed(matches[:req.limit])]
+            return tl.messages.MessagesSlice(len(matches), rows, [], [], [], inexact=True)
+        if isinstance(req, functions.messages.ReadMentionsRequest):
+            if self.mode == 11:
+                raise OSError("synthetic-private-mention-error")
+            if self.mode == 12:
+                await asyncio.Future()
+            for mid, key in self.unread_matches(req, mentions=True)[:2]:
+                self.unread_mentions[key].remove(mid)
+            return tl.messages.AffectedHistory(1, 1, len(self.unread_matches(req, mentions=True)))
         if isinstance(req, functions.help.GetAppConfigRequest):
             return tl.help.AppConfig(1, tl.JsonObject([tl.JsonObjectValue("reactions_user_max_default", tl.JsonNumber(1))]))
         if isinstance(req, functions.messages.GetAvailableReactionsRequest):

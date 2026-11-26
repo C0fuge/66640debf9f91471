@@ -1,5 +1,11 @@
 # ADR 0011: observed whole-chat archive controls
 
+Implementation verified on 2026-11-26: exact public source `7e5dc01` passed
+[Verify45852695182](https://github.com/C0fuge/66640debf9f91471/actions/runs/45852695182),
+including App and plugin lifecycle/ownership tests, native transports, eight
+Chromium scenarios and inspected desktop/mobile screenshots. The app remains at
+36 operations. The original acceptance and release requirements follow.
+
 Status: accepted for implementation by root, 2026-11-26, after reviewing the
 Telegram folder API and the pinned Telethon 1.46.0 archive path. The owner's
 continued Telegram/MAX build authorizes this existing client feature. Verification
