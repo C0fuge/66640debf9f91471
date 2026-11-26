@@ -4,6 +4,7 @@ mod actions;
 mod polls;
 mod reactions;
 mod chat_flags;
+mod text_admission;
 mod cache_file;
 mod save_file;
 mod media;
@@ -49,6 +50,7 @@ pub struct App {
     ingress: Arc<ingress::Service>,
     reactions: Arc<reactions::Service>,
     chat_flags: Arc<chat_flags::Service>,
+    text_admissions: Arc<text_admission::Service>,
     history: History,
     search: Search,
     db: Arc<Mutex<ch_db::Db>>,
@@ -181,8 +183,11 @@ impl App {
             changes.clone(),
             stop.clone(),
         ));
+        let directory = (Arc::new(file), demo.map(Arc::new));
+        let text_admissions = text_admission::Service::new(core.clone(), db.clone(), outbox.clone(), changes.clone(), directory.clone());
         let app = Self {
             core,
+            text_admissions,
             ingress,
             media,
             reactions,
@@ -197,8 +202,8 @@ impl App {
             changes,
             stop,
             tasks: tokio::sync::Mutex::new(AppTasks { pump: Some(pump), teardown: None }),
-            _lock: Arc::new(file),
-            _demo: demo.map(Arc::new),
+            _lock: directory.0,
+            _demo: directory.1,
         };
         if let Err(e) = app.outbox.start() {
             app.shutdown().await;
@@ -245,6 +250,8 @@ impl App {
             self.media.close();
             self.reactions.close();
             self.chat_flags.close();
+            self.text_admissions.close();
+            let text_admissions = self.text_admissions.clone();
             let chat_flags = self.chat_flags.clone();
             let (ingress, outbox, core, reactions) = (self.ingress.clone(), self.outbox.clone(), self.core.clone(), self.reactions.clone());
             let directory = (self._lock.clone(), self._demo.clone());
@@ -253,6 +260,7 @@ impl App {
             tasks.teardown = Some(tokio::spawn(async move {
                 let _directory = directory;
                 ingress.drain().await;
+                text_admissions.drain().await;
                 outbox.shutdown().await;
                 core.shutdown().await;
                 reactions.drain().await;

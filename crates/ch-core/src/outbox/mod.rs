@@ -23,6 +23,8 @@
 mod policy;
 mod transport;
 mod worker;
+mod text_admission;
+pub use text_admission::{TextAdmissionError, TextAdmissionLifetime, TextAdmissionTarget};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -575,7 +577,11 @@ pub(crate) struct Inner {
     wall_start: Millis,
     clock_start: tokio::time::Instant,
     bus: Option<ChangeBus>,
+    #[cfg(test)]
+    text_checkpoint: Mutex<Option<Arc<TextCheckpoint>>>,
 }
+#[cfg(test)]
+type TextCheckpoint = dyn Fn(&str) + Send + Sync;
 
 /// The outbox service. Cheap to clone; all clones share one state.
 #[derive(Clone)]
@@ -650,6 +656,8 @@ impl Outbox {
                 wall_start: now_millis(),
                 clock_start: tokio::time::Instant::now(),
                 bus: None,
+                #[cfg(test)]
+                text_checkpoint: Mutex::default(),
             }),
         }
     }
@@ -833,41 +841,22 @@ impl Outbox {
             if self.inner.stopping.is_cancelled() {
                 return Err(OutboxError::Stopped);
             }
-            let mut row = OutboxRow {
-                account_id: account_id.to_owned(),
-                chat_id: request.chat_id().clone(),
-                topic_id: request.topic_id().cloned(),
-                client_id: client_id.clone(),
-                kind: kind.as_str().to_owned(),
-                method: kind.method().to_owned(),
-                params: request.params(account_id, &client_id),
-                created_at: self.inner.now(),
-                ..Default::default()
-            };
-            let mut applied = None;
-            if let Some(echo) = request.echo(&client_id, sender.as_ref()) {
-                let (change, echo_id) = g.apply_local_echo_in(&tx, account_id, &echo)?;
-                row.echo_message_id = Some(echo_id);
-                applied = Some(change);
-            }
-            let id = match ch_db::insert_outbox(&tx, &row) {
-                Ok(id) => id,
-                Err(e) => {
+            let (applied, item) = match self.insert_in(&g, &tx, account_id, &client_id, &request, sender.as_ref()) {
+                Ok(inserted) => inserted,
+                Err(error) => {
                     if let Some((owner, id)) = fixed
-                        && matches!(&e, ch_db::Error::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                        && matches!(&error, OutboxError::Db(ch_db::Error::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
                             if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
                     {
-                        // Discard any speculative echo before comparing the committed winner.
                         tx.rollback().map_err(ch_db::Error::from)?;
                         drop(g);
-                        return self.get_matching_admission(owner, id, &request)?.ok_or(e.into());
+                        return self.get_matching_admission(owner, id, &request)?.ok_or(error);
                     }
-                    return Err(e.into());
+                    return Err(error);
                 }
             };
-            let stored = ch_db::get_outbox(&tx, id)?.ok_or(OutboxError::NotFound(id))?;
             tx.commit().map_err(ch_db::Error::from)?;
-            (applied, OutboxItem::from_row(&stored))
+            (applied, item)
         };
 
         info!(account = account_id, id = item.id, kind = kind.as_str(), chat = %item.chat_id, "outbox: enqueued");
@@ -884,6 +873,40 @@ impl Outbox {
             tracing::warn!(account = account_id, id = item.id, "outbox: admitted but worker refresh failed");
         }
         Ok(item)
+    }
+
+    // The caller owns the ingest lock and writer transaction. Never re-enter enqueue here.
+    fn insert_in(
+        &self,
+        ingest: &Ingest,
+        tx: &rusqlite::Transaction<'_>,
+        account_id: &str,
+        client_id: &str,
+        request: &OutboxRequest,
+        sender: Option<&EchoSender>,
+    ) -> Result<(Option<Applied>, OutboxItem)> {
+        let kind = request.kind();
+        let mut row = OutboxRow {
+            account_id: account_id.to_owned(),
+            chat_id: request.chat_id().clone(),
+            topic_id: request.topic_id().cloned(),
+            client_id: client_id.to_owned(),
+            kind: kind.as_str().to_owned(),
+            method: kind.method().to_owned(),
+            params: request.params(account_id, client_id),
+            created_at: self.inner.now(),
+            ..Default::default()
+        };
+        let applied = if let Some(echo) = request.echo(client_id, sender) {
+            let (change, echo_id) = ingest.apply_local_echo_in(tx, account_id, &echo)?;
+            row.echo_message_id = Some(echo_id);
+            Some(change)
+        } else {
+            None
+        };
+        let id = ch_db::insert_outbox(tx, &row)?;
+        let stored = ch_db::get_outbox(tx, id)?.ok_or(OutboxError::NotFound(id))?;
+        Ok((applied, OutboxItem::from_row(&stored)))
     }
 
     /// Cancel a queued or sending item. A request already in flight gets `$/cancelRequest`; if

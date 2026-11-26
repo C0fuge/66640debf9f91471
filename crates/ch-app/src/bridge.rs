@@ -4,7 +4,7 @@ use crate::{
     wire::{Failure, Request, Result, Thread, Window},
 };
 use ch_core::{
-    outbox::{OutboxKind, OutboxRequest},
+    outbox::OutboxKind,
     runtime::NewAccount,
     search::{Scope, SearchRequest},
 };
@@ -13,7 +13,7 @@ use ch_protocol::{
     Empty,
     common::is_valid_id,
     dto::Entity,
-    methods::{AuthBeginParams, AuthCancelParams, AuthSubmitParams, MessagesSendParams},
+    methods::{AuthBeginParams, AuthCancelParams, AuthSubmitParams},
 };
 use serde_json::{Value, json};
 
@@ -152,56 +152,7 @@ impl App {
                 };
                 blocking(move || Ok(projection::search(s.search(&req)?))).await
             }
-            Request::EnqueueText {
-                thread,
-                text,
-                entities,
-            } => {
-                if text.trim().is_empty() {
-                    return Err(Failure::Invalid);
-                }
-                let (c, closed) = self.thread(&thread).await?;
-                if closed || c.can_post == Some(false) {
-                    return Err(Failure::Conflict);
-                }
-                let owner = self.account(&thread.account_id).await?;
-                let entities = if entities.is_empty() {
-                    None
-                } else {
-                    let state = self
-                        .core
-                        .host()
-                        .plugin_state(&owner.plugin_id)
-                        .ok_or(Failure::Unavailable)?;
-                    if !state
-                        .capabilities()
-                        .ok_or(Failure::Unavailable)?
-                        .has("send.entities")
-                    {
-                        return Err(Failure::Unsupported);
-                    }
-                    let entities = entities.into_iter().map(Entity::from).collect::<Vec<_>>();
-                    validate_spans(&text, &entities)?;
-                    Some(entities)
-                };
-                let p = MessagesSendParams {
-                    account_id: thread.account_id.clone(),
-                    chat_id: thread.chat_id,
-                    topic_id: thread.topic_id,
-                    text,
-                    entities,
-                    ..Default::default()
-                };
-                let outbox = self.outbox.clone();
-                blocking(move || {
-                    Ok(projection::outbox(outbox.enqueue(
-                        &thread.account_id,
-                        OutboxRequest::SendText(p),
-                        None,
-                    )?))
-                })
-                .await
-            }
+            Request::EnqueueText { thread, text, entities } => self.enqueue_text(thread,text,entities).await,
             Request::ListOutbox { thread } => {
                 self.thread(&thread).await?;
                 let outbox = self.outbox.clone();

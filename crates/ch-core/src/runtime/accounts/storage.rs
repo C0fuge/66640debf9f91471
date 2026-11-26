@@ -8,7 +8,10 @@ use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
-pub(super) struct Gates(Mutex<HashMap<PathBuf, Arc<Gate>>>);
+pub(super) struct Gates(Mutex<HashMap<PathBuf, Arc<Gate>>>,
+    #[cfg(test)] Mutex<Option<Arc<CaptureHook>>>);
+#[cfg(test)]
+type CaptureHook = dyn Fn() + Send + Sync;
 #[derive(Default)]
 pub(super) struct Gate {
     pub(super) drain: Arc<RwLock<()>>,
@@ -154,6 +157,43 @@ impl Accounts {
         Ok((gate.token.clone(), guard))
     }
 
+    /// Capture a current owner and its published storage generation in one account-DB read.
+    /// Unlike matching a previously read row by millisecond creation time, this cannot
+    /// substitute a recreated owner's gate when account metadata happens to be identical.
+    pub async fn storage_lease_for(
+        &self,
+        account_id: &str,
+    ) -> Result<(AccountRow, CancellationToken, OwnedRwLockReadGuard<()>)> {
+        let id = account_id.to_owned();
+        let inner = self.0.clone();
+        let (owner, root, gate) = self.db(move |db| {
+            let owner = ch_db::get_account(db.conn(), &id)?.ok_or_else(|| unknown(&id))?;
+            let root = directory(inner.host.config(), &id);
+            let gate = inner.storage.get(&root);
+            Ok((owner, root, gate))
+        }).await?;
+        #[cfg(test)] {
+            let hook = self.0.storage.1.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            if let Some(hook) = hook { hook(); }
+        }
+        if gate.token.is_cancelled() { return Err(unknown(&owner.account_id)); }
+        let guard = gate.drain.clone().read_owned().await;
+        let expected = owner.clone();
+        let path = root.clone();
+        let inner = self.0.clone();
+        self.db(move |db| {
+            check_owner(db.conn(), &expected)?;
+            if !exclusive(db.conn(), inner.host.config(), &expected, &path)? {
+                return Err(unknown(&expected.account_id));
+            }
+            Ok(())
+        }).await?;
+        if gate.token.is_cancelled() || !self.0.storage.current(&root, &gate) {
+            return Err(unknown(&owner.account_id));
+        }
+        Ok((owner, gate.token.clone(), guard))
+    }
+
     // Called with the lifecycle and membership guards and the revoked storage writer.
     // A definite, explicitly confirmed rollback can authorize a fresh token.
     // A failed rollback, unknown commit or task failure leaves the gate cancelled.
@@ -192,5 +232,42 @@ impl Accounts {
             self.0.storage.retire(root, gate);
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use crate::{host::MemorySecretStore, runtime::{Core, CoreConfig, NewAccount}};
+    use std::sync::Condvar;
+    use tokio::sync::Notify;
+
+    #[tokio::test(flavor="multi_thread", worker_threads=4)]
+    async fn captured_gate_cannot_follow_same_id_recreation_with_identical_owner_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("plugins/fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), serde_json::json!({"id":"fixture","name":"Fixture","version":"0.0.1","api_version":"1.1.0",
+            "entry":["python3","-B","-c","pass"],"brand_color":"#123456","multi_account":true,"auth_methods":["none"]}).to_string()).unwrap();
+        let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new())); config.autostart=false;
+        let core=Arc::new(Core::open(config).await.unwrap());
+        core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+        core.open_db().unwrap().conn().execute("UPDATE account SET created_at=1 WHERE account_id='owner'",[]).unwrap();
+        let arrived=Arc::new(Notify::new()); let state=Arc::new((Mutex::new(false),Condvar::new()));
+        let signal=arrived.clone();let latch=state.clone();
+        *core.accounts().0.storage.1.lock().unwrap()=Some(Arc::new(move|| {
+            signal.notify_one();let mut released=latch.0.lock().unwrap();while !*released {released=latch.1.wait(released).unwrap();}
+        }));
+        let accounts=core.accounts().clone();
+        let pending=tokio::spawn(async move{accounts.storage_lease_for("owner").await});
+        tokio::time::timeout(std::time::Duration::from_secs(5),arrived.notified()).await.unwrap();
+        core.accounts().remove("owner").await.unwrap();
+        core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+        core.open_db().unwrap().conn().execute("UPDATE account SET created_at=1 WHERE account_id='owner'",[]).unwrap();
+        *state.0.lock().unwrap()=true;state.1.notify_all();
+        assert!(matches!(pending.await.unwrap(),Err(RuntimeError::UnknownAccount(_))));
+        *core.accounts().0.storage.1.lock().unwrap()=None;
+        let (_,token,guard)=core.accounts().storage_lease_for("owner").await.unwrap();assert!(!token.is_cancelled());drop(guard);
+        core.shutdown().await;
     }
 }
