@@ -32,22 +32,40 @@ const PROTOCOL: &str = "ch-core-v1";
 const MAX_FRAME: usize = 256 * 1024;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-fn options() -> Result<(PathBuf, PathBuf)> {
+fn options() -> Result<(PathBuf, PathBuf, bool)> {
     let args = std::env::args_os().skip(1).collect::<Vec<OsString>>();
     match args.as_slice() {
         [first, root, second, file] if first == "--demo" && second == "--token-file" => {
-            Ok((root.into(), file.into()))
+            Ok((root.into(), file.into(), false))
+        }
+        [first, root, second, file, fixture] if first == "--demo" && second == "--token-file" && fixture == "--file-fixture" => {
+            Ok((root.into(), file.into(), true))
         }
         _ => Err(io::Error::other(
-            "usage: ch-devserver --demo <rebuild-root> --token-file <new-private-file>",
+            "usage: ch-devserver --demo <rebuild-root> --token-file <new-private-file> [--file-fixture]",
         )
         .into()),
     }
 }
 
+// Installed exclusively by the explicit file-fixture launch option. No path comes from a request.
+struct SyntheticOpen { dir: tempfile::TempDir }
+impl SyntheticOpen {
+    fn new() -> io::Result<Self> {
+        let dir = tempfile::Builder::new().prefix("ch-demo-file-").tempdir()?;
+        std::fs::write(dir.path().join("fixture-report.txt"), b"Synthetic composer fixture.\n")?;
+        Ok(Self { dir })
+    }
+}
+impl ch_app::OpenFileDialog for SyntheticOpen {
+    fn choose_open(&self, callback: ch_app::SaveDialogCallback) {
+        callback(Ok(Some(self.dir.path().join("fixture-report.txt"))));
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (repo, path) = options()?;
+    let (repo, path, file_fixture) = options()?;
     let mut key = [0u8; 32];
     getrandom::fill(&mut key)
         .map_err(|_| io::Error::other("cannot initialize the development token"))?;
@@ -63,7 +81,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| std::path::Path::new("."));
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(token.as_bytes())?;
-    let app = Arc::new(App::demo(&repo).await?);
+    let mut app = App::demo(&repo).await?;
+    if file_fixture {
+        app.set_open_file_dialog(Arc::new(SyntheticOpen::new()?));
+    }
+    let app = Arc::new(app);
     if let Err(error) = tmp.persist_noclobber(&path) {
         app.shutdown().await;
         return Err(error.into());
@@ -215,7 +237,7 @@ async fn dispatch_frames<F: Future<Output = Value> + Send + 'static>(
                     Some(Ok(Message::Text(data)))=>{
                         let frame:Envelope=serde_json::from_str(&data)?;
                         if frame.id.is_empty() || frame.id.len()>128 || active.len()>=16 || !active.insert(frame.id.clone()){break;}
-                        let mutation = matches!(frame.request["method"].as_str(), Some("editText" | "deleteMessages" | "pinMessage" | "unpinMessage" | "votePoll" | "closePoll" | "setMessageReactions" | "startMediaDownload" | "startMediaSave" | "cancelMediaJob"));
+                        let mutation = matches!(frame.request["method"].as_str(), Some("editText" | "deleteMessages" | "pinMessage" | "unpinMessage" | "votePoll" | "closePoll" | "setMessageReactions" | "startMediaDownload" | "startMediaSave" | "cancelMediaJob" | "startFileSelection" | "cancelFileSelection" | "enqueueFile"));
                         if let Some(task)=operations.start(dispatch(frame.request)){
                             pending.push(async move {
                                 let reply=task.await.unwrap_or_else(|_| {
@@ -272,7 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_mutation_finishes_after_socket_disconnect() {
-        for method in ["enqueueText", "editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll", "setMessageReactions", "startMediaDownload", "startMediaSave", "cancelMediaJob"] {
+        for method in ["enqueueText", "editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll", "setMessageReactions", "startMediaDownload", "startMediaSave", "cancelMediaJob", "startFileSelection", "cancelFileSelection", "enqueueFile"] {
             disconnected_mutation(method).await;
         }
     }
@@ -340,7 +362,7 @@ mod tests {
         async fn fail(_: Value) -> Value {
             panic!("synthetic worker failure")
         }
-        for method in ["editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll", "setMessageReactions", "startMediaDownload", "startMediaSave", "cancelMediaJob", "listMediaJobs", "refreshMessageReactions", "listMessageReactors", "refreshPoll", "inventory"] {
+        for method in ["editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll", "setMessageReactions", "startMediaDownload", "startMediaSave", "cancelMediaJob", "startFileSelection", "cancelFileSelection", "enqueueFile", "listMediaJobs", "listFileStages", "refreshMessageReactions", "listMessageReactors", "refreshPoll", "inventory"] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let (events, rx) = tokio::sync::broadcast::channel(1);
@@ -354,7 +376,7 @@ mod tests {
             let frame = timeout(Duration::from_secs(2), client.next()).await.unwrap().unwrap().unwrap();
             let reply: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
             assert_eq!(reply["reply"]["error"]["code"], "internal");
-            assert_eq!(reply["reply"]["error"]["outcomeUnknown"] == true, !matches!(method, "inventory" | "refreshPoll" | "listMediaJobs" | "refreshMessageReactions" | "listMessageReactors"));
+            assert_eq!(reply["reply"]["error"]["outcomeUnknown"] == true, !matches!(method, "inventory" | "refreshPoll" | "listMediaJobs" | "listFileStages" | "refreshMessageReactions" | "listMessageReactors"));
             client.close(None).await.unwrap();
             timeout(Duration::from_secs(2), peer).await.unwrap().unwrap();
             drop(events);

@@ -4,6 +4,8 @@ import { changeOutbox, checkAcceptance, draftFor, sendDraft } from "./composer/d
 import { threadId } from "./thread/shared";
 import { notifyLocalHistory } from "./thread/historySignal";
 import { useAccountReads } from "./thread/useAccountReads";
+import { uploadNotice } from "./composer/fileIngress";
+import { FileComposer } from "./composer/FileComposer";
 import "./composer.css";
 
 const stateLabel: Record<OutboxItem["state"], string> = {
@@ -56,7 +58,7 @@ function SelectedComposer({ client, chat }: { client: CoreClient; chat: ChatSumm
   }
 
   function updateOutbox(item: OutboxItem, action: "cancel" | "retry", confirmed = false) {
-    if (action === "retry" && restricted) return;
+    if (action === "retry" && (restricted || item.kind === "sendFile")) return;
     if (action === "retry" && item.outcomeUnknown && !confirmed) {
       setConfirmItem(item.id);
       return;
@@ -73,24 +75,26 @@ function SelectedComposer({ client, chat }: { client: CoreClient; chat: ChatSumm
       <button type="button" className="composer-disclosure" aria-expanded={open} onClick={() => setOpen(!open)}>
         Outbox{attention ? ' · ' + attention + ' pending or failed' : ' · ' + items.length} {open ? "▴" : "▾"}
       </button>
-      {open && <ul className="composer-outbox-list" aria-label="Text outbox">
+      {open && <ul className="composer-outbox-list" aria-label="Message outbox">
         {items.map(item => <li key={JSON.stringify([threadId(item.thread), item.id])}>
           <div className="composer-outbox-row">
-            <span className="composer-item-label">{stateLabel[item.state]} <small title={item.id}>{item.id}</small>
+            <span className="composer-item-label">{item.kind === "sendFile" ? "File · " : ""}{stateLabel[item.state]} <small title={item.id}>{item.id}</small>
               {thread.topicId === null && item.thread.topicId !== null && <small>Topic {item.thread.topicId}</small>}
             </span>
             {(item.state === "queued" || item.state === "sending") &&
               <button type="button" disabled={outboxLocked} onClick={() => updateOutbox(item, "cancel")}>Cancel</button>}
-            {item.state === "failed" && confirmItem !== item.id &&
+            {item.kind === "sendText" && item.state === "failed" && confirmItem !== item.id &&
               <button type="button" disabled={outboxLocked || restricted} onClick={() => updateOutbox(item, "retry")}>Retry</button>}
           </div>
-          {item.state === "failed" && confirmItem === item.id && <div className="composer-warning">
+          {uploadNotice(item) && <div className="composer-file-meta">{uploadNotice(item)}</div>}
+          {item.kind === "sendFile" && item.outcomeUnknown && <div className="composer-warning">Delivery could not be confirmed. Sending this file again could duplicate it.</div>}
+          {item.kind === "sendText" && item.state === "failed" && confirmItem === item.id && <div className="composer-warning">
             This message may already have been delivered. Retrying could send a duplicate.
             <div><button type="button" disabled={outboxLocked || restricted} onClick={() => updateOutbox(item, "retry", true)}>Retry anyway</button>
               <button type="button" onClick={() => setConfirmItem(null)}>Keep failed</button></div>
           </div>}
         </li>)}
-        {!items.length && <li>No text messages in the outbox.</li>}
+        {!items.length && <li>No messages in the outbox.</li>}
       </ul>}
     </div>}
     {(outbox.error || draft.outboxNotice) && <div className="composer-status" role="status">
@@ -107,6 +111,7 @@ function SelectedComposer({ client, chat }: { client: CoreClient; chat: ChatSumm
     </div>}
     {draft.error && <div className="composer-status" role="alert">{draft.error}</div>}
     {restricted && <div className="composer-status">This conversation is read-only.</div>}
+    <FileComposer client={client} chat={chat} />
     <form className="composer-form" onSubmit={event => { event.preventDefault(); send(); }}>
       <textarea ref={textarea} rows={1} aria-label="Message" placeholder={restricted ? "Read-only conversation" : "Write a message…"}
         disabled={restricted} readOnly={draft.pending || draft.uncertain !== null}

@@ -61,3 +61,16 @@
 .composer-warning, .composer-status { margin-block: 4px 8px; font-size: .83rem; line-height: 1.4; }
 .composer-warning > div { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 4px; }
 .composer-warning > button { margin-inline: 6px; }
+
+.composer-files { margin-block: 4px 8px; }
+.composer-file-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.composer-file-panel { max-height: min(45vh, 400px); overflow: auto; margin-block: 6px; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+.composer-file-list { list-style: none; padding: 0; margin: 6px 0; }
+.composer-file-stage { padding-block: 8px; border-top: 1px solid var(--border); font-size: .83rem; }
+.composer-file-stage strong { overflow-wrap: anywhere; min-width: 0; }
+.composer-file-stage .composer-outbox-row { align-items: start; flex-wrap: wrap; }
+.composer-file-meta { color: var(--muted); font-size: .78rem; line-height: 1.45; }
+.composer-file-review { display: flex; align-items: start; flex-wrap: wrap; gap: 8px; margin-block: 6px; }
+.composer-file-review > label:first-child { flex-basis: 100%; }
+.composer-file-review textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; resize: vertical; min-height: 52px; max-height: 100px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; padding: 6px; }
+.composer-file-review input { accent-color: var(--accent); }

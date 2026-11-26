@@ -168,3 +168,29 @@ test("reaction replacement alone is a write; refresh and reactor-page transport 
     });
   }
 });
+
+test("file mutations classify lost native replies while stage listing remains a read", async () => {
+  const client = createNativeClient(async () => { throw new Error("private file chooser details"); });
+  const thread = { accountId: "a", chatId: "c", topicId: "topic" };
+  const target = { thread, sessionId: "1".repeat(32), stageId: "2".repeat(32) };
+  for (const request of [() => client.startFileSelection({ thread, sessionId: target.sessionId, requestKey: "selection" }),
+    () => client.cancelFileSelection(target), () => client.enqueueFile({ ...target, caption: "", asFile: false, spoiler: false })]) {
+    await assert.rejects(request(), { code: "unavailable", outcomeUnknown: true });
+  }
+  await assert.rejects(client.listFileStages({ thread, cursor: null, requestKey: null }), cause =>
+    (cause as { outcomeUnknown?: boolean }).outcomeUnknown !== true);
+});
+
+test("browser disconnect never replays file side effects", async () => {
+  const socket = new FakeSocket();
+  const client = createBrowserClient("ephemeral", () => socket as unknown as WebSocket);
+  const subscribed = client.subscribe(() => {}); socket.authenticate(); const stop = await subscribed;
+  const thread = { accountId: "a", chatId: "c", topicId: "topic" };
+  const target = { thread, sessionId: "1".repeat(32), stageId: "2".repeat(32) };
+  const pending = [client.startFileSelection({ thread, sessionId: target.sessionId, requestKey: "selection" }),
+    client.cancelFileSelection(target), client.enqueueFile({ ...target, caption: "", asFile: false, spoiler: false })]
+    .map(reply => assert.rejects(reply, { code: "unavailable", outcomeUnknown: true }));
+  const read = assert.rejects(client.listFileStages({ thread, cursor: null, requestKey: "selection" }), cause =>
+    (cause as { outcomeUnknown?: boolean }).outcomeUnknown !== true);
+  assert.equal(socket.sent.length, 5); socket.close(); await Promise.all([...pending, read]); assert.equal(socket.sent.length, 5); stop();
+});

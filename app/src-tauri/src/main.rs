@@ -33,7 +33,9 @@ fn main() {
             }).map_err(|_|std::io::Error::other("Could not open Contact Hub. Check the data directory, running instance, plugin installation and secret service."))?;
             #[cfg(target_os = "linux")]
             if !is_demo {
-                app.set_save_dialog(Arc::new(save_dialog::PortalSaveDialog::default()));
+                let provider = Arc::new(save_dialog::PortalSaveDialog::default());
+                app.set_save_dialog(provider.clone());
+                app.set_open_file_dialog(provider);
             }
             let mut rx=app.subscribe();
             let stop=app.shutdown_signal();

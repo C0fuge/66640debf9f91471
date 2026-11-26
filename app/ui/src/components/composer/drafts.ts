@@ -78,6 +78,7 @@ export async function sendDraft(entry: DraftEntry, client: CoreClient, thread: T
 
 export async function changeOutbox(entry: DraftEntry, client: CoreClient, item: OutboxItem,
   action: "cancel" | "retry", confirmed: boolean) {
+  if (action === "retry" && item.kind === "sendFile") throw { code: "unsupported" };
   if (entry.snapshot().outboxPhase || (action === "retry" && item.outcomeUnknown && !confirmed)) return;
   entry.update({ outboxPhase: "updating", outboxNotice: null });
   try {

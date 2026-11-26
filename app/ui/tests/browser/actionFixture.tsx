@@ -42,12 +42,16 @@ function target(thread: ThreadKey, messageId: string) {
 }
 const unused = async () => { throw new Error("Unexpected fixture operation"); };
 const client: CoreClient = {
+  startFileSelection: async () => { throw { code: "unsupported" }; },
+  listFileStages: async () => ({ sessionId: "0".repeat(32), items: [], nextCursor: null, remainingRequestKeys: 4096 }),
+  cancelFileSelection: async () => { throw { code: "unsupported" }; },
+  enqueueFile: async () => { throw { code: "unsupported" }; },
   refreshMessageReactions: unused, setMessageReactions: unused, listMessageReactors: unused,
   startMediaDownload: unused, startMediaSave: unused, cancelMediaJob: unused,
   listMediaJobs: async () => ({ sessionId: "fixture-session", jobs: [], nextCursor: null, remainingRequestKeys: 4096 }),
   votePoll: unused, closePoll: unused, refreshPoll: unused,
   subscribe: async listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-  inventory: async () => structuredClone({ mediaAccess: { saveCopy: false }, plugins: [plugin], accounts }),
+  inventory: async () => structuredClone({ composerAccess: { chooseFile: false }, mediaAccess: { saveCopy: false }, plugins: [plugin], accounts }),
   listChats: async ({ accountId }) => [chat(accountId)],
   history: async ({ thread }) => {
     if (!historyAvailable) throw { code: "unavailable" };

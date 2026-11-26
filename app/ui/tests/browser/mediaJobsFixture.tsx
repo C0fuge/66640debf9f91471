@@ -46,9 +46,13 @@ function reserve(params: MediaStart, kind: "download" | "save"): MediaJob {
 }
 const unused = async () => { throw new Error("Unexpected fixture mutation"); };
 const client: CoreClient = {
+  startFileSelection: async () => { throw { code: "unsupported" }; },
+  listFileStages: async () => ({ sessionId: "0".repeat(32), items: [], nextCursor: null, remainingRequestKeys: 4096 }),
+  cancelFileSelection: async () => { throw { code: "unsupported" }; },
+  enqueueFile: async () => { throw { code: "unsupported" }; },
   refreshMessageReactions: unused, setMessageReactions: unused, listMessageReactors: unused,
   subscribe: async listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-  inventory: async () => structuredClone({ plugins: [plugin], accounts, mediaAccess: { saveCopy } }),
+  inventory: async () => structuredClone({ plugins: [plugin], accounts, composerAccess: { chooseFile: false }, mediaAccess: { saveCopy } }),
   listChats: async ({ accountId }) => [chat(accountId)],
   history: async ({ thread }) => ({ items: records(thread.accountId).map(message => ({ kind: "message" as const, message })), moreOlder: false, moreNewer: false }),
   listOutbox: async () => [],

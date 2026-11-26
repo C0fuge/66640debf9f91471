@@ -25,6 +25,10 @@ function step(accountId: string, kind: string, stepId: string) {
 }
 const unused = async () => { throw new Error("Unexpected thread operation"); };
 const client: CoreClient = {
+  startFileSelection: async () => { throw { code: "unsupported" }; },
+  listFileStages: async () => ({ sessionId: "0".repeat(32), items: [], nextCursor: null, remainingRequestKeys: 4096 }),
+  cancelFileSelection: async () => { throw { code: "unsupported" }; },
+  enqueueFile: async () => { throw { code: "unsupported" }; },
   refreshMessageReactions: unused, setMessageReactions: unused, listMessageReactors: unused,
   startMediaDownload: unused, startMediaSave: unused, cancelMediaJob: unused,
   listMediaJobs: async () => ({ sessionId: "fixture-session", jobs: [], nextCursor: null, remainingRequestKeys: 4096 }),
@@ -32,7 +36,7 @@ const client: CoreClient = {
   editText: unused, deleteMessages: unused, pinMessage: unused, unpinMessage: unused,
   history: unused, fillGap: unused, enqueueText: unused, listOutbox: unused, cancelOutbox: unused, retryOutbox: unused, search: unused,
   subscribe: async cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
-  inventory: async () => ({ mediaAccess: { saveCopy: false }, plugins: [plugin], accounts: accounts.map(a => ({ ...a })) }),
+  inventory: async () => ({ composerAccess: { chooseFile: false }, mediaAccess: { saveCopy: false }, plugins: [plugin], accounts: accounts.map(a => ({ ...a })) }),
   listChats: async () => [],
   getSettings: async () => settings,
   saveSettings: async ({ values }) => { saved = values; return null; },

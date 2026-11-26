@@ -53,6 +53,10 @@ impl App {
 
     pub(crate) async fn dispatch(&self, request: Request) -> Result<Value> {
         match request {
+            Request::StartFileSelection {thread,session_id,request_key}=>self.ingress.start(thread,session_id,request_key).await,
+            Request::ListFileStages {thread,request_key,cursor}=>self.ingress.list(thread,request_key,cursor).await,
+            Request::CancelFileSelection {thread,session_id,stage_id}=>self.ingress.cancel(thread,session_id,stage_id).await,
+            Request::EnqueueFile {thread,session_id,stage_id,caption,as_file,spoiler}=>self.ingress.send(thread,session_id,stage_id,caption,as_file,spoiler).await,
             Request::Inventory {} => self.inventory().await,
             Request::RefreshMessageReactions { thread, message_id } => self.reaction_operation(thread,message_id,crate::reactions::Operation::Refresh).await,
             Request::SetMessageReactions { thread, message_id, session_id, context_token, keys } => self.reaction_operation(thread,message_id,crate::reactions::Operation::Set{session:session_id,context:context_token,keys}).await,
@@ -205,7 +209,7 @@ impl App {
                             .list(&thread.account_id)?
                             .into_iter()
                             .filter(|i| {
-                                i.kind == OutboxKind::SendText
+                                matches!(i.kind, OutboxKind::SendText | OutboxKind::SendFile)
                                     && i.chat_id == thread.chat_id
                                     && (thread.topic_id.is_none() || i.topic_id == thread.topic_id)
                             })
@@ -362,17 +366,20 @@ impl App {
     }
 
     async fn update_outbox(&self, thread: Thread, id: String, retry: bool) -> Result<Value> {
-        self.thread(&thread).await?;
+        let owner = self.account(&thread.account_id).await?;
+        let (_token, guard) = self.core.accounts().storage_lease(&owner).await?;
         let outbox = self.outbox.clone();
         blocking(move || {
+            let _guard = guard;
             let item = outbox.get_by_client_id(&id)?.ok_or(Failure::Missing)?;
-            if item.kind != OutboxKind::SendText
+            if !matches!(item.kind, OutboxKind::SendText | OutboxKind::SendFile)
                 || item.account_id != thread.account_id
                 || item.chat_id != thread.chat_id
                 || item.topic_id != thread.topic_id
             {
                 return Err(Failure::Missing);
             }
+            if retry && item.kind == OutboxKind::SendFile { return Err(Failure::Unsupported); }
             Ok(projection::outbox(if retry {
                 outbox.retry(item.id)?
             } else {

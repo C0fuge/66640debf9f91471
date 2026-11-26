@@ -66,7 +66,7 @@ export function useAccountReads(client: CoreClient, accountId: string, read: Tas
     void (async () => {
       try {
         const stop = await client.subscribe(change => {
-          if (change.kind === "reset" || (change.kind === "account" && change.accountId === accountId)) reload();
+          if ((change.kind === "reset" || change.kind === "inventory") || (change.kind === "account" && change.accountId === accountId)) reload();
         });
         if (!active) { stop(); return; }
         unsubscribe = stop;

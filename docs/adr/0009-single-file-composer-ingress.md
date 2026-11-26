@@ -169,3 +169,17 @@ Wrap the existing multi-statement account deletion in one transaction with an
 exact owner recheck. Restore a fresh generation only after proven rollback and
 unchanged persisted ownership; ambiguous teardown remains closed. No DB schema,
 plugin wire, renderer removal command or generic hook framework is added.
+
+A current Running snapshot is insufficient proof that a delayed callback belongs
+to the same account run: stop/start inside one plugin preserves the handshake,
+and app event delivery may lag. Add `HostHandle::running_account_token(plugin,
+account) -> Option<CancellationToken>` over a private AccountRecord lifetime.
+Return a child token only for a wanted, Running account on a Running plugin.
+Revoke synchronously when leaving that run, including plugin exit and bulk
+shutdown; refresh on a new run and preserve across ordinary status updates.
+Ingress captures and checks this original token through publication/claim, in
+addition to the persisted owner/storage token and handshake identity. Serialize
+and own set_enabled through its DB/host sequence so a successful disable revokes
+before re-enable can overtake it. No public AccountInfo field or wire/schema
+change is needed. Test actual stop/start with an unchanged handshake and delayed
+app events, plus disable/re-enable with dropped caller futures.

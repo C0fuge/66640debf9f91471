@@ -7,6 +7,13 @@ mod cache_file;
 mod save_file;
 mod media;
 pub use media::{SaveDialog, SaveDialogCallback, SaveDialogError};
+#[cfg(target_os = "linux")]
+mod ingress_fs;
+#[cfg(target_os = "linux")]
+mod ingress;
+#[cfg(not(target_os = "linux"))]
+#[path = "ingress_unsupported.rs"]
+mod ingress;
 mod file_dialog;
 pub use file_dialog::OpenFileDialog;
 mod events;
@@ -38,6 +45,7 @@ use wire::{Failure, Request};
 pub struct App {
     core: Arc<Core>,
     media: Arc<media::MediaJobs>,
+    ingress: Arc<ingress::Service>,
     reactions: Arc<reactions::Service>,
     history: History,
     search: Search,
@@ -155,17 +163,20 @@ impl App {
         let db = Arc::new(Mutex::new(db));
         let media = media::MediaJobs::new(core.clone(), db.clone(), changes.clone())?;
         let reactions = Arc::new(reactions::Service::new()?);
+        let ingress = ingress::Service::new(core.clone(), db.clone(), outbox.clone(), changes.clone()).await?;
         let pump = tokio::spawn(events::pump(
             core.subscribe(),
             outbox.subscribe(),
             steps.clone(),
             media.clone(),
             reactions.clone(),
+            ingress.clone(),
             changes.clone(),
             stop.clone(),
         ));
         let app = Self {
             core,
+            ingress,
             media,
             reactions,
             history,
@@ -190,6 +201,11 @@ impl App {
             return Err(e.into());
         }
         Ok(app)
+    }
+
+    /// Install the native open chooser before sharing the application with clients.
+    pub fn set_open_file_dialog(&mut self, provider: Arc<dyn OpenFileDialog>) {
+        self.ingress.install(provider);
     }
 
     pub fn shutdown_signal(&self) -> CancellationToken {
@@ -217,8 +233,10 @@ impl App {
         let mut pump = self.pump.lock().await;
         if let Some(task) = pump.take() {
             self.stop.cancel();
+            self.ingress.close();
             self.media.close();
             self.reactions.close();
+            self.ingress.drain().await;
             self.outbox.shutdown().await;
             self.core.shutdown().await;
             self.reactions.drain().await;

@@ -5,7 +5,7 @@ use crate::{
 use ch_core::{
     history::{Item, Page},
     host::AccountPhase,
-    outbox::OutboxItem,
+    outbox::{OutboxItem, OutboxKind},
     search::SearchPage,
 };
 use ch_db::types::{ConversationRow, MessageRow};
@@ -74,7 +74,7 @@ impl App {
                 "reconnecting":info.is_some_and(|i|i.reconnecting)
             }));
         }
-        Ok(json!({"plugins":plugins.into_values().collect::<Vec<_>>(),"accounts":rows,"mediaAccess":{"saveCopy":self.media.save_available()}}))
+        Ok(json!({"plugins":plugins.into_values().collect::<Vec<_>>(),"accounts":rows,"mediaAccess":{"saveCopy":self.media.save_available()},"composerAccess":{"chooseFile":self.ingress.available()}}))
     }
 }
 
@@ -149,7 +149,10 @@ pub(crate) fn outbox(i: OutboxItem) -> Value {
         .and_then(|e| e.data.as_ref())
         .and_then(|d| d.reason.as_deref())
         == Some("outcome_unknown");
-    json!({"id":i.client_id,"thread":Thread{account_id:i.account_id,chat_id:i.chat_id,topic_id:i.topic_id},
+    let file = i.kind == OutboxKind::SendFile;
+    let done = i.done_bytes.filter(|n| file && *n >= 0);
+    let total = i.total_bytes.filter(|n| file && *n >= 0 && done.is_none_or(|d| d <= *n));
+    json!({"kind":if file {"sendFile"} else {"sendText"},"doneBytes":done.map(|n|n.to_string()),"totalBytes":total.map(|n|n.to_string()),"id":i.client_id,"thread":Thread{account_id:i.account_id,chat_id:i.chat_id,topic_id:i.topic_id},
         "echoRowKey":i.echo_message_id.map(|id|id.to_string()),"state":i.state.as_str(),
         "nextAttemptAt":i.next_attempt_at.map(|t|t.to_string()),"outcomeUnknown":unknown})
 }

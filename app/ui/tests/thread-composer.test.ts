@@ -9,7 +9,7 @@ const thread = { accountId: "fixture-a", chatId: "c", topicId: null };
 const topic = { ...thread, topicId: "topic" };
 function client(methods: Partial<CoreClient>): CoreClient { return methods as CoreClient; }
 function item(target: ThreadKey): OutboxItem {
-  return { thread: target, id: "client-1", state: "queued", outcomeUnknown: false, echoRowKey: null, nextAttemptAt: null };
+  return { kind: "sendText", doneBytes: null, totalBytes: null, thread: target, id: "client-1", state: "queued", outcomeUnknown: false, echoRowKey: null, nextAttemptAt: null };
 }
 function msg(rowKey: string, messageId = rowKey): HistoryItem {
   const message: Message = {

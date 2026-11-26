@@ -1,3 +1,13 @@
+## Current candidate: single-file composer
+
+Verified helper source52a98b3 passed Verify45801837583: native shared Open/Save,
+private staging, retained outbox admission, Rust/Clippy/builds and UI/Python/browser
+gates. The app flow below is a new candidate, not a verified release. Its four
+operations, explicit file review and lifecycle integration are under test; follow-up
+review fixes and account-run tokens are still being completed. No real accounts,
+native desktop chooser or imported legacy data were tested. Stable main still
+has30 operations until this whole flow passes integrated gates.
+
 # Build progress
 
 Latest source `dc808f3` passed

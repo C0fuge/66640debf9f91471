@@ -35,6 +35,7 @@ export interface Inventory {
   plugins: PluginSummary[];
   accounts: AccountSummary[];
   mediaAccess: MediaAccess;
+  composerAccess: { chooseFile: boolean };
 }
 
 export interface MediaAccess { saveCopy: boolean }
@@ -69,6 +70,31 @@ export interface MediaStart {
   messageId: string;
   sessionId: string;
   requestKey: string;
+}
+
+export type IngressState = "choosing" | "copying" | "ready" | "verifying" | "enqueuing"
+  | "enqueued" | "admissionUnknown" | "cancelling" | "cancelled" | "failed";
+export interface FileStage {
+  stageId: string;
+  sessionId: string;
+  requestKey: string | null;
+  thread: ThreadKey;
+  state: IngressState;
+  name: string | null;
+  bytes: string | null;
+  format: "jpeg" | "png" | "other" | null;
+  copiedBytes: string | null;
+  outboxId: string | null;
+  outboxRow: "present" | "missing" | "unchecked" | null;
+  error: { code: CoreFailure["code"]; reason: "unavailable" | "chooserUncertain" | "unsafeSource"
+    | "sourceChanged" | "stageChanged" | "tooLarge" | "capacity" | "targetChanged" | "interrupted"
+    | "storage" | "admissionUnknown" | "integrity"; outcomeUnknown: boolean } | null;
+}
+export interface FileStagePage {
+  sessionId: string;
+  items: FileStage[];
+  nextCursor: string | null;
+  remainingRequestKeys: number;
 }
 
 export interface ChatSummary {
@@ -175,6 +201,9 @@ export type HistoryWindow =
   | { kind: "newer"; after: string };
 
 export interface OutboxItem {
+  kind: "sendText" | "sendFile";
+  doneBytes: string | null;
+  totalBytes: string | null;
   id: string;
   thread: ThreadKey;
   echoRowKey: string | null;
@@ -250,6 +279,10 @@ export interface CoreOperations {
   startMediaSave(params: MediaStart): Promise<MediaJob>;
   listMediaJobs(params: InThread & { cursor: string | null; requestKey: string | null }): Promise<MediaJobPage>;
   cancelMediaJob(params: InThread & { sessionId: string; jobId: string }): Promise<MediaJob>;
+  startFileSelection(params: InThread & { sessionId: string; requestKey: string }): Promise<FileStage>;
+  listFileStages(params: InThread & { requestKey: string | null; cursor: string | null }): Promise<FileStagePage>;
+  cancelFileSelection(params: InThread & { sessionId: string; stageId: string }): Promise<FileStage>;
+  enqueueFile(params: InThread & { sessionId: string; stageId: string; caption: string; asFile: boolean; spoiler: boolean }): Promise<FileStage>;
   listOutbox(params: InThread): Promise<OutboxItem[]>;
   cancelOutbox(params: OutboxTarget): Promise<OutboxItem>;
   retryOutbox(params: OutboxTarget): Promise<OutboxItem>;
