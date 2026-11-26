@@ -260,7 +260,7 @@ pub(crate) struct Verified {
 }
 enum Verification {
     Local { held: File, _lease: File },
-    Core(ch_core::managed_stage::VerifiedStageBinding),
+    Core(Box<ch_core::managed_stage::VerifiedStageBinding>),
 }
 impl Verified {
     fn check_bytes(&self) -> Result<()> {
@@ -460,7 +460,7 @@ impl Stage {
         self.current()?;
         proof.check_directory(self.dir.file.as_fd())?;
         if proof.manifest() != &self.manifest { return Err(Error::StageChanged); }
-        Ok(Verified { stage: self.clone(), handles: Verification::Core(proof) })
+        Ok(Verified { stage: self.clone(), handles: Verification::Core(Box::new(proof)) })
     }
     /// proof must check absence of the fixed outbox row AND rule out other
     /// stored references under the single-writer invariant. Ambiguity retains.
