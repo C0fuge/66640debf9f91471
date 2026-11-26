@@ -38,6 +38,8 @@ for line in sys.stdin:
         trace["body"] = content.decode("ascii")
         with open(os.environ["CH_FIXTURE_TRACE"], "a", encoding="utf-8") as out:
             out.write(json.dumps(trace) + "\n")
+        if Path(os.environ["CH_FIXTURE_TRACE"]).with_name("lose-reply").is_file():
+            sys.exit(0)
         write({"id": key, "result": {"message": {"id": f"fixture-{sequence}", "chat_id": p["chat_id"],
                "topic_id": p.get("topic_id"), "direction": "out", "sent_at": "2026-01-01T00:00:00.000Z",
                "text": p.get("caption", "")}}})

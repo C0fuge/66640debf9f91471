@@ -305,6 +305,69 @@ async fn held_chooser_does_not_block_removal_or_shutdown_and_late_callback_has_n
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopped_run_revokes_pending_chooser_even_without_app_notifications() {
+    let (f, mut app) = Fixture::new(caps()).await;
+    f.start(&app, "ready").await;
+    let ready = f.state(&app, "ready", "ready").await;
+    let held = Arc::new(Held::default());
+    app.set_open_file_dialog(held.clone());
+    // Leave the handle for shutdown; no delayed stop notification can cancel this task.
+    app.tasks.lock().await.pump.as_ref().unwrap().abort();
+    assert_eq!(f.start(&app, "old-chooser").await["ok"], true);
+    let cb = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(cb) = lock(&held.0).take() {
+                return cb;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let old = app
+        .core
+        .host()
+        .running_account_token("ingress_fixture", "fixture")
+        .unwrap();
+    app.core
+        .accounts()
+        .set_enabled("fixture", false)
+        .await
+        .unwrap();
+    assert!(old.is_cancelled());
+    assert_eq!(
+        f.page(&app, Some("ready")).await["items"][0]["state"],
+        "ready"
+    );
+    app.core
+        .accounts()
+        .set_enabled("fixture", true)
+        .await
+        .unwrap();
+    cb(Ok(Some(f.source.path().join("report.txt"))));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let state = f.page(&app, Some("old-chooser")).await["items"][0]["state"].clone();
+            if state == "failed" || state == "cancelled" {
+                break;
+            }
+            assert_ne!(state, "ready");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(app.ingress.store().unwrap().inventory().total.slots, 1);
+    let id = ready["stageId"].as_str().unwrap();
+    assert_eq!(
+        call(&app, "enqueueFile", f.enqueue(&app, id)).await["ok"],
+        true
+    );
+    f.state(&app, "ready", "enqueued").await;
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn strict_scope_limits_and_explicit_discard_retain_a_referenced_ready_stage() {
     let (f, app) = Fixture::new(caps()).await;
     let mut p = f.scope(&app);
@@ -366,6 +429,44 @@ async fn strict_scope_limits_and_explicit_discard_retain_a_referenced_ready_stag
     app.read(|db| {
         db.conn()
             .execute("DELETE FROM media_file", [])
+            .map_err(ch_db::Error::from)?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let alias = format!("{}/./bytes", path.parent().unwrap().display());
+    app.read(move |db| {
+        let params = json!({"account_id":"fixture","chat_id":"chat","path":alias});
+        db.conn().execute("INSERT INTO outbox(account_id,chat_id,client_id,kind,method,params_json,state,created_at,updated_at) VALUES ('fixture','chat','old-file','send_file','messages.send_file',?1,'failed',0,0)",[params.to_string()]).map_err(ch_db::Error::from)?;
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(
+        call(&app, "cancelFileSelection", cancel.clone()).await["ok"],
+        true
+    );
+    f.state(&app, "one", "ready").await;
+    assert!(path.is_file());
+    // A legacy row with a missing required path cannot prove that no reference exists.
+    app.read(|db| {
+        db.conn()
+            .execute(
+                "UPDATE outbox SET params_json='{}' WHERE client_id='old-file'",
+                [],
+            )
+            .map_err(ch_db::Error::from)?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        call(&app, "cancelFileSelection", cancel.clone()).await["ok"],
+        true
+    );
+    f.state(&app, "one", "ready").await;
+    assert!(path.is_file());
+    app.read(|db| {
+        db.conn()
+            .execute("DELETE FROM outbox WHERE client_id='old-file'", [])
             .map_err(ch_db::Error::from)?;
         Ok(())
     })
@@ -652,4 +753,224 @@ async fn quota_and_receipt_bounds_preserve_exact_scope_and_continuations() {
     assert_eq!(f.start(&app, "fresh").await["error"]["code"], "conflict");
     assert_eq!(f.start(&app, "first").await["value"]["state"], "ready");
     app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn four_owned_jobs_refuse_a_fifth_before_binding_the_key() {
+    let (f, mut app) = Fixture::new(caps()).await;
+    let held = Arc::new(Held::default());
+    app.set_open_file_dialog(held.clone());
+    let mut callbacks = Vec::new();
+    for n in 0..JOBS {
+        assert_eq!(f.start(&app, &format!("hold-{n}")).await["ok"], true);
+        let cb = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(cb) = lock(&held.0).take() {
+                    return cb;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        callbacks.push(cb);
+    }
+    {
+        let _preflight = app.ingress.starts.lock().await;
+        let refusal = tokio::time::timeout(Duration::from_secs(1), f.start(&app, "preflight-busy"))
+            .await
+            .unwrap();
+        assert_eq!(refusal["error"]["code"], "conflict");
+        assert_eq!(f.start(&app, "hold-0").await["value"]["state"], "choosing");
+    }
+    assert_eq!(f.start(&app, "fifth").await["error"]["code"], "conflict");
+    assert_eq!(f.start(&app, "hold-0").await["value"]["state"], "choosing");
+    assert_eq!(
+        f.page(&app, None).await["remainingRequestKeys"],
+        KEYS - JOBS
+    );
+    for cb in callbacks {
+        cb(Ok(None));
+    }
+    f.state(&app, "hold-0", "cancelled").await;
+    assert!(f.calls().is_empty());
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_bytes_and_orphan_entries_refuse_new_keys_but_allow_ready_send() {
+    let (f, app) = Fixture::new(caps()).await;
+    let mut ready = Value::Null;
+    for n in 0..16 {
+        let key = format!("keep-{n}");
+        assert_eq!(f.start(&app, &key).await["ok"], true);
+        ready = f.state(&app, &key, "ready").await;
+        // Wait for the previous owned blocking task to release the single scan slot.
+        let permit = app.ingress.scan.acquire().await.unwrap();
+        drop(permit);
+    }
+    assert_eq!(app.ingress.store().unwrap().inventory().total.slots, 16);
+    assert_eq!(f.start(&app, "excess").await["error"]["code"], "conflict");
+    assert_eq!(
+        f.start(&app, "keep-15").await["value"]["stageId"],
+        ready["stageId"]
+    );
+    assert_eq!(f.page(&app, None).await["remainingRequestKeys"], KEYS - 16);
+    let id = ready["stageId"].as_str().unwrap();
+    assert_eq!(
+        call(&app, "enqueueFile", f.enqueue(&app, id)).await["ok"],
+        true
+    );
+    f.state(&app, "keep-15", "enqueued").await;
+    let mut cancel = f.scope(&app);
+    cancel["stageId"] = f.page(&app, Some("keep-0")).await["items"][0]["stageId"].clone();
+    assert_eq!(call(&app, "cancelFileSelection", cancel).await["ok"], true);
+    f.state(&app, "keep-0", "cancelled").await;
+    let foreign = app
+        .core
+        .host()
+        .config()
+        .upload_dir("fixture")
+        .join("unknown-entry");
+    std::fs::create_dir(&foreign).unwrap();
+    assert!(!app.ingress.store().unwrap().inventory().complete);
+    assert_eq!(
+        f.start(&app, "unaccounted").await["error"]["code"],
+        "conflict"
+    );
+    assert_eq!(f.page(&app, None).await["remainingRequestKeys"], KEYS - 16);
+    assert!(foreign.exists());
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_plugin_reply_leaves_one_ambiguous_delivery_and_no_retry_route() {
+    let (f, app) = Fixture::new(caps()).await;
+    std::fs::write(f.root.path().join("lose-reply"), b"yes").unwrap();
+    f.start(&app, "ambiguous").await;
+    let ready = f.state(&app, "ambiguous", "ready").await;
+    let id = ready["stageId"].as_str().unwrap();
+    let params = f.enqueue(&app, id);
+    call(&app, "enqueueFile", params.clone()).await;
+    let accepted = f.state(&app, "ambiguous", "enqueued").await;
+    let cid = accepted["outboxId"].as_str().unwrap();
+    let row = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let rows = call(&app, "listOutbox", json!({"thread":f.thread})).await;
+            let row = &rows["value"][0];
+            if row["state"] == "failed" {
+                break row.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(row["outcomeUnknown"], true);
+    assert_eq!(
+        call(&app, "retryOutbox", json!({"thread":f.thread,"id":cid})).await["error"]["code"],
+        "unsupported"
+    );
+    assert_eq!(
+        call(&app, "enqueueFile", params).await["value"]["outboxId"],
+        cid
+    );
+    assert_eq!(f.calls().len(), 1);
+    assert_eq!(app.outbox.list("fixture").unwrap().len(), 1);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rolled_back_removal_reimports_verified_manifest_with_retired_key_isolation() {
+    let (f, app) = Fixture::new(caps()).await;
+    assert_eq!(f.start(&app, "old-generation").await["ok"], true);
+    let ready = f.state(&app, "old-generation", "ready").await;
+    let id = ready["stageId"].as_str().unwrap();
+    let ordinal = lock(&app.ingress.ledger).ids[id];
+    // Leave a current, successful inventory. Rollback need not publish a new event.
+    f.page(&app, None).await;
+    app.tasks.lock().await.pump.as_ref().unwrap().abort();
+    app.read(|db|{
+        db.conn().execute_batch("CREATE TRIGGER refuse_remove BEFORE DELETE ON account BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").map_err(ch_db::Error::from)?;
+        Ok(())
+    }).await.unwrap();
+    assert!(app.core.accounts().remove("fixture").await.is_err());
+    let restored = f.page(&app, None).await;
+    assert_eq!(restored["items"][0]["stageId"], ready["stageId"]);
+    assert_eq!(lock(&app.ingress.ledger).ids[id], ordinal);
+    assert_eq!(restored["items"][0]["state"], "ready");
+    assert!(restored["items"][0]["requestKey"].is_null());
+    assert_eq!(restored["remainingRequestKeys"], KEYS - 1);
+    assert!(
+        f.page(&app, Some("old-generation")).await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        f.start(&app, "old-generation").await["error"]["code"],
+        "not_found"
+    );
+    let mut cancel = f.scope(&app);
+    cancel["stageId"] = ready["stageId"].clone();
+    assert_eq!(call(&app, "cancelFileSelection", cancel).await["ok"], true);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn cancelled_shutdown_waiters_keep_writer_lock_and_temp_directory_until_io_settles() {
+    let (f, mut app) = Fixture::new(caps()).await;
+    let disposable = tempfile::tempdir().unwrap();
+    let disposable_path = disposable.path().to_owned();
+    app._demo = Some(Arc::new(disposable));
+    let app = Arc::new(app);
+    let (reached, rx) = tokio::sync::oneshot::channel();
+    let reached = Mutex::new(Some(reached));
+    let (release, end) = std::sync::mpsc::channel();
+    let end = Mutex::new(end);
+    *lock(&app.ingress.checkpoint) = Some(Arc::new(move |pt| {
+        if pt == "copy-publication"
+            && let Some(signal) = lock(&reached).take()
+        {
+            let _ = signal.send(());
+            lock(&end).recv_timeout(Duration::from_secs(10)).unwrap();
+        }
+        Ok(())
+    }));
+    assert_eq!(f.start(&app, "shutdown").await["ok"], true);
+    tokio::time::timeout(Duration::from_secs(8), rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let waiter_app = app.clone();
+    let first = tokio::spawn(async move {
+        waiter_app.shutdown().await;
+    });
+    tokio::time::timeout(Duration::from_secs(5), app.ingress.stop.cancelled())
+        .await
+        .unwrap();
+    first.abort();
+    let _ = first.await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(40), app.shutdown())
+            .await
+            .is_err()
+    );
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.root.path().join("app.lock"))
+        .unwrap();
+    drop(app);
+    assert!(file.try_lock().is_err());
+    assert!(disposable_path.exists());
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while disposable_path.exists() || file.try_lock().is_err() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(f.calls().is_empty());
 }

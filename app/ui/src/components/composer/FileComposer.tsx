@@ -3,7 +3,7 @@ import type { ChatSummary, CoreClient, FileStage, FileStagePage, Inventory } fro
 import { failureText, threadId } from "../thread/shared";
 import { useAccountReads } from "../thread/useAccountReads";
 import { changeFile, fileAccess, fileAction, fileDraft, fileInProgress, isFileStagePage, learnFilePage,
-  pendingFileStarts, rememberFileDraft, reviewOldFileIntent, selectFile, stageNotice, validCaption } from "./fileIngress";
+  pendingFileStarts, rememberFileDraft, reviewOldFileIntent, selectFile, stageNotice, validCaption, type FileSend } from "./fileIngress";
 
 const labels: Record<FileStage["state"], string> = { choosing: "Choosing file…", copying: "Copying file…", ready: "Ready to send",
   verifying: "Checking saved file…", enqueuing: "Adding to outbox…", enqueued: "Added to outbox", admissionUnknown: "Admission unconfirmed",
@@ -13,11 +13,16 @@ type Access = ReturnType<typeof fileAccess>;
 
 function StageRow({ client, stage, access, restricted, busy, mutate }: {
   client: CoreClient; stage: FileStage; access: Access; restricted: boolean; busy: boolean;
-  mutate: (stage: FileStage, kind: "send" | "cancel") => void;
+  mutate: (stage: FileStage, kind: "send" | "cancel", intent?: FileSend) => void;
 }) {
   const [draft, setDraft] = useState(() => fileDraft(client, stage));
   const action = fileAction(client, stage);
-  function update(change: Partial<typeof draft>) { const next = { ...draft, ...change }; rememberFileDraft(client, stage, next); setDraft(next); }
+  const [draftError, setDraftError] = useState<string | null>(null);
+  function update(change: Partial<typeof draft>) {
+    const next = { ...draft, ...change };
+    if (!rememberFileDraft(client, stage, next)) { setDraftError("File draft storage is full. Reopen the app before editing another file caption."); return; }
+    setDraftError(null); setDraft(next);
+  }
   const editable = stage.state === "ready" && !action;
   const tooLarge = access.maxBytes !== null && stage.bytes !== null && BigInt(stage.bytes) > BigInt(access.maxBytes);
   const send = editable && !busy && !restricted && access.canSend && !tooLarge && validCaption(draft.caption)
@@ -33,6 +38,7 @@ function StageRow({ client, stage, access, restricted, busy, mutate }: {
     {action && !action.pending && <div className="composer-warning" role="status">
       The {action.kind === "send" ? "send" : "cancel"} request could not be confirmed. Reload file status; it will not be repeated automatically.
     </div>}
+    {draftError && <div className="composer-warning" role="alert">{draftError}</div>}
     {stage.state === "ready" && <div className="composer-file-review">
       <label>File caption<textarea rows={2} aria-label="File caption" value={draft.caption} readOnly={!editable}
         onChange={e => update({ caption: e.target.value })} /></label>
@@ -40,7 +46,7 @@ function StageRow({ client, stage, access, restricted, busy, mutate }: {
       {(access.asFile || draft.asFile) && <label><input type="checkbox" checked={draft.asFile} disabled={!editable} onChange={e => update({ asFile: e.target.checked })} /> Send as file</label>}
       {(access.spoiler || draft.spoiler) && <label><input type="checkbox" checked={draft.spoiler} disabled={!editable} onChange={e => update({ spoiler: e.target.checked })} /> Spoiler</label>}
       {tooLarge && <span role="status">This file exceeds the current account limit.</span>}
-      <button type="button" disabled={!send} onClick={() => mutate(stage, "send")}>Send file</button>
+      <button type="button" disabled={!send} onClick={() => mutate(stage, "send", { ...draft })}>Send file</button>
     </div>}
     {canCancel && <button type="button" disabled={busy} onClick={() => mutate(stage, "cancel")}>{stage.state === "ready" ? "Remove unsent file" : "Cancel file preparation"}</button>}
   </li>;
@@ -64,8 +70,11 @@ export function FileComposer({ client, chat }: { client: CoreClient; chat: ChatS
       for (const s of recovered.items) if (!items.some(item => item.stageId === s.stageId)) items.unshift(s);
     }
     if (active()) {
+      const recoveredSelection = pendingFileStarts(client, thread).some(intent => items.some(s => s.requestKey === intent.requestKey && s.sessionId === intent.sessionId));
+      const observedActions = items.filter(s => fileAction(client, s));
       learnFilePage(client, { ...next, items });
-      setInventory(inv); setPage({ ...next, items }); setNotice(null); changed(n => n + 1);
+      if (recoveredSelection || observedActions.some(s => !fileAction(client, s))) setNotice(null);
+      setInventory(inv); setPage({ ...next, items }); changed(n => n + 1);
     }
   }
   const reads = useAccountReads(client, thread.accountId, read);
@@ -83,11 +92,11 @@ export function FileComposer({ client, chat }: { client: CoreClient; chat: ChatS
       finally { if (active()) { cursor.current = null; changed(n => n + 1); reads.reload(); } }
     });
   }
-  function mutate(stage: FileStage, kind: "send" | "cancel") {
+  function mutate(stage: FileStage, kind: "send" | "cancel", intent?: FileSend) {
     setNotice(null);
     reads.run(async active => {
       try {
-        const next = await changeFile(client, stage, kind, fileDraft(client, stage));
+        const next = await changeFile(client, stage, kind, intent ?? fileDraft(client, stage));
         if (active()) setPage(p => p && p.sessionId === next.sessionId ? { ...p, items: p.items.map(s => s.stageId === next.stageId ? next : s) } : p);
       } catch (cause) { if (active()) setNotice(failureText(cause)); }
       finally { if (active()) { changed(n => n + 1); reads.reload(); } }

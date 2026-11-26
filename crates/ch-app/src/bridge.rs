@@ -366,20 +366,37 @@ impl App {
     }
 
     async fn update_outbox(&self, thread: Thread, id: String, retry: bool) -> Result<Value> {
-        let owner = self.account(&thread.account_id).await?;
-        let (_token, guard) = self.core.accounts().storage_lease(&owner).await?;
+        if !is_valid_id(&thread.account_id)
+            || !is_valid_id(&thread.chat_id)
+            || thread.topic_id.as_deref().is_some_and(|id| !is_valid_id(id))
+        {
+            return Err(Failure::Invalid);
+        }
+        let fetch = {
+            let scope = thread.clone();
+            let outbox = self.outbox.clone();
+            move || -> Result<_> {
+                outbox.get_by_client_id(&id)?
+                    .filter(|i| i.account_id == scope.account_id && i.chat_id == scope.chat_id && i.topic_id == scope.topic_id)
+                    .ok_or(Failure::Missing)
+            }
+        };
+        let snapshot = fetch.clone();
+        let kind = blocking(move || Ok(snapshot()?.kind)).await?;
+        let guard = match kind {
+            OutboxKind::SendText => { self.thread(&thread).await?; None }
+            OutboxKind::SendFile if retry => return Err(Failure::Unsupported),
+            OutboxKind::SendFile => {
+                let owner = self.account(&thread.account_id).await?;
+                Some(self.core.accounts().storage_lease(&owner).await?.1)
+            }
+            _ => return Err(Failure::Missing),
+        };
         let outbox = self.outbox.clone();
         blocking(move || {
             let _guard = guard;
-            let item = outbox.get_by_client_id(&id)?.ok_or(Failure::Missing)?;
-            if !matches!(item.kind, OutboxKind::SendText | OutboxKind::SendFile)
-                || item.account_id != thread.account_id
-                || item.chat_id != thread.chat_id
-                || item.topic_id != thread.topic_id
-            {
-                return Err(Failure::Missing);
-            }
-            if retry && item.kind == OutboxKind::SendFile { return Err(Failure::Unsupported); }
+            let item = fetch()?;
+            if item.kind != kind { return Err(Failure::Missing); }
             Ok(projection::outbox(if retry {
                 outbox.retry(item.id)?
             } else {

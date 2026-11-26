@@ -56,9 +56,14 @@ pub struct App {
     action_locks: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
     changes: broadcast::Sender<Invalidation>,
     stop: CancellationToken,
-    pump: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    _lock: std::fs::File,
-    _demo: Option<TempDir>,
+    tasks: tokio::sync::Mutex<AppTasks>,
+    _lock: Arc<std::fs::File>,
+    _demo: Option<Arc<TempDir>>,
+}
+
+struct AppTasks {
+    pump: Option<tokio::task::JoinHandle<()>>,
+    teardown: Option<tokio::task::JoinHandle<()>>,
 }
 
 type Startup<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -188,9 +193,9 @@ impl App {
             action_locks: Mutex::default(),
             changes,
             stop,
-            pump: tokio::sync::Mutex::new(Some(pump)),
-            _lock: file,
-            _demo: demo,
+            tasks: tokio::sync::Mutex::new(AppTasks { pump: Some(pump), teardown: None }),
+            _lock: Arc::new(file),
+            _demo: demo.map(Arc::new),
         };
         if let Err(e) = app.outbox.start() {
             app.shutdown().await;
@@ -230,17 +235,28 @@ impl App {
     }
 
     pub async fn shutdown(&self) {
-        let mut pump = self.pump.lock().await;
-        if let Some(task) = pump.take() {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(pump) = tasks.pump.take() {
             self.stop.cancel();
             self.ingress.close();
             self.media.close();
             self.reactions.close();
-            self.ingress.drain().await;
-            self.outbox.shutdown().await;
-            self.core.shutdown().await;
-            self.reactions.drain().await;
+            let (ingress, outbox, core, reactions) = (self.ingress.clone(), self.outbox.clone(), self.core.clone(), self.reactions.clone());
+            let directory = (self._lock.clone(), self._demo.clone());
+            // Teardown owns the directory and all drains. Cancelling any waiter
+            // leaves the same task running; another caller joins its completion.
+            tasks.teardown = Some(tokio::spawn(async move {
+                let _directory = directory;
+                ingress.drain().await;
+                outbox.shutdown().await;
+                core.shutdown().await;
+                reactions.drain().await;
+                let _ = pump.await;
+            }));
+        }
+        if let Some(task) = tasks.teardown.as_mut() {
             let _ = task.await;
+            tasks.teardown = None;
         }
     }
 }

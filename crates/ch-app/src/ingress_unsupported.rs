@@ -39,7 +39,7 @@ impl Service {
     pub(crate) async fn drain(&self) {}
     pub(crate) fn inventory_changed(&self) {}
     pub(crate) fn flush(&self) {}
-    pub(crate) fn invalidate(&self, _: Option<&str>, _: Option<&str>) {}
+    pub(crate) fn reset_progress(&self) {}
     pub(crate) fn forget_progress(&self, _: &str) {}
     pub(crate) fn progress_only(&self, _: &OutboxItem) -> bool {
         false

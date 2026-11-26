@@ -26,18 +26,18 @@ export const fileInProgress = (s: FileStage) => ["choosing", "copying", "verifyi
 export function isFileStage(v: unknown): v is FileStage {
   if (!isObject(v) || !isObject(v.thread) || !hex(v.stageId) || !hex(v.sessionId)
     || !(v.requestKey === null || key(v.requestKey)) || !opaque(v.thread.accountId) || !opaque(v.thread.chatId)
-    || !(v.thread.topicId === null || opaque(v.thread.topicId)) || !states.has(String(v.state))) return false;
+    || !(v.thread.topicId === null || opaque(v.thread.topicId)) || !(typeof v.state === "string" && states.has(v.state))) return false;
   if (!(v.name === null || typeof v.name === "string" && v.name.length > 0 && new TextEncoder().encode(v.name).length <= 255
-    && !/[\u0000-\u001f\u007f-\u009f/\\\u202a-\u202e\u2066-\u2069]/.test(v.name) && ![".", ".."].includes(v.name))) return false;
+    && !/[\u0000-\u001f\u007f-\u009f/\\\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(v.name) && ![".", ".."].includes(v.name))) return false;
   if (!(v.bytes === null || bytes(v.bytes) && BigInt(v.bytes) > 0n && BigInt(v.bytes) <= 2147483648n)
     || !(v.copiedBytes === null || bytes(v.copiedBytes))
     || v.bytes !== null && v.copiedBytes !== null && BigInt(v.copiedBytes as string) > BigInt(v.bytes as string)
-    || !(v.format === null || ["jpeg", "png", "other"].includes(String(v.format)))
+    || !(v.format === null || typeof v.format === "string" && ["jpeg", "png", "other"].includes(v.format))
     || !(v.outboxId === null || hex(v.outboxId)) || ![null, "present", "missing", "unchecked"].includes(v.outboxRow as string | null)) return false;
   if (["ready", "verifying", "enqueuing", "enqueued", "admissionUnknown"].includes(String(v.state))
     && (v.name === null || v.bytes === null || v.format === null)) return false;
   if (["enqueued", "admissionUnknown"].includes(String(v.state)) && (v.outboxId === null || v.outboxRow === null)) return false;
-  return v.error === null || isObject(v.error) && failureCode(v.error) !== undefined && reasons.has(String(v.error.reason)) && typeof v.error.outcomeUnknown === "boolean";
+  return v.error === null || isObject(v.error) && failureCode(v.error) !== undefined && typeof v.error.reason === "string" && reasons.has(v.error.reason) && typeof v.error.outcomeUnknown === "boolean";
 }
 export function isFileStagePage(v: unknown, thread: ThreadKey, requestKey: string | null): v is FileStagePage {
   return isObject(v) && bounded(v) && hex(v.sessionId) && Array.isArray(v.items) && v.items.length <= (requestKey === null ? 16 : 1)
@@ -64,7 +64,7 @@ export function learnFilePage(client: CoreClient, page: FileStagePage) {
 export function reviewOldFileIntent(client: CoreClient, intent: FileIntent, currentSession: string) {
   if (!intent.pending && intent.sessionId !== currentSession && ledger(client).starts.get(intent.requestKey) === intent) ledger(client).starts.delete(intent.requestKey);
 }
-function definite(cause: unknown) { const code = failureCode(cause); return code !== undefined && code !== "unavailable" && !(isObject(cause) && cause.outcomeUnknown === true); }
+function definite(cause: unknown) { const code = failureCode(cause); return code !== undefined && !(isObject(cause) && cause.outcomeUnknown === true); }
 export async function selectFile(client: CoreClient, thread: ThreadKey, page: FileStagePage, newKey: () => string = () => crypto.randomUUID()): Promise<FileStage> {
   const l = ledger(client);
   if (!hex(page.sessionId) || page.remainingRequestKeys === 0 || l.starts.size >= 4096 || pendingFileStarts(client, thread).length) throw { code: "conflict" };
@@ -85,7 +85,9 @@ export function fileDraft(client: CoreClient, stage: FileStage): FileSend {
 }
 export function rememberFileDraft(client: CoreClient, stage: FileStage, intent: FileSend) {
   const l = ledger(client), id = actionKey(stage);
-  if (l.drafts.has(id) || l.drafts.size < 4096) l.drafts.set(id, { ...intent });
+  if (!l.drafts.has(id) && l.drafts.size >= 4096) return false;
+  l.drafts.set(id, { ...intent });
+  return true;
 }
 export const validCaption = (s: string) => Array.from(s).length <= 1024 && new TextEncoder().encode(s).length <= 4096;
 export async function changeFile(client: CoreClient, stage: FileStage, kind: "send" | "cancel", intent: FileSend = { caption: "", asFile: false, spoiler: false }): Promise<FileStage> {

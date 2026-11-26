@@ -194,3 +194,10 @@ test("browser disconnect never replays file side effects", async () => {
     (cause as { outcomeUnknown?: boolean }).outcomeUnknown !== true);
   assert.equal(socket.sent.length, 5); socket.close(); await Promise.all([...pending, read]); assert.equal(socket.sent.length, 5); stop();
 });
+
+
+test("a malformed uncertainty marker cannot turn a lost file mutation into a settled refusal", async () => {
+  const client = createNativeClient(async () => ({ ok: false, error: { code: "unavailable", outcomeUnknown: "true" } }));
+  await assert.rejects(client.startFileSelection({ thread: { accountId: "a", chatId: "c", topicId: null }, sessionId: "1".repeat(32), requestKey: "selection" }),
+    { code: "unavailable", outcomeUnknown: true });
+});

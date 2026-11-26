@@ -64,8 +64,8 @@ impl Service {
         let owner = self.owner(&thread).await?;
         let existing = |l: &Ledger| -> Result<Option<Value>> {
             if let Some(seq) = l.keys.get(&key) {
-                let e = &l.entries[seq];
-                if !e.owned(&thread, &owner) {
+                let e = l.entries.get(seq).ok_or(Failure::Missing)?;
+                if e.key.as_deref() != Some(key.as_str()) || !e.owned(&thread, &owner) {
                     return Err(Failure::Missing);
                 }
                 Ok(Some(e.render(&self.session)))
@@ -76,7 +76,9 @@ impl Service {
         if let Some(v) = existing(&lock(&self.ledger))? {
             return Ok(v);
         }
-        let _start = self.starts.lock().await;
+        let Ok(_start) = self.starts.try_lock() else {
+            return existing(&lock(&self.ledger))?.ok_or(Failure::Conflict);
+        };
         if let Some(v) = existing(&lock(&self.ledger))? {
             return Ok(v);
         }
@@ -133,6 +135,7 @@ impl Service {
             plugin: owner.plugin_id.clone(),
             birth: owner.created_at,
             generation,
+            retired: false,
             state: State::Choosing,
             name: None,
             bytes: None,

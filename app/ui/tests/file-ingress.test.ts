@@ -136,3 +136,31 @@ test("an unconfirmed cancellation cannot repeat from an older ready snapshot", a
   learnFilePage(client, { ...page, items: [{ ...ready, state: "cancelled" }] });
   assert.equal(fileAction(client, ready), undefined);
 });
+
+
+test("settled unavailable rejections release authority instead of freezing a thread forever", async () => {
+  let calls = 0;
+  const client = core({ startFileSelection: async () => { calls++; throw { code: "unavailable" }; },
+    enqueueFile: async () => { throw { code: "unavailable" }; }, cancelFileSelection: async () => { throw { code: "unavailable" }; } });
+  await assert.rejects(selectFile(client, thread, page, () => "selection"));
+  assert.equal(pendingFileStarts(client, thread).length, 0);
+  await assert.rejects(selectFile(client, thread, page, () => "new")); assert.equal(calls, 2);
+  for (const kind of ["send", "cancel"] as const) {
+    await assert.rejects(changeFile(client, ready, kind)); assert.equal(fileAction(client, ready), undefined);
+  }
+});
+
+test("wire enum objects and all rejected bidi filename controls fail closed", () => {
+  for (const fields of [{ format: ["png"] }, { state: ["ready"] },
+    { error: { code: "unavailable", reason: ["storage"], outcomeUnknown: false } },
+    ...["\u061c", "\u200e", "\u200f"].map(c => ({ name: `a${c}b` }))]) assert.equal(isFileStage({ ...ready, ...fields }), false);
+});
+
+test("draft capacity refuses an edit visibly and sending uses the displayed captured intent", async () => {
+  let caption: string | undefined;
+  const client = core({ enqueueFile: async p => { caption = p.caption; return { ...ready, state: "verifying" }; } });
+  for (let i = 0; i < 4096; i++) assert.equal(rememberFileDraft(client, { ...ready, stageId: (i + 100).toString(16).padStart(32, "0") }, { caption: "stored", asFile: false, spoiler: false }), true);
+  assert.equal(rememberFileDraft(client, ready, { caption: "new", asFile: false, spoiler: false }), false);
+  await changeFile(client, ready, "send", { caption: "exact displayed value", asFile: false, spoiler: false });
+  assert.equal(caption, "exact displayed value");
+});

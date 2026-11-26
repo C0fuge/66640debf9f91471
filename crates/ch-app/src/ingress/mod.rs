@@ -127,6 +127,7 @@ struct Entry {
     plugin: String,
     birth: i64,
     generation: CancellationToken,
+    retired: bool,
     state: State,
     name: Option<String>,
     bytes: Option<u64>,
@@ -185,6 +186,18 @@ impl Entry {
         self.bound = Some(binding);
     }
 }
+#[derive(PartialEq, Eq)]
+struct SendingIdentity {
+    row: i64,
+    account: String,
+    chat: String,
+    topic: Option<String>,
+    attempts: u32,
+    echo: Option<i64>,
+    next_attempt: Option<i64>,
+    outcome_unknown: bool,
+}
+
 #[derive(Default)]
 struct Ledger {
     entries: BTreeMap<u64, Entry>,
@@ -198,9 +211,22 @@ struct Ledger {
     inventory_epoch: u64,
     scanned_epoch: Option<u64>,
     next_refresh: Option<std::time::Instant>,
-    sending: HashMap<String, (String, u32, Option<i64>)>,
+    sending: HashMap<String, SendingIdentity>,
 }
 impl Ledger {
+    fn notice_revocations(&mut self) {
+        let mut changed = false;
+        for entry in self.entries.values_mut() {
+            if !entry.retired && entry.generation.is_cancelled() {
+                entry.retired = true;
+                changed = true;
+            }
+        }
+        if changed {
+            self.inventory_epoch = self.inventory_epoch.wrapping_add(1);
+            self.next_refresh = None;
+        }
+    }
     fn insert(&mut self, e: Entry) -> u64 {
         self.next += 1;
         let seq = self.next;
@@ -286,17 +312,8 @@ impl Service {
         // Cancelled list/start callers may leave read-only blocking I/O running.
         let _drained = self.readers.write().await;
     }
-    pub(crate) fn invalidate(&self, account: Option<&str>, plugin: Option<&str>) {
-        let l = lock(&self.ledger);
-        for e in l.entries.values().filter(|e| {
-            e.active.is_some()
-                && account.is_none_or(|a| e.thread.account_id == a)
-                && plugin.is_none_or(|p| e.plugin == p)
-        }) {
-            if let Some(c) = &e.active {
-                c.cancel();
-            }
-        }
+    pub(crate) fn reset_progress(&self) {
+        lock(&self.ledger).sending.clear();
     }
     pub(crate) fn inventory_changed(&self) {
         let mut l = lock(&self.ledger);
@@ -319,14 +336,30 @@ impl Service {
             l.sending.remove(&i.client_id);
             return false;
         }
-        let identity = (i.account_id.clone(), i.attempts, i.echo_message_id);
+        let identity = SendingIdentity {
+            row: i.id,
+            account: i.account_id.clone(),
+            chat: i.chat_id.clone(),
+            topic: i.topic_id.clone(),
+            attempts: i.attempts,
+            echo: i.echo_message_id,
+            next_attempt: i.next_attempt_at,
+            outcome_unknown: i
+                .last_error
+                .as_ref()
+                .and_then(|e| e.data.as_ref())
+                .and_then(|data| data.reason.as_deref())
+                == Some("outcome_unknown"),
+        };
         if l.sending.get(&i.client_id) == Some(&identity) {
             l.dirty.insert(i.account_id.clone());
             return true;
         }
-        if l.sending.len() < KEYS {
-            l.sending.insert(i.client_id.clone(), identity);
+        if l.sending.len() == KEYS && !l.sending.contains_key(&i.client_id) {
+            l.dirty.insert(i.account_id.clone());
+            return true;
         }
+        l.sending.insert(i.client_id.clone(), identity);
         false
     }
     pub(crate) fn forget_progress(&self, id: &str) {
@@ -391,38 +424,51 @@ impl Service {
         }
         let s = self.clone();
         blocking(move || {
-            let (_reader,_guard)=(reader,guard);
-            let (selected,remaining)={
-                let l=lock(&s.ledger);
-                let before=if let Some(c)=cursor.as_deref() {
-                    let (session,id)=c.split_once('.').ok_or(Failure::Invalid)?;
+            let (_reader, _guard) = (reader, guard);
+            let (selected, remaining) = {
+                let l = lock(&s.ledger);
+                let before = if let Some(cursor) = cursor.as_deref() {
+                    let mut parts = cursor.split('.');
+                    let session = parts.next().ok_or(Failure::Invalid)?;
                     s.session(session)?;
-                    Self::sequence(&l,id,&thread,&owner).map_err(|_|Failure::Invalid)?
-                }else{u64::MAX};
-                let rows: Vec<_>=if let Some(k)=key.as_deref() {
-                    l.keys.get(k).and_then(|n|l.entries.get(n).filter(|e|e.owned(&thread,&owner)).map(|e|(*n,e.clone()))).into_iter().collect()
-                }else{
-                    l.entries.range(..before).rev().filter(|(_,e)|e.owned(&thread,&owner)).take(PAGE+1).map(|(&n,e)|(n,e.clone())).collect()
+                    let ordinal: u64 = parts.next().and_then(|v| v.parse().ok()).ok_or(Failure::Invalid)?;
+                    let id = parts.next().ok_or(Failure::Invalid)?;
+                    if parts.next().is_some() || Self::sequence(&l,id,&thread,&owner).ok() != Some(ordinal) {
+                        return Err(Failure::Invalid);
+                    }
+                    ordinal
+                } else { u64::MAX };
+                let rows: Vec<_> = if let Some(k) = key.as_deref() {
+                    l.keys.get(k).and_then(|n| {
+                        let e = l.entries.get(n)?;
+                        (e.key.as_deref() == Some(k) && e.owned(&thread,&owner)).then(|| (*n,e.clone()))
+                    }).into_iter().collect()
+                } else {
+                    l.entries.range(..before).rev()
+                        .filter(|(_, e)| e.owned(&thread,&owner))
+                        .take(PAGE+1).map(|(&n,e)| (n,e.clone())).collect()
                 };
-                (rows,KEYS-l.keys.len())
+                (rows, KEYS - l.keys.len())
             };
-            let mut items=Vec::new();
-            let mut last=None;
-            let mut more=false;
+            let mut items = Vec::new();
+            let mut last = None;
+            let mut more = false;
             for (n,old) in selected {
-                if items.len()==PAGE{more=true;break;}
-                s.reconcile(n,&old,&owner);
-                let l=lock(&s.ledger);
-                let actual=l.entries.get(&n).ok_or(Failure::Missing)?;
-                if !actual.owned(&thread,&owner){continue;}
+                if items.len() == PAGE { more = true; break; }
+                s.reconcile(n, &old, &owner);
+                let l = lock(&s.ledger);
+                let actual = l.entries.get(&n).ok_or(Failure::Missing)?;
+                if !actual.owned(&thread, &owner) { continue; }
                 items.push(actual.render(&s.session));
-                if serde_json::to_vec(&items).map_err(|_|Failure::Internal)?.len()>MAX_REPLY-256{
-                    items.pop();more=true;break;
+                if serde_json::to_vec(&items).map_err(|_|Failure::Internal)?.len() > MAX_REPLY-256 {
+                    items.pop();
+                    more = true;
+                    break;
                 }
-                last=Some(format!("{}.{}",s.session,actual.stage));
+                last = Some(format!("{}.{n}.{}",s.session,actual.stage));
             }
-            if generation.is_cancelled(){return Err(Failure::Missing);}
-            Ok(json!({"sessionId":s.session,"items":items,"nextCursor":if more{last}else{None},"remainingRequestKeys":remaining}))
+            if generation.is_cancelled() { return Err(Failure::Missing); }
+            Ok(json!({"sessionId":s.session,"items":items,"nextCursor":if more {last} else {None},"remainingRequestKeys":remaining}))
         }).await
     }
 }

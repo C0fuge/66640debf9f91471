@@ -119,44 +119,21 @@ impl Service {
         }
         roots
     }
-    fn import_candidates(&self) -> (bool, Vec<(AccountRow, Binding)>) {
-        let Ok(store) = self.store() else {
-            return (false, vec![]);
-        };
-        let mut inv = store.inventory();
-        inv.manifests
+    fn import_candidates(&self) -> Option<(Arc<fs::Store>, fs::Inventory)> {
+        let store = Arc::new(self.store().ok()?);
+        let mut inventory = store.inventory();
+        inventory
+            .manifests
             .sort_by(|a, b| (a.created, &a.stage_id).cmp(&(b.created, &b.stage_id)));
-        let mut entries = Vec::new();
-        for m in inv.manifests {
-            let Ok(Some(owner)) = ch_db::get_account(lock(&self.db).conn(), &m.scope.account)
-            else {
-                inv.complete = false;
-                continue;
-            };
-            let Ok(stage) = store.recover(&self.fs_owner(&owner), &m.stage_id) else {
-                inv.complete = false;
-                continue;
-            };
-            if stage.manifest() != &m {
-                inv.complete = false;
-                continue;
-            }
-            entries.push((
-                owner,
-                Binding {
-                    manifest: m,
-                    path: stage.managed_path(),
-                },
-            ));
-        }
-        (inv.complete, entries)
+        Some((store, inventory))
     }
     pub(super) async fn refresh(self: &Arc<Self>) {
         let Ok(_refresh) = self.refresh_gate.try_lock() else {
             return;
         };
         let epoch = {
-            let l = lock(&self.ledger);
+            let mut l = lock(&self.ledger);
+            l.notice_revocations();
             if l.closed
                 || l.scanned_epoch == Some(l.inventory_epoch)
                 || l.next_refresh
@@ -178,7 +155,7 @@ impl Service {
         let s = self.clone();
         // A read request may be dropped during metadata I/O; the blocking task retains the
         // scan permit. No path is published, deleted or enqueued by this operation.
-        let Ok((complete, candidates)) = tokio::task::spawn_blocking(move || {
+        let Ok(result) = tokio::task::spawn_blocking(move || {
             let (_reader, _slot) = (reader, slot);
             s.import_candidates()
         })
@@ -187,9 +164,62 @@ impl Service {
             return;
         };
         let mut imported = Vec::new();
-        let mut complete = complete;
-        for (owner, b) in candidates {
-            let Ok((generation, _guard)) = self.core.accounts().storage_lease(&owner).await else {
+        let Some((store, inventory)) = result else {
+            let mut l = lock(&self.ledger);
+            if l.inventory_epoch == epoch {
+                l.next_refresh =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
+            }
+            return;
+        };
+        let mut complete = inventory.complete;
+        let visible: BTreeSet<_> = inventory
+            .manifests
+            .iter()
+            .map(|m| m.stage_id.clone())
+            .collect();
+        for m in inventory.manifests {
+            {
+                let l = lock(&self.ledger);
+                if l.ids
+                    .get(&m.stage_id)
+                    .is_some_and(|n| !l.entries[n].generation.is_cancelled())
+                {
+                    continue;
+                }
+            }
+            let Ok(Some(owner)) = self.core.accounts().get(&m.scope.account).await else {
+                complete = false;
+                continue;
+            };
+            let Ok((generation, guard)) = self.core.accounts().storage_lease(&owner).await else {
+                complete = false;
+                continue;
+            };
+            // Resolve the current binding under the captured generation. The owner may
+            // have been removed and recreated with the same timestamp since inventory.
+            let Ok(slot) = self.scan.clone().try_acquire_owned() else {
+                complete = false;
+                break;
+            };
+            let Ok(reader) = self.readers.clone().try_read_owned() else {
+                return;
+            };
+            if self.stop.is_cancelled() {
+                return;
+            }
+            let stage_store = store.clone();
+            let fs_owner = self.fs_owner(&owner);
+            let binding = tokio::task::spawn_blocking(move || {
+                let (_guard, _reader, _slot) = (guard, reader, slot);
+                let stage = stage_store.recover(&fs_owner, &m.stage_id).ok()?;
+                (stage.manifest() == &m).then(|| Binding {
+                    manifest: m,
+                    path: stage.managed_path(),
+                })
+            })
+            .await;
+            let Ok(Some(b)) = binding else {
                 complete = false;
                 continue;
             };
@@ -205,6 +235,7 @@ impl Service {
                 plugin: owner.plugin_id.clone(),
                 birth: owner.created_at,
                 generation,
+                retired: false,
                 state: State::Ready,
                 name: None,
                 bytes: None,
@@ -218,7 +249,7 @@ impl Service {
                 active: None,
             };
             e.bind(b);
-            imported.push((owner, e));
+            imported.push(e);
         }
         let mut l = lock(&self.ledger);
         if l.closed || l.inventory_epoch != epoch {
@@ -226,18 +257,44 @@ impl Service {
         }
         l.scanned_epoch = complete.then_some(epoch);
         l.next_refresh = Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
-        for (_, e) in imported {
-            if e.generation.is_cancelled() || l.ids.contains_key(&e.stage) {
+        if complete {
+            // A retained key still names its old ordinal even if its authorized
+            // receipt disappeared. A lookup of that key returns scoped missing.
+            let gone: Vec<_> = l
+                .entries
+                .iter()
+                .filter(|(_, e)| e.retired && e.active.is_none() && !visible.contains(&e.stage))
+                .map(|(n, e)| (*n, e.stage.clone()))
+                .collect();
+            for (n, id) in gone {
+                l.ids.remove(&id);
+                l.entries.remove(&n);
+            }
+        }
+        for e in imported {
+            if e.generation.is_cancelled() {
                 continue;
             }
-            // Inventory is bounded to 256 managed entries. Retain prior session receipts,
-            // but do not allow repeated partial inventories to grow a second unbounded ledger.
-            if l.entries.len().saturating_sub(l.keys.len()) >= 256 {
-                l.scanned_epoch = None;
-                break;
-            }
             let account = e.thread.account_id.clone();
-            l.insert(e);
+            if let Some(&n) = l.ids.get(&e.stage) {
+                let old = &l.entries[&n];
+                if !old.generation.is_cancelled() {
+                    continue;
+                }
+                if old.active.is_some() {
+                    l.scanned_epoch = None;
+                    continue;
+                }
+                // Rebind at the same ordinal so an existing session cursor keeps
+                // its original ordering. The retired start key cannot authorize e.
+                l.entries.insert(n, e);
+            } else {
+                if l.entries.values().filter(|row| row.key.is_none()).count() >= 256 {
+                    l.scanned_epoch = None;
+                    break;
+                }
+                l.insert(e);
+            }
             events::notify(&self.changes, &account);
         }
     }
@@ -417,6 +474,25 @@ fn distinct_refs(v: &Value, identity: (u64, u64), budget: &mut usize) -> bool {
         _ => true,
     }
 }
+fn valid_outbox_shape(kind: &str, method: &str, raw: &str) -> bool {
+    use ch_protocol::methods::*;
+    let Some(kind) = OutboxKind::parse(kind) else {
+        return false;
+    };
+    if method != kind.method() {
+        return false;
+    }
+    // Decode original text so repeated typed fields and missing required paths
+    // fail the proof. The subsequent tree walk also checks extension path slots.
+    match kind {
+        OutboxKind::SendText => serde_json::from_str::<MessagesSendParams>(raw).is_ok(),
+        OutboxKind::SendFile => serde_json::from_str::<MessagesSendFileParams>(raw).is_ok(),
+        OutboxKind::SendAlbum => serde_json::from_str::<MessagesSendAlbumParams>(raw).is_ok(),
+        OutboxKind::Forward => serde_json::from_str::<MessagesForwardParams>(raw).is_ok(),
+        OutboxKind::Edit => serde_json::from_str::<MessagesEditParams>(raw).is_ok(),
+        OutboxKind::Delete => serde_json::from_str::<MessagesDeleteParams>(raw).is_ok(),
+    }
+}
 // Only the ready phase, private namespace and an absence proof under the SQLite writer
 // lock authorize discard. Leave that lock in the caller through actual fs settlement.
 pub(super) fn unreferenced(
@@ -431,13 +507,18 @@ pub(super) fn unreferenced(
     }
     let identity = (byte.dev(), byte.ino());
     let mut path_budget = 128;
-    if ch_db::get_outbox_by_client_id(db.conn(), &m.client_id)
-        .map_err(|_| fs::Error::Storage)?
-        .is_some()
-    {
+    let fixed_row: bool = db
+        .conn()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM outbox WHERE client_id=?1)",
+            [&m.client_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| fs::Error::Storage)?;
+    if fixed_row {
         return Ok(false);
     }
-    let mut remaining = 4096usize;
+    let mut remaining = 256usize;
     let mut bytes = 1024 * 1024usize;
     for (table, col, json) in [
         ("outbox", "params_json", true),
@@ -448,8 +529,13 @@ pub(super) fn unreferenced(
         ("platform_handle", "avatar_path", false),
         ("plugin", "icon_path", false),
     ] {
+        let tags = if table == "outbox" {
+            ", CASE WHEN length(cast(kind AS blob)) < 24 THEN kind END, CASE WHEN length(cast(method AS blob)) < 64 THEN method END"
+        } else {
+            ""
+        };
         let sql = format!(
-            "SELECT length(cast({col} AS blob)), CASE WHEN length(cast({col} AS blob)) <= 65536 THEN {col} END FROM {table} LIMIT ?1"
+            "SELECT length(cast({col} AS blob)), CASE WHEN length(cast({col} AS blob)) <= 65536 THEN {col} END{tags} FROM {table} LIMIT ?1"
         );
         let mut stmt = db.conn().prepare(&sql).map_err(|_| fs::Error::Storage)?;
         let mut rows = stmt
@@ -475,11 +561,21 @@ pub(super) fn unreferenced(
             bytes -= len;
             let text: String = row.get(1).map_err(|_| fs::Error::Integrity)?;
             let distinct = if json {
-                distinct_refs(
-                    &serde_json::from_str(&text).map_err(|_| fs::Error::Integrity)?,
-                    identity,
-                    &mut path_budget,
-                )
+                if table == "outbox" {
+                    let (Ok(kind), Ok(method)) = (row.get::<_, String>(2), row.get::<_, String>(3))
+                    else {
+                        return Ok(false);
+                    };
+                    if !valid_outbox_shape(&kind, &method, &text) {
+                        return Ok(false);
+                    }
+                } else if serde_json::from_str::<ch_protocol::dto::Media>(&text).is_err() {
+                    return Ok(false);
+                }
+                let Ok(value) = serde_json::from_str(&text) else {
+                    return Ok(false);
+                };
+                distinct_refs(&value, identity, &mut path_budget)
             } else {
                 distinct_file(&text, identity, &mut path_budget)
             };

@@ -28,7 +28,8 @@ function unpack(reply: unknown, mutation: boolean): unknown {
     if (reply.ok === true && Object.hasOwn(reply, "value")) return reply.value;
     if (reply.ok === false && isObject(reply.error)) {
       const code = reply.error.code;
-      if (typeof code === "string" && Object.hasOwn(reasons, code)) {
+      if (typeof code === "string" && Object.hasOwn(reasons, code)
+        && (!Object.hasOwn(reply.error, "outcomeUnknown") || typeof reply.error.outcomeUnknown === "boolean")) {
         throw { ...failure(code as CoreFailure["code"]), ...(reply.error.outcomeUnknown === true ? { outcomeUnknown: true } : {}) };
       }
     }

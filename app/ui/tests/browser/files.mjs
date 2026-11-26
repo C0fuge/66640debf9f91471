@@ -46,6 +46,7 @@ try {
   await files().getByText("Admission unconfirmed", { exact: true }).waitFor();
   assert.match(await files().textContent(), /sending again could duplicate/i);
   assert.equal(await count("enqueueFile"), 1);
+  assert.equal(await page.evaluate(() => window.fileFixture.requests().find(r => r.method === "enqueueFile").params.caption), " literal file caption ");
   assert.equal(await page.getByLabel("Message", { exact: true }).inputValue(), "Preserve this text draft");
   await files().getByRole("button", { name: "Reload file status", exact: true }).click();
   assert.equal(await count("enqueueFile"), 1);

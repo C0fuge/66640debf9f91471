@@ -79,14 +79,12 @@ pub(crate) async fn pump(
                 Ok(CoreChange::Host(StateChange::Account(a)))=>{
                     ingress.inventory_changed();
                     if matches!(a.phase,AccountPhase::Stopped|AccountPhase::Stopping) {
-                        ingress.invalidate(Some(&a.account_id),None);
                         steps.lock().unwrap_or_else(|e|e.into_inner()).remove(&a.account_id);
                     }
                     notify(&tx,&a.account_id);
                 }
                 Ok(CoreChange::Host(StateChange::Plugin{plugin_id,state}))=>{
                     if !state.is_running() {
-                        ingress.invalidate(None,Some(&plugin_id));
                         reactions.invalidate_plugin(&plugin_id);
                         steps.lock().unwrap_or_else(|e|e.into_inner()).retain(|_,(owner,_)|owner!=&plugin_id);
                         let _=tx.send(Invalidation::Reset);
@@ -96,9 +94,8 @@ pub(crate) async fn pump(
                     ingress.inventory_changed();
                     let id=match change {
                         AccountChange::Added{account_id,..}|AccountChange::SettingsChanged{account_id}=>account_id,
-                        AccountChange::Enabled{account_id,enabled}=>{if !enabled {ingress.invalidate(Some(&account_id),None);media.cancel_account(&account_id);reactions.invalidate_account(&account_id);}account_id},
+                        AccountChange::Enabled{account_id,enabled}=>{if !enabled {media.cancel_account(&account_id);reactions.invalidate_account(&account_id);}account_id},
                         AccountChange::Removed{account_id,..}=>{
-                            ingress.invalidate(Some(&account_id),None);
                             media.cancel_account(&account_id);
                             reactions.invalidate_account(&account_id);
                             steps.lock().unwrap_or_else(|e|e.into_inner()).remove(&account_id);
@@ -110,7 +107,7 @@ pub(crate) async fn pump(
                 Ok(CoreChange::Host(StateChange::PluginsRescanned))=>{let _=tx.send(Invalidation::Inventory);}
                 Ok(_) | Err(RecvError::Lagged(_))=>{
                     ingress.inventory_changed();
-                    ingress.invalidate(None,None);
+                    ingress.reset_progress();
                     reactions.invalidate_all();
                     steps.lock().unwrap_or_else(|e|e.into_inner()).clear();
                     let _=tx.send(Invalidation::Reset);
@@ -121,7 +118,7 @@ pub(crate) async fn pump(
                 Ok(OutboxChange::Item(item))=>{if !ingress.progress_only(&item){notify(&tx,&item.account_id);}},
                 Ok(OutboxChange::Removed{account_id,client_id,..})=>{ingress.forget_progress(&client_id);notify(&tx,&account_id);},
                 Ok(OutboxChange::Ingested(a))=>notify(&tx,&a.account_id),
-                Err(RecvError::Lagged(_))=>{let _=tx.send(Invalidation::Reset);}
+                Err(RecvError::Lagged(_))=>{ingress.reset_progress();let _=tx.send(Invalidation::Reset);}
                 Err(RecvError::Closed)=>break,
             }
         }
