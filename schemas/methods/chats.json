@@ -3,6 +3,15 @@
   "$id": "https://contacthub.dev/schemas/v1/methods/chats.json",
   "title": "Chat and folder methods",
   "$defs": {
+    "chats.get.params": { "$ref": "common.json#/$defs/ChatParams" },
+    "chats.get.result": {
+      "type": "object",
+      "required": ["conversation"],
+      "properties": {
+        "conversation": { "$ref": "../dto/conversation.json#/$defs/Conversation" }
+      },
+      "additionalProperties": true
+    },
     "chats.sync.params": {
       "type": "object",
       "required": ["account_id"],

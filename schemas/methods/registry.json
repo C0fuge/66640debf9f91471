@@ -25,7 +25,7 @@
     }
   },
   "properties": {
-    "api_version": { "const": "1.0.0" },
+    "api_version": { "const": "1.1.0" },
     "methods": {
       "type": "array",
       "items": {
@@ -57,7 +57,7 @@
     "events": { "type": "array", "items": { "$ref": "../events.json#/$defs/EventName" } },
     "cancel": { "const": "$/cancelRequest" }
   },
-  "api_version": "1.0.0",
+  "api_version": "1.1.0",
   "default_timeout_seconds": 60,
   "cancel": "$/cancelRequest",
   "events": [
@@ -185,6 +185,7 @@
     { "name": "topics.edit", "direction": "core_to_plugin", "schema": "threads.json", "capability": "topics.manage" },
     { "name": "topics.pin", "direction": "core_to_plugin", "schema": "threads.json", "capability": "topics.pin" },
 
+    { "name": "chats.get", "direction": "core_to_plugin", "schema": "chats.json", "capability": "chat.get" },
     { "name": "chats.sync", "direction": "core_to_plugin", "schema": "chats.json", "capability": "chat.sync", "timeout_seconds": 120 },
     { "name": "chats.set_flags", "direction": "core_to_plugin", "schema": "chats.json", "capability": "chat.flags",
       "gated_params": [

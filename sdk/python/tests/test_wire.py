@@ -70,3 +70,19 @@ def test_error_objects():
     assert isinstance(e, FloodWait) and e.seconds == 5
     odd = PluginError.from_wire({"code": -32099, "message": "?", "data": {"code": "BRAND_NEW"}})
     assert odd.code == "BRAND_NEW" and odd.numeric == -32603
+
+
+@pytest.mark.parametrize("payload", [{}, {"conversation": None}, {"conversation": {}},
+                                      {"conversation": {"id": "target"}}])
+def test_chat_get_requires_one_identified_conversation(payload):
+    with pytest.raises(DecodeError):
+        from_wire(T.ChatsGetResult, payload)
+    with pytest.raises(AssertionError):
+        validate(payload, "methods/chats.json#/$defs/chats.get.result")
+
+
+def test_chat_get_optional_flags_remain_sparse():
+    payload = {"future_result": True, "conversation": {"id": "c", "kind": "dm", "pinned": False,
+                                                       "marked_unread": None, "future_field": 42}}
+    validate(payload, "methods/chats.json#/$defs/chats.get.result")
+    assert to_wire(from_wire(T.ChatsGetResult, payload)) == {"conversation": {"id": "c", "kind": "dm", "pinned": False}}

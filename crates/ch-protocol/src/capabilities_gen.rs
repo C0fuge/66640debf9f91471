@@ -1,4 +1,4 @@
-//! Types generated once from `schemas/capabilities.json` (API v1.0.0). The schemas are the contract; the
+//! Types generated once from `schemas/capabilities.json` (API v1.1.0). The schemas are the contract; the
 //! tests in `tests/` keep these types in step with them. `str_enum!` enums keep unknown values
 //! as `Unknown(String)` (spec §18).
 #![allow(clippy::struct_excessive_bools, missing_docs, unused_imports)]
@@ -162,6 +162,7 @@ str_enum! {
         Topics = "topics",
         TopicsManage = "topics.manage",
         TopicsPin = "topics.pin",
+        ChatGet = "chat.get",
         ChatSync = "chat.sync",
         ChatFlags = "chat.flags",
         ChatPin = "chat.pin",

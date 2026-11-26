@@ -8,7 +8,7 @@ from typing import Any
 
 from . import types as T
 
-API_VERSION = '1.0.0'
+API_VERSION = '1.1.0'
 CANCEL_METHOD = '$/cancelRequest'
 #: Timeout for requests without their own, both directions (spec 4.6, 12).
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -119,6 +119,7 @@ METHODS: dict[str, MethodInfo] = {
     'topics.create': MethodInfo('topics.create', 'core_to_plugin', 'topics.manage', 60, False, T.TopicsCreateParams, T.TopicsCreateResult, 'threads.json', ()),
     'topics.edit': MethodInfo('topics.edit', 'core_to_plugin', 'topics.manage', 60, False, T.TopicsEditParams, T.TopicsEditResult, 'threads.json', ()),
     'topics.pin': MethodInfo('topics.pin', 'core_to_plugin', 'topics.pin', 60, False, T.TopicsPinParams, T.TopicsPinResult, 'threads.json', ()),
+    'chats.get': MethodInfo('chats.get', 'core_to_plugin', 'chat.get', 60, False, T.ChatsGetParams, T.ChatsGetResult, 'chats.json', ()),
     'chats.sync': MethodInfo('chats.sync', 'core_to_plugin', 'chat.sync', 120, False, T.ChatsSyncParams, T.ChatsSyncResult, 'chats.json', ()),
     'chats.set_flags': MethodInfo('chats.set_flags', 'core_to_plugin', 'chat.flags', 60, False, T.ChatsSetFlagsParams, T.ChatsSetFlagsResult, 'chats.json', (GatedParam('pinned', 'chat.pin'), GatedParam('muted', 'chat.mute'), GatedParam('mute_until', 'chat.mute'), GatedParam('archived', 'chat.archive'), GatedParam('marked_unread', 'chat.mark_unread'),)),
     'chats.clear_history': MethodInfo('chats.clear_history', 'core_to_plugin', 'chat.clear', 60, False, T.ChatsClearHistoryParams, T.ChatsClearHistoryResult, 'chats.json', ()),

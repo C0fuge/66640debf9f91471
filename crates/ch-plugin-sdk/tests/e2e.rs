@@ -27,6 +27,12 @@ fn test_plugin(flags: Arc<Flags>) -> PluginBuilder {
     PluginBuilder::new()
         .version("9.9.9")
         .capability("media.download")
+        .capability_with("chat.get", &json!({}))
+        .method("chats.get", |c: Call<ChatsGetParams>| async move {
+            Ok(ChatsGetResult {
+                conversation: Conversation::new(c.params.chat_id, ConversationKind::Dm).with_pinned(false),
+            })
+        })
         .capability_with("send.album", &json!({"max": 10}))
         .capability("reactions.set")
         .capability("edit")
@@ -160,11 +166,11 @@ async fn handshake_start_call_errors_cancel_stop_shutdown() {
 
     // Handshake; a second initialize is INVALID_REQUEST (§4.1).
     let init = core.initialize().await.unwrap();
-    assert_eq!(init["api_version"], "1.0.0");
+    assert_eq!(init["api_version"], "1.1.0");
     assert_eq!(init["plugin_version"], "9.9.9");
     assert_eq!(
         init["capabilities"],
-        json!({"media.download": true, "send.album": {"max": 10}, "reactions.set": true, "edit": true})
+        json!({"media.download": true, "chat.get": {}, "send.album": {"max": 10}, "reactions.set": true, "edit": true})
     );
     assert_eq!(core.initialize().await.unwrap_err().code, -32600);
     assert_eq!(core.call("ping", json!({})).await.unwrap(), json!({}));
@@ -181,6 +187,9 @@ async fn handshake_start_call_errors_cancel_stop_shutdown() {
     let bulk = core.event_frame("contacts.upsert").await;
     assert!(bulk.get("id").is_some(), "sent as a request: {bulk}");
     assert_eq!(core.event("status").await["state"], "connected");
+    let observed = core.call("chats.get", json!({"account_id": "acc", "chat_id": "c", "future": true}))
+        .await.unwrap();
+    assert_eq!(observed, json!({"conversation": {"id": "c", "kind": "dm", "pinned": false}}));
     // A second start: INVALID_PARAMS naming account_id; the account keeps running (§4.2).
     let e = core.start_with(start_params("acc")).await.unwrap_err();
     assert_eq!(
@@ -475,7 +484,7 @@ async fn settings_defaults_come_from_plugin_json_and_any_major_is_answered() {
         .unwrap();
     assert_eq!(
         (init["api_version"].as_str(), &init["capabilities"]),
-        (Some("1.0.0"), &json!({}))
+        (Some("1.1.0"), &json!({}))
     );
     core.start("a", json!({"port": 2})).await.unwrap();
     assert_eq!(core.event("status").await["state"], "connected");

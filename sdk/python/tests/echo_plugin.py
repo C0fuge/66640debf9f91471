@@ -1,6 +1,7 @@
 """A tiny plugin driven by test_e2e.py over the real stdio transport."""
 
 import asyncio
+import sys
 from datetime import UTC, datetime
 
 from contact_hub_sdk import FloodWait, InvalidParams, Plugin, current_request, method, progress, types as T
@@ -73,5 +74,18 @@ class Echo(Plugin):
         return {"slept": params["seconds"]}
 
 
+class ChatEcho(Echo):
+    capabilities = {**Echo.capabilities, "chat.get": {}}
+
+    @method("chats.get")
+    async def chat(self, account, p: T.ChatsGetParams):
+        return T.ChatsGetResult(conversation=T.Conversation(id=p.chat_id, kind=T.ConversationKind.DM, pinned=False))
+
+
+class LegacyEcho(Echo):
+    api_version = "1.0.0"
+
+
 if __name__ == "__main__":
-    Echo().run()
+    modes = {"modern": ChatEcho, "legacy": LegacyEcho}
+    (modes[sys.argv[1]] if len(sys.argv) > 1 else Echo)().run()

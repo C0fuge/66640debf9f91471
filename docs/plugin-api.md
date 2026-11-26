@@ -1,4 +1,4 @@
-# Contact Hub plugin API, version 1.0.0
+# Contact Hub plugin API, version 1.1.0
 
 This is the public contract between the Contact Hub core (the "host") and a
 messenger plugin. It is self-contained: with this document and the JSON Schemas in
@@ -30,7 +30,9 @@ Contents
 19. Trust model
 20. Checklist for a new plugin
 
-Changes since the first draft (still 1.0.0: nothing had shipped). Merge-updated DTOs
+Version 1.1.0 adds the optional single-dialog read `chats.get` and its capability `chat.get`.
+
+Changes since the first draft (before the 1.0.0 freeze). Merge-updated DTOs
 (`Conversation`, `Topic`, `Message`) lost their on-wire defaults: every non-required
 field is nullable and absent means *unchanged* (§8.4). `ErrorCode` and the numeric
 code are open enums (§13). The method registry carries the capability-gated
@@ -195,7 +197,7 @@ this same mechanism, with no private shortcuts.
 | `id` | string, `^[a-z][a-z0-9_]{1,31}$` | yes | The platform id. Appears in `account_id`s, log names and `ext` namespaces. Immutable once published. |
 | `name` | string | yes | Human name of the platform ("Discord"). |
 | `version` | semver string | yes | The plugin's own version. |
-| `api_version` | semver string | yes | The API this plugin implements (this document: `1.0.0`). Compared by major version (§18). |
+| `api_version` | semver string | yes | The API this plugin implements (this document: `1.1.0`). Compared by major version (§18). |
 | `entry` | array of strings, ≥1 | yes | argv to spawn. `entry[0]` that starts with `./` is resolved against the plugin directory; otherwise it is looked up on `PATH`. The working directory is the plugin directory. |
 | `icon` | string | no | Path, relative to the plugin directory, of an SVG or PNG. |
 | `brand_color` | `#RRGGBB` | yes | Used for the platform badge. |
@@ -938,8 +940,12 @@ account once `account.stop` has returned.
 
 ### 10.1 Echoes of core-initiated changes
 
-When the core changes something through a request (`messages.pin`,
-`chats.set_flags`, `read.send_receipt`, `drafts.save`, `messages.edit`, `messages.send`,
+For dialog preference controls, the empty `chats.set_flags` result contains no
+observed flag values. Apply a sparse platform observation from an acknowledged
+`conversations.upsert` or an explicit `chats.get` read. Preserve unknown fields
+and require fresh evidence after an ambiguous setter outcome.
+
+When the core changes something through a request with a locally applicable result (`messages.pin`, `read.send_receipt`, `drafts.save`, `messages.edit`, `messages.send`,
 `reactions.set`, …) and the request succeeds, **the core applies the result itself**:
 it owns the state and does not wait for an event. Most platforms then push the same
 change back as an update; the plugin MAY forward it as the matching event and SHOULD
@@ -1245,6 +1251,15 @@ result: `topics: [Topic]`, `next_cursor?`.
 `pinned: bool`. result: `{}`.
 
 ### 11.15 Chats
+
+**`chats.get`** (`chat.get`, added in 1.1.0) takes `account_id` and `chat_id`.
+Read exactly one whole chat in the specified account and return
+`{ "conversation": Conversation }` with the requested ID, actual kind and freshly
+observed fields. An absent or null optional flag is unknown in this observation.
+An explicit false clears a previously stored true under the usual sparse merge.
+Return `NOT_FOUND` for a definitively missing chat. Other failures retain their
+ordinary errors. A failed or mismatched read leaves stored rows intact. This read
+requires no companion event and must never emit `conversations.synced`.
 
 **`chats.sync`** (`chat.sync`) — params: `account_id`, `include_archived?: bool`
 (default true). result: `{}`. The plugin re-emits `conversations.upsert` for every
@@ -1673,6 +1688,7 @@ conformance suite calls each one.
 
 | key | gates | params |
 | --- | --- | --- |
+| `chat.get` | `chats.get` | |
 | `chat.sync` | `chats.sync` | |
 | `chat.flags` | `chats.set_flags` | |
 | `chat.pin`, `chat.mute`, `chat.archive`, `chat.mark_unread` | the matching flag | |
@@ -1815,7 +1831,7 @@ user that "{platform} may still show you online".
 
 ## 18. Versioning and stability
 
-- `api_version` is **semver**. This document is `1.0.0`. The core and the plugin
+- `api_version` is **semver**. This document is `1.1.0`. The core and the plugin
   each state theirs in `initialize`; they are compatible when the **major** versions
   are equal. (The amendments listed under "Changes since the first draft" were made
   before anything shipped and did not bump the version.)

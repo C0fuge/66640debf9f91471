@@ -63,6 +63,7 @@
         "topics",
         "topics.manage",
         "topics.pin",
+        "chat.get",
         "chat.sync",
         "chat.flags",
         "chat.pin",

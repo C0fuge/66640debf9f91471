@@ -93,7 +93,7 @@ impl MethodInfo {
     }
 }
 
-/// Every method of API v1.0.0, in spec order.
+/// Every method of API v1.1.0, in spec order.
 pub const METHODS: &[MethodInfo] = &[
     MethodInfo {
         name: "initialize",
@@ -622,6 +622,15 @@ pub const METHODS: &[MethodInfo] = &[
         direction: CallDirection::CoreToPlugin,
         schema: "threads.json",
         capability: Some("topics.pin"),
+        timeout_seconds: 60,
+        progress: false,
+        gated_params: &[],
+    },
+    MethodInfo {
+        name: "chats.get",
+        direction: CallDirection::CoreToPlugin,
+        schema: "chats.json",
+        capability: Some("chat.get"),
         timeout_seconds: 60,
         progress: false,
         gated_params: &[],

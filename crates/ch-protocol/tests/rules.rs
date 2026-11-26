@@ -264,7 +264,7 @@ fn registry_timeouts_follow_the_table() {
         method("$/cancelRequest").is_none(),
         "cancel is a notification, not a method"
     );
-    assert_eq!(METHODS.len(), 121);
+    assert_eq!(METHODS.len(), 122);
 }
 
 #[test]

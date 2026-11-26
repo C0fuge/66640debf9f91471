@@ -54,6 +54,8 @@ __all__ = [
     'ChatUserParams',
     'ChatsClearHistoryParams',
     'ChatsClearHistoryResult',
+    'ChatsGetParams',
+    'ChatsGetResult',
     'ChatsLeaveParams',
     'ChatsLeaveResult',
     'ChatsReorderPinnedParams',
@@ -1454,6 +1456,13 @@ class BotsPressButtonResult:
 
 
 @dataclass(kw_only=True, slots=True)
+class ChatsGetResult:
+    """chats.get.result (methods/chats.json)."""
+
+    conversation: Conversation
+
+
+@dataclass(kw_only=True, slots=True)
 class ChatsSyncParams:
     """chats.sync.params (methods/chats.json)."""
 
@@ -2806,6 +2815,7 @@ AccountId = str
 AuthBeginResult = Empty
 AuthSubmitResult = Empty
 AuthCancelResult = Empty
+ChatsGetParams = ChatParams
 ChatsSyncResult = Empty
 ChatsSetFlagsResult = Empty
 ChatsClearHistoryResult = Empty

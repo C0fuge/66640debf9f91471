@@ -116,7 +116,7 @@ async fn echo_end_to_end() {
     else {
         panic!("{st}")
     };
-    assert_eq!(api_version, "1.0.0");
+    assert_eq!(api_version, ch_protocol::API_VERSION);
     assert!(capabilities.0.is_empty());
 
     let acc = h.account("echo", "echo#1").unwrap();

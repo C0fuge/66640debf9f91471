@@ -1,4 +1,4 @@
-//! Rust SDK for Contact Hub plugins (plugin API v1.0.0, `docs/plugin-api.md`).
+//! Rust SDK for Contact Hub plugins (plugin API v1.1.0, `docs/plugin-api.md`).
 //!
 //! A plugin is a child process speaking NDJSON JSON-RPC 2.0 on stdio. This crate does the
 //! protocol work so the author only writes platform code:

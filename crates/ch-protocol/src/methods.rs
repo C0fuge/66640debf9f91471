@@ -1,4 +1,4 @@
-//! Types generated once from `schemas/methods/*.json` (API v1.0.0). The schemas are the contract; the
+//! Types generated once from `schemas/methods/*.json` (API v1.1.0). The schemas are the contract; the
 //! tests in `tests/` keep these types in step with them. `str_enum!` enums keep unknown values
 //! as `Unknown(String)` (spec §18).
 #![allow(clippy::struct_excessive_bools, missing_docs, unused_imports)]
@@ -216,6 +216,13 @@ pub struct BotsPressButtonResult {
 }
 
 // ---- methods/chats.json ----
+
+pub type ChatsGetParams = ChatParams;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatsGetResult {
+    pub conversation: Conversation,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ChatsSyncParams {

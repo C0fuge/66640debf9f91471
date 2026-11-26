@@ -525,13 +525,18 @@ class Plugin:
     def _has_auth(self) -> bool:
         return type(self).on_auth_begin is not Plugin.on_auth_begin
 
+    @staticmethod
+    def _enabled(caps: dict[str, Any], key: str) -> bool:
+        value = caps.get(key)
+        return value is True or isinstance(value, dict)
+
     def _check_handlers(self) -> None:
         missing = []
         caps = self.get_capabilities()
         for info in METHODS.values():
             if info.direction != "core_to_plugin" or info.name in LIFECYCLE:
                 continue
-            if info.capability != "required" and not caps.get(info.capability):
+            if info.capability != "required" and not self._enabled(caps, info.capability):
                 continue
             if info.name in self._handlers:
                 continue
@@ -544,7 +549,7 @@ class Plugin:
             )
         for name in self._handlers:
             info = METHODS.get(name)
-            if info is not None and info.capability != "required" and not caps.get(info.capability):
+            if info is not None and info.capability != "required" and not self._enabled(caps, info.capability):
                 log.warning("handler for %s is unreachable: capability %s is not declared",
                             name, info.capability)
 
@@ -574,7 +579,7 @@ class Plugin:
                 account = self._account(aid)
         else:
             caps = self.get_capabilities()
-            if info.capability != "required" and not caps.get(info.capability):
+            if info.capability != "required" and not self._enabled(caps, info.capability):
                 raise NotSupported(f"{m} needs capability {info.capability}", capability=info.capability)
             params = self._decode(info.params, ctx.raw_params)
             if m == "account.stop":
@@ -618,7 +623,7 @@ class Plugin:
     @staticmethod
     def _check_param_caps(m: str, raw: dict[str, Any], caps: dict[str, Any]) -> None:
         info = METHODS.get(m)
-        missing = info.missing_capabilities(raw, lambda c: bool(caps.get(c))) if info else []
+        missing = info.missing_capabilities(raw, lambda c: Plugin._enabled(caps, c)) if info else []
         if missing:
             g = missing[0]
             raise NotSupported(f"{g.param} needs capability {g.capability}", capability=g.capability)

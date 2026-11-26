@@ -23,7 +23,7 @@ ACC = {"account_id": "acc#1"}
 
 
 @pytest.fixture
-def core(tmp_path):
+def core(tmp_path, request):
     plugin_dir = tmp_path / "echo"
     plugin_dir.mkdir()
     (plugin_dir / "plugin.json").write_text(json.dumps({
@@ -34,7 +34,7 @@ def core(tmp_path):
             "name": {"type": "string", "default": "Echo Me"},
             "token": {"type": "string", "x-secret": True}}},
     }))
-    c = FakeCore([sys.executable, str(HERE / "echo_plugin.py")], plugin_dir=plugin_dir, tmp=tmp_path,
+    c = FakeCore([sys.executable, str(HERE / "echo_plugin.py"), *getattr(request, "param", [])], plugin_dir=plugin_dir, tmp=tmp_path,
                  env={"PYTHONPATH": str(HERE)}, check=CHECK, timeout=5.0)
     yield c
     c.close()
@@ -189,6 +189,32 @@ def test_eof_drops_requests_past_the_budget(core):
     t = time.monotonic()
     assert core.wait_exit() == 0 and time.monotonic() - t < 5
     assert not any(f.get("id") == slow for f in frames(core))
+
+
+@pytest.mark.parametrize("core", [["legacy"]], indirect=True)
+def test_new_core_accepts_legacy_plugin_without_chat_get(core):
+    result = core.initialize(api_version="1.1.0")
+    assert result["api_version"] == "1.0.0" and "chat.get" not in result["capabilities"]
+    start(core)
+    assert core.call("ping") == {}
+    error = core.error("chats.get", {**ACC, "chat_id": "c"})
+    assert error["data"] == {"code": "NOT_SUPPORTED", "capability": "chat.get"}
+
+
+@pytest.mark.parametrize("core", [["modern"]], indirect=True)
+def test_legacy_core_can_use_common_methods_with_new_plugin(core):
+    result = core.initialize(api_version="1.0.0")
+    assert result["api_version"] == "1.1.0" and result["capabilities"]["chat.get"] == {}
+    start(core)
+    assert core.call("ping") == {}
+
+
+@pytest.mark.parametrize("core", [["modern"]], indirect=True)
+def test_chat_get_returns_only_observed_fields(core):
+    core.initialize()
+    start(core)
+    assert core.call("chats.get", {**ACC, "chat_id": "c", "future_option": True}) == {
+        "conversation": {"id": "c", "kind": "dm", "pinned": False}}
 
 
 def test_major_version_mismatch_is_answered(core):
