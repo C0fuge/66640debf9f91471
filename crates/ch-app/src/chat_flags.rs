@@ -111,6 +111,8 @@ pub(crate) struct Service {
     session: String,
     state: Mutex<State>,
     slots: Arc<Semaphore>,
+    #[cfg(test)]
+    after_reply: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 fn token() -> std::io::Result<String> {
@@ -126,6 +128,8 @@ impl Service {
             session: token()?,
             state: Mutex::default(),
             slots: Arc::new(Semaphore::new(4)),
+            #[cfg(test)]
+            after_reply: Mutex::default(),
         })
     }
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -267,12 +271,19 @@ impl App {
             }
             state.tasks.retain(|t| !t.handle.is_finished());
             let handle = tokio::spawn(async move {
-                let _lease = (guard, permit);
                 let result = operate(&core, &service, &target, write, worker_cancel, tracked).await;
                 if is_write && (result.is_ok() || matches!(result, Err(Failure::OutcomeUnknown))) {
                     events::notify(&changes, &target.thread.account_id);
                 }
+                // A completed request must release its thread/slot before waking
+                // a caller which may immediately request a fresh observation.
+                drop((guard, permit));
                 let _ = tx.send(result);
+                #[cfg(test)]
+                if is_write {
+                    let hook = service.after_reply.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    if let Some(hook) = hook { hook(); }
+                }
             });
             state.tasks.push(Task { cancel, handle });
         }

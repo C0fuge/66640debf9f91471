@@ -369,12 +369,39 @@ async fn archive_moves_only_on_observed_state_and_sends_exact_boolean_once() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn archive_lost_reply_requires_a_new_observation_without_replaying() {
     let (app, thread) = fixture("unknown").await;
-    let c = refresh(&app, &thread).await["value"].clone();
+    let observed = refresh(&app, &thread).await;
+    assert_eq!(observed["ok"], true, "{observed}");
+    let c = observed["value"].clone();
     let result = set(&app, &thread, &c, "archived", false).await;
-    assert_eq!(result["error"]["outcomeUnknown"], true);
+    assert_eq!(result["error"]["outcomeUnknown"], true, "{result}");
     assert!(stored(&app, &thread).await.archived);
     assert_eq!(set(&app, &thread, &c, "archived", false).await["ok"], false);
     assert_eq!(refresh(&app, &thread).await["value"]["archived"], false);
     assert_eq!(calls(&app, "chats.set_flags"), 1);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_unknown_write_releases_thread_and_slot_before_reply_tail_finishes() {
+    let (app, thread) = fixture("unknown").await;
+    let observed = refresh(&app, &thread).await;
+    assert_eq!(observed["ok"], true, "{observed}");
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let signal = reached.clone();
+    let (release, wait) = std::sync::mpsc::channel();
+    *app.chat_flags.after_reply.lock().unwrap() = Some(Box::new(move || {
+        signal.notify_one();
+        // Dropping the sender on assertion failure also releases this worker.
+        let _ = wait.recv_timeout(Duration::from_secs(5));
+    }));
+    let result = set(&app, &thread, &observed["value"], "archived", false).await;
+    assert_eq!(result["error"]["outcomeUnknown"], true, "{result}");
+    tokio::time::timeout(Duration::from_secs(5), reached.notified()).await.unwrap();
+    assert_eq!(app.chat_flags.slots.available_permits(), 4);
+    let fresh = refresh(&app, &thread).await;
+    assert_eq!(fresh["ok"], true, "{fresh}");
+    assert_eq!(fresh["value"]["archived"], false);
+    assert_eq!(calls(&app, "chats.set_flags"), 1);
+    release.send(()).unwrap();
     app.shutdown().await;
 }
