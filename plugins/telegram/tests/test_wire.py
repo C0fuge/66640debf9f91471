@@ -13,7 +13,7 @@ SECRETS = {"api_hash": "fedcba98765432100123456789abcdef"}
 
 
 @pytest.fixture
-def core(tmp_path):
+def core(tmp_path, request):
     # The fixture provides the client factory directly. Production exposes no
     # environment switch that can silently replace a real account with a stub.
     bootstrap = """
@@ -26,9 +26,15 @@ os.umask(0o077)
 sys.path.insert(0, 'tests')
 from stub import Stub
 from telegram_plugin.plugin import TelegramPlugin
-TelegramPlugin(factory=Stub).run()
+plugin = TelegramPlugin(factory=Stub)
+if sys.argv[1] == 'legacy':
+    plugin.api_version = '1.0.0'
+    plugin.capabilities = {k: v for k, v in plugin.capabilities.items() if k != 'chat.get'}
+elif sys.argv[1] == 'empty-object':
+    plugin.capabilities = {**plugin.capabilities, 'chat.get': {}}
+plugin.run()
 """
-    with FakeCore([sys.executable, "-c", bootstrap], plugin_dir=ROOT, tmp=tmp_path,
+    with FakeCore([sys.executable, "-c", bootstrap, getattr(request, "param", "default")], plugin_dir=ROOT, tmp=tmp_path,
                   env={**os.environ, "HOME": str(tmp_path / "home")}, check=VALIDATE) as harness:
         yield harness
 
@@ -470,3 +476,28 @@ def test_dialog_flags_partial_refusal_and_lost_ack(core):
         data = core.response(rid)["error"]["data"]
         assert data["outcome"] == "unknown" and data["retry_safe"] is False
     core.auto_answer = True
+
+
+@pytest.mark.parametrize("core", ["default", "empty-object"], indirect=True)
+def test_chat_get_observes_the_selected_account_without_events(core):
+    result = core.initialize()
+    assert result["api_version"] == "1.1.0" and result["capabilities"]["chat.get"] in (True, {})
+    start(core, name="a")
+    start(core, name="b")
+    core.call("chats.set_flags", {"account_id": "a", "chat_id": "17", "marked_unread": True})
+    before = len(core.all_events)
+    for account, marked in [("a", True), ("b", False)]:
+        assert core.call("chats.get", {"account_id": account, "chat_id": "17"}) == {"conversation": {
+            "id": "17", "kind": "dm", "pinned": False, "marked_unread": marked}}
+    for owner, chat, code in [("missing", "17", "UNKNOWN_ACCOUNT"), ("a", "017", "INVALID_PARAMS"),
+                              ("a", "99", "NOT_FOUND")]:
+        assert core.error("chats.get", {"account_id": owner, "chat_id": chat})["data"]["code"] == code
+    assert len(core.all_events) == before
+
+
+@pytest.mark.parametrize("core", ["legacy"], indirect=True)
+def test_legacy_telegram_capability_gate_precedes_account_lookup(core):
+    result = core.initialize()
+    assert result["api_version"] == "1.0.0" and "chat.get" not in result["capabilities"]
+    error = core.error("chats.get", {"account_id": "missing", "chat_id": "17"})
+    assert error["data"] == {"code": "NOT_SUPPORTED", "capability": "chat.get"}

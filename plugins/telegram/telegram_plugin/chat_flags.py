@@ -21,9 +21,9 @@ def uncertain(error=None):
     return rpc.NetworkError(message, **data)
 
 
-async def observe(client, target, chat_id, fields):
+async def observe(client, target, chat_id, fields, *, capability="chat.flags"):
     result = await client(functions.messages.GetPeerDialogsRequest(peers=[target]))
-    if not isinstance(result, tl.messages.PeerDialogs):
+    if not isinstance(result, tl.messages.PeerDialogs) or not isinstance(result.dialogs, list):
         raise rpc.Internal("Telegram returned an invalid dialog result.")
     if not result.dialogs:
         raise rpc.NotFound(kind="chat")
@@ -38,15 +38,21 @@ async def observe(client, target, chat_id, fields):
     }[type(dialog.peer)]
     entities = [entity for entity in table if isinstance(entity, cls) and peer_id(entity) == chat_id]
     if len(entities) != 1 or getattr(entities[0], "min", False):
-        raise rpc.NotFound(kind="chat")
+        raise rpc.Internal("Telegram did not return a matching full dialog entity.")
     entity = entities[0]
     if getattr(entity, "monoforum", False):
-        raise rpc.NotSupported("Telegram monoforums are unsupported.", capability="chat.flags")
+        raise rpc.NotSupported("Telegram monoforums are unsupported.", capability=capability)
     kind = "dm" if cls is tl.User else "group" if cls is tl.Chat or entity.megagroup else "channel"
     flags = {"pinned": dialog.pinned, "marked_unread": dialog.unread_mark}
     if any(type(flags[name]) is not bool for name in fields):
         raise rpc.Internal("Telegram returned invalid dialog flags.")
     return dto.Conversation(id=chat_id, kind=kind, **{name: flags[name] for name in fields})
+
+
+async def get(client, chat_id):
+    target = tl.InputDialogPeer(await resolve_chat(client, chat_id))
+    conversation = await observe(client, target, chat_id, ("pinned", "marked_unread"), capability="chat.get")
+    return dto.ChatsGetResult(conversation=conversation)
 
 
 async def set_flags(account, client, p):

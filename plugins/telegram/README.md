@@ -1,6 +1,6 @@
 # Telegram plugin
 
-The Contact Hub Python SDK runs one process for Telegram. Each started account owns its Telethon client, its event handlers, its login flow and a SQLite session. The plugin uses API 1.0.0 and Telethon 1.46.0. The dependency lock pins the client, proxy support and transitive dependencies. [Telethon release](https://pypi.org/project/Telethon/1.46.0/) · [Upstream MIT license](TELETHON-LICENSE)
+The Contact Hub Python SDK runs one process for Telegram. Each started account owns its Telethon client, its event handlers, its login flow and a SQLite session. The plugin uses API 1.1.0 and Telethon 1.46.0. The dependency lock pins the client, proxy support and transitive dependencies. [Telethon release](https://pypi.org/project/Telethon/1.46.0/) · [Upstream MIT license](TELETHON-LICENSE)
 
 ## Install and check
 
@@ -26,6 +26,7 @@ Enter the numeric `api_id` in account settings and the application’s `api_hash
 | Required text send, `send.entities`, `send.silent`, `send.no_webpage` | `messages.send` | Plain or formatted text, replies, topic root, silent delivery and preview suppression. A supplied client ID determines the MTProto random ID. A successful acknowledgement echoes the client ID in the returned message and a message upsert. |
 | `messages.get`, `edit`, `edit.caption` | `messages.get`, `messages.edit` | Chat-scoped lookup, text/caption and entity edits, preview suppression, unchanged-edit retries. Media replacement is unsupported. |
 | `delete`, `delete.for_me`, `forward`, `forward.drop_author` | `messages.delete`, `messages.forward` | Batch deletion and forwarding with complete chat validation before mutation; silent forwarding and author/caption removal. Channel deletion only for me is rejected. Scheduling is unsupported. |
+| `chat.get` | `chats.get` | Reads one ordinary dialog and returns its ID, kind, pin and manual unread mark. The caller receives the observation in the response. |
 | `chat.flags`, `chat.pin`, `chat.mark_unread` | `chats.set_flags` | Pins and manual unread marks on ordinary dialogs. A single-dialog observation confirms the requested flags. A partial or interrupted write can require a refresh. |
 | `pin`, `unpin` | `messages.pin`, `messages.unpin` | Silent and personal private-chat pins, one-message or all-message unpinning, including paged unpin acknowledgements. |
 | `read_receipts`, `typing`, `drafts.sync` | `read.send_receipt`, `typing.send`, `drafts.save` | Explicit chat/topic receipts and supported typing actions; formatted chat drafts and explicit clearing. Topic draft writes are rejected until their clearing semantics are verified. Server timestamps are authoritative. |

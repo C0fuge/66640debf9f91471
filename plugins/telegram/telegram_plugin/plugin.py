@@ -12,7 +12,7 @@ from .session import disconnect, make_client, options, platform_errors, session_
 
 class TelegramPlugin(Plugin):
     capabilities = {
-        "chat.flags": True, "chat.pin": True, "chat.mark_unread": True,
+        "chat.get": True, "chat.flags": True, "chat.pin": True, "chat.mark_unread": True,
         "chat.sync": True, "contacts.list": True, "history.jump_to_date": True, "history.fill_gap": True,
         "send.entities": {"types": SEND_ENTITY_TYPES}, "send.silent": True, "send.no_webpage": True,
         "messages.get": True, "edit": True, "edit.caption": True, "delete": True, "delete.for_me": True,
@@ -147,6 +147,13 @@ class TelegramPlugin(Plugin):
     async def sticker_thumb(self, account, params):
         with platform_errors():
             return await sticker_thumbs.thumbnail(account, self.ready(account), params)
+
+    @method("chats.get")
+    async def chats_get(self, account, params):
+        with platform_errors():
+            async with asyncio.timeout(METHODS["chats.get"].timeout_seconds):
+                async with account.data["sync_lock"]:
+                    return await chat_flags.get(self.ready(account), params.chat_id)
 
     @method("chats.set_flags")
     async def chats_set_flags(self, account, params):

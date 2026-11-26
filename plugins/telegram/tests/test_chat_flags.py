@@ -24,7 +24,7 @@ def snapshot(peer=tl.PeerUser(17), entity=None, pinned=False, marked=False):
     return tl.messages.PeerDialogs([raw], [], chats, users, tl.updates.State(0, 0, NOW, 0, 0))
 
 
-def setup(replies, *, peer=None, chat_id="17", **fields):
+def setup(replies, *, peer=None, chat_id="17", read_only=False, **fields):
     calls = []
     peer = peer or tl.InputPeerUser(17, 0)
 
@@ -47,6 +47,9 @@ def setup(replies, *, peer=None, chat_id="17", **fields):
     client.get_input_entity.return_value = peer
     account = SimpleNamespace(state="connected", data=dict(client=client, sync_lock=asyncio.Lock()),
                               conversations_upsert=AsyncMock())
+    if read_only:
+        params = dto.ChatsGetParams(account_id="a", chat_id=chat_id)
+        return TelegramPlugin().chats_get(account, params), account, calls
     params = dto.ChatsSetFlagsParams(account_id="a", chat_id=chat_id, **fields)
     return TelegramPlugin().chats_set_flags(account, params), account, calls
 
@@ -144,4 +147,40 @@ def test_exact_dialog_peer_and_entity_kind():
                                          chat_id="-1000000000008", pinned=False)
             await task
             assert observed(account)["kind"] == ("group" if group else "channel")
+    asyncio.run(exercise())
+
+
+def test_chat_get_reads_one_peer_under_account_lock_without_emitting():
+    async def exercise():
+        for pin, mark in ((False, False), (True, False), (False, True)):
+            task, account, calls = setup([snapshot(pinned=pin, marked=mark)], read_only=True)
+            async with account.data["sync_lock"]:
+                pending = asyncio.create_task(task)
+                await asyncio.sleep(0)
+                account.data["client"].get_input_entity.assert_not_awaited()
+            assert to_wire(await pending) == {"conversation": {
+                "id": "17", "kind": "dm", "pinned": pin, "marked_unread": mark}}
+            assert list(map(type, calls)) == [READ]
+            account.conversations_upsert.assert_not_awaited()
+    asyncio.run(exercise())
+
+
+def test_chat_get_validates_identity_and_propagates_read_failures():
+    async def exercise():
+        empty = snapshot()
+        empty.dialogs = []
+        for result, code in [(empty, "NOT_FOUND"), (snapshot(tl.PeerChannel(17)), "INTERNAL"),
+                             (snapshot(entity=tl.User(18)), "INTERNAL"), (snapshot(pinned=None), "INTERNAL"),
+                             (TimeoutError(), "TIMEOUT"), (OSError(), "NETWORK")]:
+            task, account, calls = setup([result], read_only=True)
+            with pytest.raises(rpc.PluginError) as err:
+                await task
+            assert err.value.code == code and "outcome" not in err.value.data
+            assert list(map(type, calls)) == [READ]
+            account.conversations_upsert.assert_not_awaited()
+        task, account, calls = setup([asyncio.CancelledError()], read_only=True)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert list(map(type, calls)) == [READ] and not account.data["sync_lock"].locked()
+        account.conversations_upsert.assert_not_awaited()
     asyncio.run(exercise())
