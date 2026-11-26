@@ -9,6 +9,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{File, Permissions},
     io::{self, Read, Write},
+    os::fd::AsFd,
     os::unix::{
         ffi::OsStrExt,
         fs::{MetadataExt, PermissionsExt},
@@ -255,8 +256,19 @@ pub(crate) struct Stage {
 }
 pub(crate) struct Verified {
     stage: Stage,
-    held: File,
-    lease: File,
+    handles: Verification,
+}
+enum Verification {
+    Local { held: File, _lease: File },
+    Core(ch_core::managed_stage::VerifiedStageBinding),
+}
+impl Verified {
+    fn check_bytes(&self) -> Result<()> {
+        match &self.handles {
+            Verification::Local { held, .. } => self.stage.check_bytes(held),
+            Verification::Core(proof) => proof.check_directory(self.stage.dir.file.as_fd()),
+        }
+    }
 }
 pub(crate) struct LiveClaim {
     verified: Verified,
@@ -432,9 +444,23 @@ impl Stage {
         }
         Ok(Verified {
             stage: self.clone(),
-            held,
-            lease,
+            handles: Verification::Local { held, _lease: lease },
         })
+    }
+    /// Production admission uses a Core proof bound to the exact Accounts-issued lease.
+    pub fn verify_bound(
+        &self,
+        owner: &ch_core::runtime::AccountStorageBinding,
+        limit: u64,
+        checkpoint: impl FnMut(u64) -> Result<()>,
+    ) -> Result<Verified> {
+        let proof = ch_core::managed_stage::VerifiedStageBinding::verify_ready(
+            owner, &self.manifest.stage_id, limit, checkpoint,
+        )?;
+        self.current()?;
+        proof.check_directory(self.dir.file.as_fd())?;
+        if proof.manifest() != &self.manifest { return Err(Error::StageChanged); }
+        Ok(Verified { stage: self.clone(), handles: Verification::Core(proof) })
     }
     /// proof must check absence of the fixed outbox row AND rule out other
     /// stored references under the single-writer invariant. Ambiguity retains.
@@ -444,11 +470,10 @@ impl Stage {
     ) -> Result<()> {
         // A corrupt digest is also insufficient authority for destructive cleanup.
         // Hold the same bounded scan slot as verify, and retain the lease through unlink.
-        let Verified {
-            held,
-            lease: _lease,
-            ..
-        } = self.verify(super::MAX_BYTES, |_| Ok(()))?;
+        let verified = self.verify(super::MAX_BYTES, |_| Ok(()))?;
+        let Verification::Local { held, .. } = &verified.handles else {
+            return Err(Error::Integrity);
+        };
         let previous = self.current()?;
         let mut discarded = self.manifest.clone();
         discarded.phase = Phase::Discarded;
@@ -456,15 +481,15 @@ impl Stage {
             if !proof(&self.manifest, &self.managed_path())? {
                 return Err(Error::Integrity);
             }
-            self.check_bytes(&held)
+            self.check_bytes(held)
         })?;
         let remove = || {
             let (current, file) = read_manifest(&self.dir)?;
             if current != discarded {
                 return Err(Error::StageChanged);
             }
-            self.check_bytes(&held)?;
-            fd::unlink(&self.dir, c"bytes", fd::id(&held)?, false)?;
+            self.check_bytes(held)?;
+            fd::unlink(&self.dir, c"bytes", fd::id(held)?, false)?;
             self.dir.file.sync_all()?;
             fd::unlink(&self.dir, c"manifest.json", fd::id(&file)?, false)?;
             self.dir.file.sync_all()?;
@@ -484,11 +509,12 @@ impl Stage {
 impl Verified {
     pub fn claim(mut self, intent: Intent) -> Result<LiveClaim> {
         intent.check()?;
+        if let Verification::Core(proof) = &self.handles { proof.recheck_ready()?; }
         let previous = self.stage.current()?;
         let mut m = self.stage.manifest.clone();
         m.phase = Phase::Claimed(intent);
         self.stage
-            .publish(Some(&previous), &m, || self.stage.check_bytes(&self.held))?;
+            .publish(Some(&previous), &m, || self.check_bytes())?;
         self.stage.manifest = m;
         Ok(LiveClaim {
             verified: self,
@@ -507,7 +533,7 @@ impl LiveClaim {
         }
         self.used = true;
         self.verified.stage.current()?;
-        self.verified.stage.check_bytes(&self.verified.held)?;
+        self.verified.check_bytes()?;
         Ok(self.verified.stage.managed_path())
     }
     /// Call only after core proved local admission of this exact retained request.
@@ -517,8 +543,7 @@ impl LiveClaim {
         }
         let Verified {
             mut stage,
-            held: _,
-            lease: _lease,
+            handles: _handles,
         } = self.verified;
         let old = stage.current()?;
         let mut m = stage.manifest.clone();

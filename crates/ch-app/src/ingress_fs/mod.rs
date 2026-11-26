@@ -12,29 +12,9 @@ pub(crate) use manifest::{Format, Intent, Manifest, Owner, Phase, Scope};
 pub(crate) use source::Source;
 pub(crate) use store::{LiveClaim, Stage, Store, Verified};
 
-pub(crate) const MAX_BYTES: u64 = 1 << 31;
-const CHUNK: usize = 64 * 1024;
+pub(crate) use ch_core::managed_stage::{Error, MAX_BYTES};
 type Result<T> = std::result::Result<T, Error>;
-
-// Never carry paths or OS messages across this boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Error {
-    UnsafeSource,
-    SourceChanged,
-    StageChanged,
-    TooLarge,
-    Storage,
-    Integrity,
-    Unknown,
-    Cancelled,
-    TargetChanged,
-    Busy,
-}
-impl From<std::io::Error> for Error {
-    fn from(_: std::io::Error) -> Self {
-        Self::Storage
-    }
-}
+const CHUNK: usize = 64 * 1024;
 
 fn check_size(size: u64, limit: u64) -> Result<()> {
     if size > limit.min(MAX_BYTES) {

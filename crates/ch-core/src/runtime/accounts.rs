@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 mod storage;
+pub use storage::AccountStorageBinding;
 
 use ch_db::types::{AccountRow, PluginRow};
 use ch_db::{Db, now_millis};

@@ -389,14 +389,15 @@ impl Job {
             drop(guard);
             None
         };
-        // Acquire the directory lease after the chooser; a once-revoked original generation never revives.
-        let (current, guard) = self
-            .s
-            .core
-            .accounts()
-            .storage_lease(&self.owner)
-            .await
-            .map_err(|_| fs::Error::TargetChanged)?;
+        // Capture one exact Accounts-issued owner+Gate for actual verification/admission.
+        // The original chooser generation remains an independent permanent veto.
+        let binding = self.s.core.accounts().storage_binding_for(&self.owner.account_id)
+            .await.map_err(|_| fs::Error::TargetChanged)?;
+        if binding.owner().plugin_id != self.owner.plugin_id
+            || binding.owner().created_at != self.owner.created_at {
+            return Err(fs::Error::TargetChanged.into());
+        }
+        let current = binding.revocation();
         self.check(&life)?;
         self.check(&current)?;
         let slot = tokio::select! {
@@ -409,7 +410,7 @@ impl Job {
         let j = self.clone();
         tokio::task::spawn_blocking(move || {
             // Detached request futures cannot drop these guards while blocking filesystem work still runs.
-            let (_guard, _slot) = (guard, slot);
+            let (_binding, _slot) = (binding, slot);
             j.check(&life)?;
             j.check(&current)?;
             let store = j.s.store()?;
@@ -418,7 +419,7 @@ impl Job {
                 Action::Choose(_) => {
                     j.copy(&store, &a, source.ok_or(fs::Error::UnsafeSource)?, &life)
                 }
-                Action::Send(i) => j.admit(&store, &a, &i, &life),
+                Action::Send(i) => j.admit(&store, &a, &i, &life, &_binding),
                 Action::Discard => j.discard(&store, &a, &life),
             }
         })
@@ -511,6 +512,7 @@ impl Job {
         owner: &fs::Owner,
         i: &fs::Intent,
         life: &CancellationToken,
+        binding: &ch_core::runtime::AccountStorageBinding,
     ) -> Work<()> {
         let stage = self.stage(store, owner)?;
         let limit = self.effective(Some(i))?;
@@ -525,7 +527,7 @@ impl Job {
         {
             return Err(fs::Error::Integrity.into());
         }
-        let verified: fs::Verified = stage.verify(limit, |_| self.check(life))?;
+        let verified: fs::Verified = stage.verify_bound(binding, limit, |_| self.check(life))?;
         if m.size > self.effective(Some(i))? {
             return Err(fs::Error::TooLarge.into());
         }

@@ -13,6 +13,88 @@ struct Fixture {
     source: TempDir,
     thread: Thread,
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn core_stage_verifier_owns_exact_storage_and_rejects_changed_ready_bytes() {
+    use ch_core::managed_stage::{Error, VerifiedStageBinding};
+    use std::os::unix::fs::PermissionsExt;
+    let (f, app) = Fixture::new(caps()).await;
+    assert_eq!(f.start(&app, "core-proof").await["ok"], true);
+    let ready = f.state(&app, "core-proof", "ready").await;
+    let id = ready["stageId"].as_str().unwrap();
+    let owner = app.core.accounts().storage_binding_for("fixture").await.unwrap();
+    let bytes = app.core.host().config().upload_dir("fixture").join(id).join("bytes");
+    let proof = VerifiedStageBinding::verify_ready(&owner, id, fs::MAX_BYTES, |_| Ok(())).unwrap();
+    assert_eq!(proof.manifest().stage_id, id);
+    assert!(proof.manifest().phase == fs::Phase::Ready);
+    assert_eq!(std::fs::read(&bytes).unwrap(), b"reviewed bytes");
+    // There is no second independent flock owner for the same configured stage.
+    assert!(matches!(VerifiedStageBinding::verify_ready(&owner, id, fs::MAX_BYTES, |_| Ok(())), Err(Error::Busy)));
+    drop(proof);
+    assert!(matches!(VerifiedStageBinding::verify_ready(&owner, id, 1, |_| Ok(())), Err(Error::TooLarge)));
+    let alias = bytes.parent().unwrap().parent().unwrap().join("outside-alias");
+    std::fs::hard_link(&bytes, &alias).unwrap();
+    assert!(matches!(VerifiedStageBinding::verify_ready(&owner, id, fs::MAX_BYTES, |_| Ok(())), Err(Error::StageChanged)));
+    std::fs::remove_file(&alias).unwrap();
+    std::fs::set_permissions(&bytes, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&bytes, b"changed bytes").unwrap();
+    std::fs::set_permissions(&bytes, std::fs::Permissions::from_mode(0o400)).unwrap();
+    assert!(VerifiedStageBinding::verify_ready(&owner, id, fs::MAX_BYTES, |_| Ok(())).is_err());
+    drop(owner);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn core_stage_proof_keeps_actual_lease_after_binding_drop_until_all_handles_close() {
+    use ch_core::managed_stage::{Error, VerifiedStageBinding};
+    let (f, app) = Fixture::new(caps()).await;
+    assert_eq!(f.start(&app, "proof-lifetime").await["ok"], true);
+    let ready = f.state(&app, "proof-lifetime", "ready").await;
+    let id = ready["stageId"].as_str().unwrap();
+    let binding = app.core.accounts().storage_binding_for("fixture").await.unwrap();
+    let revoked = binding.revocation();
+    let proof = VerifiedStageBinding::verify_ready(&binding, id, fs::MAX_BYTES, |_| Ok(())).unwrap();
+    drop(binding);
+    let accounts = app.core.accounts().clone();
+    let remove = tokio::spawn(async move { accounts.remove("fixture").await });
+    tokio::time::timeout(Duration::from_secs(5), revoked.cancelled()).await.unwrap();
+    assert!(!remove.is_finished());
+    assert!(matches!(proof.recheck_ready(), Err(Error::TargetChanged)));
+    assert!(app.core.host().config().upload_dir("fixture").join(id).exists());
+    drop(proof);
+    tokio::time::timeout(Duration::from_secs(5), remove).await.unwrap().unwrap().unwrap();
+    assert!(!app.core.host().config().upload_dir("fixture").join(id).exists());
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_stage_verifier_hash_callback_cancellation_and_changed_manifest_never_grant_proof() {
+    use ch_core::managed_stage::{Error, VerifiedStageBinding};
+    let (f, app) = Fixture::new(caps()).await;
+    assert_eq!(f.start(&app, "proof-scope").await["ok"], true);
+    let ready = f.state(&app, "proof-scope", "ready").await;
+    let id = ready["stageId"].as_str().unwrap();
+    let binding = app.core.accounts().storage_binding_for("fixture").await.unwrap();
+    assert!(matches!(VerifiedStageBinding::verify_ready(&binding, id, fs::MAX_BYTES, |n| {
+        if n > 0 { Err(Error::Cancelled) } else { Ok(()) }
+    }), Err(Error::Cancelled)));
+    let manifest = app.core.host().config().upload_dir("fixture").join(id).join("manifest.json");
+    let original = std::fs::read(&manifest).unwrap();
+    let mut value: Value = serde_json::from_slice(&original).unwrap();
+    value["sha256"] = json!("0".repeat(64));
+    std::fs::write(&manifest, value.to_string()).unwrap();
+    assert!(matches!(VerifiedStageBinding::verify_ready(&binding, id, fs::MAX_BYTES, |_| Ok(())), Err(Error::StageChanged)));
+    value = serde_json::from_slice(&original).unwrap();
+    value["scope"]["account"] = json!("foreign");
+    std::fs::write(&manifest, value.to_string()).unwrap();
+    assert!(matches!(VerifiedStageBinding::verify_ready(&binding, id, fs::MAX_BYTES, |_| Ok(())), Err(Error::Integrity)));
+    value["scope"]["account"] = json!("fixture");
+    value["phase"] = json!({"consumed":{"caption":"","as_file":false,"spoiler":false}});
+    std::fs::write(&manifest, value.to_string()).unwrap();
+    assert!(matches!(VerifiedStageBinding::verify_ready(&binding, id, fs::MAX_BYTES, |_| Ok(())), Err(Error::Integrity)));
+    drop(binding);
+    app.shutdown().await;
+}
 impl Fixture {
     async fn new(caps: Value) -> (Self, App) {
         let root = tempfile::tempdir().unwrap();

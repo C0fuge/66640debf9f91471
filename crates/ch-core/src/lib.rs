@@ -7,3 +7,6 @@ pub mod outbox;
 pub mod runtime;
 pub mod search;
 pub mod secrets;
+
+#[cfg(target_os = "linux")]
+pub mod managed_stage;

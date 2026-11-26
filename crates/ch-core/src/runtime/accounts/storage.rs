@@ -118,6 +118,29 @@ pub(super) fn exclusive(
     }
     Ok(true)
 }
+/// Exact persisted owner and published storage generation, issued only by Accounts.
+/// It owns a read lease through actual bounded filesystem work; it is not Clone.
+///
+/// ```compile_fail
+/// use ch_core::runtime::AccountStorageBinding;
+/// let fabricated = AccountStorageBinding {};
+/// ```
+pub struct AccountStorageBinding {
+    owner: AccountRow,
+    root: PathBuf,
+    gate: Arc<Gate>,
+    guard: Arc<OwnedRwLockReadGuard<()>>,
+}
+impl AccountStorageBinding {
+    pub fn owner(&self) -> &AccountRow { &self.owner }
+    pub fn revocation(&self) -> CancellationToken { self.gate.token.clone() }
+    pub fn is_revoked(&self) -> bool { self.gate.token.is_cancelled() }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn uploads(&self) -> PathBuf { self.root.join("uploads") }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn retain_guard(&self) -> Arc<OwnedRwLockReadGuard<()>> { self.guard.clone() }
+}
+
 impl Accounts {
     /// Pin a persisted account's configured storage against destructive teardown.
     /// The token revokes queued work. Retain the guard through actual I/O settlement.
@@ -164,6 +187,19 @@ impl Accounts {
         &self,
         account_id: &str,
     ) -> Result<(AccountRow, CancellationToken, OwnedRwLockReadGuard<()>)> {
+        let (owner, _, gate, guard) = self.capture_storage(account_id).await?;
+        Ok((owner, gate.token.clone(), guard))
+    }
+
+    /// Accounts-owned nonforgeable scope for the managed-stage verifier.
+    pub async fn storage_binding_for(&self, account_id: &str) -> Result<AccountStorageBinding> {
+        let (owner, root, gate, guard) = self.capture_storage(account_id).await?;
+        Ok(AccountStorageBinding { owner, root, gate, guard: Arc::new(guard) })
+    }
+
+    async fn capture_storage(
+        &self, account_id: &str,
+    ) -> Result<(AccountRow, PathBuf, Arc<Gate>, OwnedRwLockReadGuard<()>)> {
         let id = account_id.to_owned();
         let inner = self.0.clone();
         let (owner, root, gate) = self.db(move |db| {
@@ -191,7 +227,7 @@ impl Accounts {
         if gate.token.is_cancelled() || !self.0.storage.current(&root, &gate) {
             return Err(unknown(&owner.account_id));
         }
-        Ok((owner, gate.token.clone(), guard))
+        Ok((owner, root, gate, guard))
     }
 
     // Called with the lifecycle and membership guards and the revoked storage writer.
@@ -244,6 +280,15 @@ mod capture_tests {
 
     #[tokio::test(flavor="multi_thread", worker_threads=4)]
     async fn captured_gate_cannot_follow_same_id_recreation_with_identical_owner_metadata() {
+        assert_same_metadata_recreation(false).await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=4)]
+    async fn opaque_stage_binding_cannot_follow_same_metadata_recreation() {
+        assert_same_metadata_recreation(true).await;
+    }
+
+    async fn assert_same_metadata_recreation(opaque: bool) {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("plugins/fixture");
         std::fs::create_dir_all(&dir).unwrap();
@@ -259,7 +304,10 @@ mod capture_tests {
             signal.notify_one();let mut released=latch.0.lock().unwrap();while !*released {released=latch.1.wait(released).unwrap();}
         }));
         let accounts=core.accounts().clone();
-        let pending=tokio::spawn(async move{accounts.storage_lease_for("owner").await});
+        let pending=tokio::spawn(async move {
+            if opaque { accounts.storage_binding_for("owner").await.map(|_| ()) }
+            else { accounts.storage_lease_for("owner").await.map(|_| ()) }
+        });
         tokio::time::timeout(std::time::Duration::from_secs(5),arrived.notified()).await.unwrap();
         core.accounts().remove("owner").await.unwrap();
         core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
