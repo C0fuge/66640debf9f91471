@@ -153,7 +153,7 @@ def test_invalid_or_foreign_batches_never_become_partial_success(kind):
         rows = [sample]
         if kind == "duplicate": rows.append(sample)
         elif kind == "oversized": rows.extend([incoming(3), incoming(4)])
-        elif kind == "empty": rows = [tl.MessageEmpty(2)]
+        elif kind == "empty": rows = [tl.MessageEmpty(id=2, peer_id=None)]
         result = tl.messages.MessagesNotModified(2) if kind == "not-modified" else tl.messages.Messages(rows, [], [], [])
         value, _ = client([result])
         with pytest.raises(rpc.Internal):
