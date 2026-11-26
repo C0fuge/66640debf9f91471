@@ -383,9 +383,12 @@ mod tests {
             "file:///tmp/a%", "file:///tmp/a%GG", "file:///tmp/a\\b", "file://localhost/tmp/a",
             "file:///tmp/a\tb", "file:///tmp/a\rb", "file:///tmp/a\nb", "file:///tmp/a ",
             " file:///tmp/a", "file:///tmp/a\u{7f}", "file:///tmp/.\n./private",
-            "file:///C|/a", "file:///C:"] {
+            "file:///C:", "file:///tmp/aC%3A"] {
             assert!(selected_open_path(&[uri.into()]).is_err(), "{uri}");
         }
+        // A drive-shaped directory is an ordinary Linux name if decoding keeps
+        // every byte; reject reinterpretation, not an unchanged harmless name.
+        assert_eq!(selected_open_path(&["file:///C|/a".into()]).unwrap(), PathBuf::from("/C|/a"));
         assert!(selected_open_path(&[]).is_err());
         assert!(selected_open_path(&["file:///tmp/a".into(), "file:///tmp/b".into()]).is_err());
         let results = HashMap::from([("uris", Value::new(vec!["file:///tmp/%2e%2e/private".to_owned()]))]);
