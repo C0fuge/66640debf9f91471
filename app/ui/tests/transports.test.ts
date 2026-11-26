@@ -201,3 +201,11 @@ test("a malformed uncertainty marker cannot turn a lost file mutation into a set
   await assert.rejects(client.startFileSelection({ thread: { accountId: "a", chatId: "c", topicId: null }, sessionId: "1".repeat(32), requestKey: "selection" }),
     { code: "unavailable", outcomeUnknown: true });
 });
+
+test("chat flag transport loss classifies the setter as uncertain and refresh as an ordinary read", async () => {
+  const client = createNativeClient(async () => { throw new Error("fixture transport closed"); });
+  const thread = { accountId: "Alpha", chatId: "same", topicId: null };
+  await assert.rejects(client.setChatFlag({ thread, sessionId: "run", contextToken: "proof", flag: "markedUnread", value: false }),
+    { code: "unavailable", outcomeUnknown: true });
+  await assert.rejects(client.refreshChatFlags({ thread }), error => (error as { outcomeUnknown?: boolean }).outcomeUnknown === undefined);
+});

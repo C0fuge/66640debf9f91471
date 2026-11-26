@@ -196,6 +196,17 @@ async fn timeouts_cancel_and_progress_reset() {
     h.start_account("tt", "t#1", spec(json!({}))).await.unwrap();
     let timeout = h.config().request_timeout("messages.fetch_recent");
 
+    // "crash" would exit the fixture process if it received this frame.
+    let revoked = CancellationToken::new();
+    revoked.cancel();
+    let wire_id = Arc::new(std::sync::OnceLock::new());
+    let err = h.call_raw_tracked("tt", "messages.fetch_recent",
+        json!({"account_id":"t#1","chat_id":"crash","limit":1}),
+        Some(revoked), Some(wire_id.clone())).await.unwrap_err();
+    assert_eq!(err.error_code(), Some(ErrorCode::Cancelled));
+    assert!(wire_id.get().is_none());
+    assert!(h.plugin_state("tt").unwrap().is_running());
+
     // Never answered: TIMEOUT at the registry timeout, and the plugin stays alive.
     let t = Instant::now();
     let e = fetch(&h, "tt", "t#1", "hang", json!({})).await.unwrap_err();

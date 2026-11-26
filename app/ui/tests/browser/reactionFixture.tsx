@@ -70,6 +70,7 @@ const client: CoreClient = {
   listChats: async ({ accountId }) => [chat(accountId)],
   history: async ({ thread }) => ({ items: records(thread.accountId).map(message => ({ kind: "message" as const, message })), moreOlder: false, moreNewer: false }),
   listOutbox: async () => [],
+  refreshChatFlags: unused, setChatFlag: unused,
   refreshMessageReactions: async params => {
     requests.push(structuredClone({ method: "refreshMessageReactions", params }));
     const absent = absentNext; absentNext = false;

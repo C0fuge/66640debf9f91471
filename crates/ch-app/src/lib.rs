@@ -3,6 +3,7 @@ mod bridge;
 mod actions;
 mod polls;
 mod reactions;
+mod chat_flags;
 mod cache_file;
 mod save_file;
 mod media;
@@ -47,6 +48,7 @@ pub struct App {
     media: Arc<media::MediaJobs>,
     ingress: Arc<ingress::Service>,
     reactions: Arc<reactions::Service>,
+    chat_flags: Arc<chat_flags::Service>,
     history: History,
     search: Search,
     db: Arc<Mutex<ch_db::Db>>,
@@ -184,6 +186,7 @@ impl App {
             ingress,
             media,
             reactions,
+            chat_flags: Arc::new(chat_flags::Service::new()?),
             history,
             outbox,
             search,
@@ -241,6 +244,8 @@ impl App {
             self.ingress.close();
             self.media.close();
             self.reactions.close();
+            self.chat_flags.close();
+            let chat_flags = self.chat_flags.clone();
             let (ingress, outbox, core, reactions) = (self.ingress.clone(), self.outbox.clone(), self.core.clone(), self.reactions.clone());
             let directory = (self._lock.clone(), self._demo.clone());
             // Teardown owns the directory and all drains. Cancelling any waiter
@@ -251,6 +256,7 @@ impl App {
                 outbox.shutdown().await;
                 core.shutdown().await;
                 reactions.drain().await;
+                chat_flags.drain().await;
                 let _ = pump.await;
             }));
         }

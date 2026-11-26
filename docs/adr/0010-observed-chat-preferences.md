@@ -36,3 +36,21 @@ Add one optional core-to-plugin method `chats.get` gated independently by `chat.
 Exercise the actual App with a synthetic SDK plugin and isolated storage through both transports. Verify count 34 to 36, typed operation coverage, true and false on each field, rejected nulls, capability permutations, stopped/disabled and replaced accounts, same chat ID on two accounts, topic and provisional rejection, exact sparse upsert and unrelated state preservation. Simulate competing clicks, mismatched or lost replies, event acknowledgement loss and cancellation before and after dispatch. Assert RPC count, absence of replay and conservative uncertainty. Simulate an empty success without an event and verify the app fabricates no flag.
 
 In Chromium operate the actual virtualized chat list using keyboard and pointer. Exercise pin/unpin and manual mark/clear, counts, hidden/disabled capabilities, duplicate clicks, focus, archived rows, row recycling, reconnect, unknown-state UI and explicit reconciliation. Ensure cached reloads and unrelated updates cannot clear the block. For the targeted read verify exactly one requested target, missing/foreign/partial observations, stale reads, no automatic reads on open and a fresh user action after successful review.
+
+## Accepted application read proof refinement
+
+A chat/account ID can survive removal and recreation. A renderer-only refresh
+marker cannot establish which account run produced the observation. Match the
+existing reaction-context pattern: refreshChatFlags returns {thread, sessionId,
+contextToken, pinned, markedUnread}, with required nullable flag values and a
+nullable token. setChatFlag additionally requires sessionId/contextToken. A
+short-lived one-use server proof binds the exact persisted owner, whole-chat
+row, plugin handshake and running-account token to the actually observed fields.
+Unknown fields cannot authorize writes. Bound contexts to64, lifetime60seconds,
+and owned read/write tasks to4; refuse excess work without an unbounded queue.
+Consume a proof before dispatch, reject old generations and stale replies, and
+never manufacture confirmation from cached row flags. Reuse existing capability,
+lease and transport mechanisms; no database table or generic command interface.
+UI panels require explicit refresh, consume their observation on an attempt and
+keep ambiguous attempts unresolved until a fresh exact observation. No automatic
+read or write follows panel open, account switch or reconnect.

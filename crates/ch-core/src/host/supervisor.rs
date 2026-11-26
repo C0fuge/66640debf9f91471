@@ -864,6 +864,11 @@ impl Supervisor {
                         self.handle_stop(&conn, account_id, reply);
                     }
                     Some(Command::Call { method, params, cancel, request_id, reply }) => {
+                        // A queued call can outlive the account run that authorized it.
+                        if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
+                            let _ = reply.send(Err(HostError::code(ErrorCode::Cancelled, "request cancelled before dispatch")));
+                            continue;
+                        }
                         let timeout = self.config.request_timeout(&method);
                         let name: &'static str = ch_protocol::method(&method)
                             .map_or("x-vendor", |m| m.name);

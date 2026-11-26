@@ -218,6 +218,8 @@ pub(crate) enum Request {
     DeleteMessages { thread: Thread, message_ids: Vec<String>, revoke: bool },
     PinMessage { thread: Thread, message_id: String, silent: bool },
     UnpinMessage { thread: Thread, message_id: String },
+    RefreshChatFlags { thread: Thread },
+    SetChatFlag { thread: Thread, session_id: String, context_token: String, flag: crate::chat_flags::Flag, value: bool },
     RefreshMessageReactions { thread: Thread, message_id: String },
     SetMessageReactions { thread: Thread, message_id: String, session_id: String, context_token: String, keys: Vec<crate::reactions::Key> },
     ListMessageReactors { thread: Thread, message_id: String, session_id: String, context_token: String,

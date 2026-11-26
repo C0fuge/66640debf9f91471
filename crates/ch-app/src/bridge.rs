@@ -58,6 +58,8 @@ impl App {
             Request::CancelFileSelection {thread,session_id,stage_id}=>self.ingress.cancel(thread,session_id,stage_id).await,
             Request::EnqueueFile {thread,session_id,stage_id,caption,as_file,spoiler}=>self.ingress.send(thread,session_id,stage_id,caption,as_file,spoiler).await,
             Request::Inventory {} => self.inventory().await,
+            Request::RefreshChatFlags { thread } => self.chat_flags(thread, None).await,
+            Request::SetChatFlag { thread, session_id, context_token, flag, value } => self.chat_flags(thread, Some(crate::chat_flags::Set { session:session_id, token:context_token, flag, value })).await,
             Request::RefreshMessageReactions { thread, message_id } => self.reaction_operation(thread,message_id,crate::reactions::Operation::Refresh).await,
             Request::SetMessageReactions { thread, message_id, session_id, context_token, keys } => self.reaction_operation(thread,message_id,crate::reactions::Operation::Set{session:session_id,context:context_token,keys}).await,
             Request::ListMessageReactors { thread, message_id, session_id, context_token, key, cursor } => self.reaction_operation(thread,message_id,crate::reactions::Operation::Who{session:session_id,context:context_token,key,cursor}).await,

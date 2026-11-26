@@ -80,9 +80,9 @@ impl App {
 
 pub(crate) fn chat(c: ConversationRow) -> Value {
     json!({"thread":Thread{account_id:c.account_id,chat_id:c.chat_id,topic_id:None},
-        "title":c.title,"kind":c.kind,"archived":c.archived,"pinned":c.pinned.unwrap_or(false),
+        "title":c.title,"kind":c.kind,"archived":c.archived,"pinned":c.pinned,
         "muted":c.muted,"canPost":c.can_post,"unreadCount":c.unread_count.clamp(0,JS_MAX as i64),
-        "markedUnread":c.marked_unread.unwrap_or(false),"lastMessageAt":c.last_message_at.map(|t|t.to_string()),
+        "markedUnread":c.marked_unread,"lastMessageAt":c.last_message_at.map(|t|t.to_string()),
         "lastMessagePreview":c.last_message_preview,"lastMessageKind":c.last_message_kind})
 }
 

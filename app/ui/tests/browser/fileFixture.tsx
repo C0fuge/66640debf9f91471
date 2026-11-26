@@ -64,6 +64,7 @@ const client: CoreClient = {
   },
   retryOutbox: unused, cancelOutbox: unused,
   fillGap: unused, enqueueText: unused, editText: unused, deleteMessages: unused, pinMessage: unused, unpinMessage: unused,
+  refreshChatFlags: unused, setChatFlag: unused,
   votePoll: unused, closePoll: unused, refreshPoll: unused, refreshMessageReactions: unused, setMessageReactions: unused, listMessageReactors: unused,
   startMediaDownload: unused, startMediaSave: unused, listMediaJobs: unused, cancelMediaJob: unused, search: unused,
   addAccount: unused, getSettings: unused, saveSettings: unused, getAuthStep: unused, beginAuth: unused, submitAuth: unused, cancelAuth: unused,

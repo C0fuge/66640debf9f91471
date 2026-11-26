@@ -48,6 +48,7 @@ const client: CoreClient = {
   listFileStages: async () => ({ sessionId: "0".repeat(32), items: [], nextCursor: null, remainingRequestKeys: 4096 }),
   cancelFileSelection: async () => { throw { code: "unsupported" }; },
   enqueueFile: async () => { throw { code: "unsupported" }; },
+  refreshChatFlags: unused, setChatFlag: unused,
   refreshMessageReactions: unused, setMessageReactions: unused, listMessageReactors: unused,
   startMediaDownload: unused, startMediaSave: unused, cancelMediaJob: unused,
   listMediaJobs: async () => ({ sessionId: "fixture-session", jobs: [], nextCursor: null, remainingRequestKeys: 4096 }),

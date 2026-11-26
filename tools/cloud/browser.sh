@@ -17,3 +17,4 @@ node tests/browser/polls.mjs
 node tests/browser/media-jobs.mjs
 node tests/browser/reactions.mjs
 node tests/browser/files.mjs
+node tests/browser/chatFlags.mjs

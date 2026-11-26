@@ -102,11 +102,11 @@ export interface ChatSummary {
   title: string | null;
   kind: string;
   archived: boolean;
-  pinned: boolean;
+  pinned: boolean | null;
   muted: boolean | null;
   canPost: boolean | null;
   unreadCount: number;
-  markedUnread: boolean;
+  markedUnread: boolean | null;
   lastMessageAt: Millis | null;
   lastMessagePreview: string | null;
   lastMessageKind: string | null;
@@ -257,7 +257,17 @@ type InThread = { thread: ThreadKey };
 type OutboxTarget = InThread & { id: string };
 type AuthFlow = Account & { flow: string };
 
+export type ChatFlag = "pinned" | "markedUnread";
+export interface ChatFlagContext extends InThread {
+  sessionId: string;
+  contextToken: string | null;
+  pinned: boolean | null;
+  markedUnread: boolean | null;
+}
+
 export interface CoreOperations {
+  refreshChatFlags(params: InThread): Promise<ChatFlagContext>;
+  setChatFlag(params: InThread & { sessionId: string; contextToken: string; flag: ChatFlag; value: boolean }): Promise<null>;
   inventory(params: Record<string, never>): Promise<Inventory>;
   listChats(params: Account & { archived: boolean | null }): Promise<ChatSummary[]>;
   history(params: InThread & { window: HistoryWindow; limit: number }): Promise<HistoryPage>;

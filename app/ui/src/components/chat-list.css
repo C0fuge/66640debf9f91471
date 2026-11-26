@@ -38,3 +38,11 @@
 .unread { padding: 1px 6px; min-width: 18px; border-radius: 10px; background: #415850; color: #def2eb; font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
 .unread.is-muted { color: #cfd3d6; background: #40464c; }
 .unread.dot { min-width: 0; width: 8px; height: 8px; padding: 0; border: 1px solid currentColor; }
+.chat-list li:has(.chat-menu-button) { display: flex; align-items: center; }
+.chat-list li:has(.chat-menu-button) .chat-row { flex: 1; min-width: 0; }
+.chat-menu-button { display: grid; place-items: center; width: 30px; min-height: 36px; background: transparent; border: 0; color: var(--muted); }
+.chat-menu-button:hover, .chat-menu-button[aria-expanded="true"] { color: var(--accent); }
+.chat-flags-panel { padding: 12px; border-top: 1px solid var(--border); }
+.chat-flags-panel strong { display: block; margin-bottom: 8px; }
+.chat-flags-panel > button:first-child { float: right; }
+.chat-flags-panel div { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-top: 8px; }

@@ -237,7 +237,7 @@ async fn dispatch_frames<F: Future<Output = Value> + Send + 'static>(
                     Some(Ok(Message::Text(data)))=>{
                         let frame:Envelope=serde_json::from_str(&data)?;
                         if frame.id.is_empty() || frame.id.len()>128 || active.len()>=16 || !active.insert(frame.id.clone()){break;}
-                        let mutation = matches!(frame.request["method"].as_str(), Some("editText" | "deleteMessages" | "pinMessage" | "unpinMessage" | "votePoll" | "closePoll" | "setMessageReactions" | "startMediaDownload" | "startMediaSave" | "cancelMediaJob" | "startFileSelection" | "cancelFileSelection" | "enqueueFile"));
+                        let mutation = matches!(frame.request["method"].as_str(), Some("editText" | "deleteMessages" | "pinMessage" | "unpinMessage" | "votePoll" | "closePoll" | "setChatFlag" | "setMessageReactions" | "startMediaDownload" | "startMediaSave" | "cancelMediaJob" | "startFileSelection" | "cancelFileSelection" | "enqueueFile"));
                         if let Some(task)=operations.start(dispatch(frame.request)){
                             pending.push(async move {
                                 let reply=task.await.unwrap_or_else(|_| {
@@ -294,7 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_mutation_finishes_after_socket_disconnect() {
-        for method in ["enqueueText", "editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll", "setMessageReactions", "startMediaDownload", "startMediaSave", "cancelMediaJob", "startFileSelection", "cancelFileSelection", "enqueueFile"] {
+        for method in ["enqueueText", "editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll", "setChatFlag", "setMessageReactions", "startMediaDownload", "startMediaSave", "cancelMediaJob", "startFileSelection", "cancelFileSelection", "enqueueFile"] {
             disconnected_mutation(method).await;
         }
     }
@@ -362,7 +362,7 @@ mod tests {
         async fn fail(_: Value) -> Value {
             panic!("synthetic worker failure")
         }
-        for method in ["editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll", "setMessageReactions", "startMediaDownload", "startMediaSave", "cancelMediaJob", "startFileSelection", "cancelFileSelection", "enqueueFile", "listMediaJobs", "listFileStages", "refreshMessageReactions", "listMessageReactors", "refreshPoll", "inventory"] {
+        for method in ["editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll", "setChatFlag", "setMessageReactions", "startMediaDownload", "startMediaSave", "cancelMediaJob", "startFileSelection", "cancelFileSelection", "enqueueFile", "listMediaJobs", "listFileStages", "refreshChatFlags", "refreshMessageReactions", "listMessageReactors", "refreshPoll", "inventory"] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let (events, rx) = tokio::sync::broadcast::channel(1);
@@ -376,7 +376,7 @@ mod tests {
             let frame = timeout(Duration::from_secs(2), client.next()).await.unwrap().unwrap().unwrap();
             let reply: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
             assert_eq!(reply["reply"]["error"]["code"], "internal");
-            assert_eq!(reply["reply"]["error"]["outcomeUnknown"] == true, !matches!(method, "inventory" | "refreshPoll" | "listMediaJobs" | "listFileStages" | "refreshMessageReactions" | "listMessageReactors"));
+            assert_eq!(reply["reply"]["error"]["outcomeUnknown"] == true, !matches!(method, "inventory" | "refreshPoll" | "listMediaJobs" | "listFileStages" | "refreshChatFlags" | "refreshMessageReactions" | "listMessageReactors"));
             client.close(None).await.unwrap();
             timeout(Duration::from_secs(2), peer).await.unwrap().unwrap();
             drop(events);

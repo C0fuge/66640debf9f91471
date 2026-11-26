@@ -24,6 +24,14 @@ DTO member names use camelCase. Required nullable members are present with JSON 
 - `CoreChange` is an invalidation. Subscribe before initial reads. Inventory events invalidate inventory. Account events invalidate that account's inventory row, auth, settings, chats, visible history, search and outbox. Reset invalidates every active snapshot. The bridge watches both the core bus and outbox subscription. Unknown scope or receiver lag on either stream produces reset. A reconnect also emits reset after the new listener is installed. Group redundant invalidations, discard stale responses when the selection changes, and re-read once more if a change arrived during a read. A notification causes a cached latest read, never an automatic platform refresh. Other visible history windows may be discarded and reopened at latest on reset. Separate calls have no shared transaction.
 - Run synchronous DB, outbox and search work off UI threads. Chat rows, search hits and outbox items come from the core. The UI never generates demo records or speculative echo rows.
 
+## Whole-chat preferences
+
+`listChats` exposes required nullable `pinned` and `markedUnread` values. Null means the core has no stored observation. The unread count remains independent of the manual mark.
+
+- `refreshChatFlags({thread})` requests one exact whole chat from the current account run. It requires `chat.get`. A successful result contains `{thread, sessionId, contextToken, pinned, markedUnread}`. The two flags are nullable observations from that response. Missing fields preserve stored values and return null. A null token means neither field was observed.
+- `setChatFlag({thread, sessionId, contextToken, flag, value})` accepts `pinned` or `markedUnread` and a boolean. The context authorizes only freshly observed fields on the same row and run. The setter requires `chat.flags` and the matching `chat.pin` or `chat.mark_unread` capability. An acknowledged result resolves to null. A committed plugin event or explicit targeted refresh supplies display evidence.
+- A review supersedes the previous proof for the same thread. Proofs expire after 60 seconds and authorize a single attempt. At most 64 proofs and four concurrent operations are admitted. Request a new review explicitly after reconnect, a new panel, or an ambiguous write. A lost acknowledgement can leave the platform outcome unknown. Never retry the write automatically.
+
 ## Attachment metadata view
 
 ADR 0005 adds optional `Message.attachment: Attachment | null` alongside the existing

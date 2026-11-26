@@ -322,6 +322,7 @@ class FakePlugin(Plugin):
         "drafts.sync": True,
         "topics": True,
         "chat.sync": True,
+        "chat.get": True,
         "chat.flags": True,
         "chat.pin": True,
         "chat.mute": True,
@@ -990,6 +991,12 @@ class FakePlugin(Plugin):
     async def chats_sync(self, account, st: State, p: T.ChatsSyncParams):
         await self._sync(account, st, include_archived=p.include_archived is not False)
         return {}
+
+    @rpc("chats.get")
+    async def get_chat(self, account, st: State, p: T.ChatsGetParams):
+        conv = st.chat(p.chat_id).conv
+        return T.ChatsGetResult(conversation=T.Conversation(
+            id=conv.id, kind=conv.kind, pinned=bool(conv.pinned), marked_unread=bool(conv.marked_unread)))
 
     @rpc("chats.set_flags")
     async def set_flags(self, account, st: State, p: T.ChatsSetFlagsParams):

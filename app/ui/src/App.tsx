@@ -107,7 +107,7 @@ export function App({ client, missingToken = false }: { client: CoreClient; miss
           {!missingToken && <button onClick={retry}>Retry</button>}</div>}
         {!inventory && !error ? <div className="pane-message" role="status">Loading accounts…</div>
           : inventory && !inventory.accounts.length ? <div className="pane-message"><PanelsTopLeft /><p>No accounts configured</p></div>
-          : <ChatListPane client={client} accountId={accountId} selectedThread={chat?.thread ?? null}
+          : <ChatListPane account={error ? null : account} plugin={platform} client={client} accountId={accountId} selectedThread={chat?.thread ?? null}
               accountName={account?.label || accountId || undefined} platformName={platform?.name} platformColor={pluginColor(platform?.brandColor)}
               onSnapshot={reconcile} onSelectChat={selectChat} />}
       </div>
