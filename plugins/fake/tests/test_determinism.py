@@ -131,6 +131,8 @@ def session(core: FakeCore, upload: Path) -> None:
     core.call("chats.set_flags", {**A, "chat_id": "c6", "pinned": True, "muted": True,
                                     "mute_until": "2026-02-01T00:00:00.000Z", "archived": False,
                                     "marked_unread": True})
+    observed = core.call("chats.get", {**A, "chat_id": "c6"})["conversation"]
+    assert observed == {"id": "c6", "kind": "group", "pinned": True, "marked_unread": True}
     core.call("topics.list", {**A, "chat_id": "c4"})
     core.call("folders.list", A)
     core.call("members.list", {**A, "chat_id": "c2", "limit": 3})

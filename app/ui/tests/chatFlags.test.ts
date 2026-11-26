@@ -61,3 +61,24 @@ test("late reads and malformed acknowledgements grant no further authority", asy
   assert.equal(session.attempt("pinned"), "unknown");
   assert.equal(session.state().context, null);
 });
+
+test("unresolved attempts have bounded admission and exact refresh frees capacity without eviction", async () => {
+  let writes = 0;
+  const client = core({
+    refreshChatFlags: async ({ thread }) => read({ thread }),
+    setChatFlag: async () => { writes++; throw { code: "unavailable", outcomeUnknown: true }; },
+  });
+  const sessions = Array.from({ length: 65 }, (_, i) =>
+    flagSession(client, "fixture", { ...thread, chatId: String(i) }, allowed));
+  for (const session of sessions) { await session.refresh(); await session.set("pinned", true); }
+  assert.equal(writes, 64);
+  assert.equal(sessions[64].state().capacityBlocked, true);
+  for (const session of sessions.slice(0, 64)) assert.equal(session.attempt("pinned"), "unknown");
+  assert.equal(sessions[64].attempt("pinned"), undefined);
+  await sessions[0].refresh();
+  assert.equal(sessions[0].attempt("pinned"), undefined);
+  assert.equal(sessions[64].state().capacityBlocked, false);
+  await sessions[64].set("pinned", true);
+  assert.equal(writes, 65);
+  assert.equal(sessions[64].attempt("pinned"), "unknown");
+});

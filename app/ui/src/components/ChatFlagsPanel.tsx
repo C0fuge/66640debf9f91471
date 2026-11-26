@@ -17,7 +17,7 @@ export function ChatFlagsPanel({ client, row, account, plugin, close }: {
   useLayoutEffect(() => { session.invalidate(); render(); return () => session.invalidate(); },
     [session, allowed.refresh, allowed.pinned, allowed.markedUnread]);
   const run = (work: Promise<void>) => { render(); void work.finally(render); };
-  const { context, busy, message } = session.state();
+  const { context, busy, message, capacityBlocked } = session.state();
   return <section className="chat-flags-panel" role="dialog" aria-label={`Chat preferences for ${row.title || chatId}`}
     onKeyDown={e => { if (e.key === "Escape") close(); }}>
     <button type="button" ref={closeButton} onClick={close}>Close</button>
@@ -29,10 +29,10 @@ export function ChatFlagsPanel({ client, row, account, plugin, close }: {
       const name = flag === "pinned" ? "Pinned" : "Manual unread";
       return <div key={flag}><span>{name} · {attempt === "unknown" ? "Outcome unknown" : attempt === "pending" ? "Pending" :
         observed == null ? "Unknown" : observed ? "Yes" : "No"}</span>
-        {typeof observed === "boolean" && <button type="button" disabled={!allowed[flag] || !context?.contextToken || busy || !!attempt}
+        {typeof observed === "boolean" && <button type="button" disabled={!allowed[flag] || !context?.contextToken || busy || !!attempt || capacityBlocked}
           onClick={() => run(session.set(flag, !observed))}>{flag === "pinned" ? observed ? "Unpin chat" : "Pin chat" :
             observed ? "Clear unread mark" : "Mark as unread"}</button>}</div>;
     })}
-    {message && <p role="status">{message}</p>}
+    {(message || capacityBlocked) && <p role="status">{message || "Refresh unresolved flags before changing another chat."}</p>}
   </section>;
 }

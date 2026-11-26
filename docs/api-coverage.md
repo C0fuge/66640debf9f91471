@@ -14,7 +14,7 @@ by account and platform.
    CoreClient operation, UI and tests. A library method or declared capability
    alone does not establish completed product support.
 
-The current plugin contract has 121 methods: 119 core-to-plugin operations and
+The current plugin contract has 122 methods: 120 core-to-plugin operations and
 two plugin-to-core secret-store operations. It also has 18 event names. These
 counts describe the contract, not platform implementation coverage.
 

@@ -22,6 +22,7 @@ function matches(value: unknown, target: ThreadKey): value is ChatFlagContext {
 }
 
 type Attempt = { state: "pending" | "unknown" };
+const maxAttempts = 64;
 const ledgers = new WeakMap<CoreClient, Map<string, Attempt>>();
 export function flagSession(client: CoreClient, pluginId: string, thread: ThreadKey, permissions: () => ReturnType<typeof flagPermissions>) {
   const ledger = ledgers.get(client) ?? new Map<string, Attempt>();
@@ -33,7 +34,7 @@ export function flagSession(client: CoreClient, pluginId: string, thread: Thread
   let message = "";
   let activeAttempt: Attempt | null = null;
   return {
-    state: () => ({ context, busy, message }),
+    state: () => ({ context, busy, message, capacityBlocked: ledger.size >= maxAttempts }),
     attempt: (flag: ChatFlag) => ledger.get(key(flag))?.state,
     invalidate() {
       generation++;
@@ -63,7 +64,7 @@ export function flagSession(client: CoreClient, pluginId: string, thread: Thread
     },
     async set(flag: ChatFlag, value: boolean) {
       if (!chatFlags.includes(flag) || busy || !permissions()[flag] || !context?.contextToken ||
-        typeof context[flag] !== "boolean" || value !== !context[flag] || ledger.has(key(flag))) return;
+        typeof context[flag] !== "boolean" || value !== !context[flag] || ledger.has(key(flag)) || ledger.size >= maxAttempts) return;
       const { sessionId, contextToken } = context;
       context = null;
       busy = true;

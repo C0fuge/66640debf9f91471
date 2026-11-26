@@ -62,6 +62,22 @@ try {
   await control("Close").click(); await button("Archive").click();
   await menu("Beta", 100).click(); await refresh(); await control("Pin chat").waitFor();
   await snap("chat-flags-archive.png");
+  await page.setViewportSize({ width: 390, height: 740 });
+  const mobile = await dialog.evaluate(panel => {
+    const rect = panel.getBoundingClientRect();
+    const scroller = panel.closest(".chat-pane").querySelector(".chat-scroll").getBoundingClientRect();
+    return {
+      visible: rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
+      controlsFit: [...panel.querySelectorAll("button")].every(button => {
+        const bounds = button.getBoundingClientRect();
+        return bounds.left >= rect.left && bounds.right <= rect.right && bounds.top >= rect.top && bounds.bottom <= rect.bottom;
+      }),
+      chatListFits: scroller.height > 0 && scroller.bottom <= rect.top,
+      noPageOverflow: document.documentElement.scrollWidth <= innerWidth,
+    };
+  });
+  assert.deepEqual(mobile, { visible: true, controlsFit: true, chatListFits: true, noPageOverflow: true });
+  await snap("chat-flags-mobile.png");
   assert.equal((await requests()).filter(r => r.method === "setChatFlag").length, 5);
   assert.deepEqual(errors, []);
   console.log("Whole-chat preference controls passed Chromium checks.");

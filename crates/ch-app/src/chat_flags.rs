@@ -381,3 +381,7 @@ async fn operate(
     target.live(core)?;
     svc.review(target.clone(), pinned, marked_unread)
 }
+
+#[cfg(test)]
+#[path = "chat_flags_tests.rs"]
+mod tests;
