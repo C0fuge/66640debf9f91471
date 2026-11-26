@@ -62,51 +62,53 @@ impl Ingest {
     /// Insert the local echo of a message about to be sent (`delivery: sending`). Returns the
     /// message rowid. Calling it again for the same `client_id` returns the existing row.
     pub fn apply_local_echo(&self, account_id: &str, echo: &LocalEcho) -> Result<(Applied, i64)> {
-        self.apply_local_echo_with(account_id, echo, |_, id| Ok(id))
+        let tx = self.db.transaction()?;
+        let result = self.apply_local_echo_in(&tx, account_id, echo)?;
+        tx.commit()?;
+        Ok(result)
     }
 
-    /// Commit an outbox write together with its local echo. The callback also runs when
-    /// this client id already has a local echo, so callers can verify the matching intent.
-    pub(crate) fn apply_local_echo_with<T>(
+    /// Add an echo inside the caller's write transaction, after any admission checks.
+    pub(crate) fn apply_local_echo_in(
         &self,
+        conn: &rusqlite::Transaction<'_>,
         account_id: &str,
         echo: &LocalEcho,
-        finish: impl FnOnce(&Connection, i64) -> Result<T>,
-    ) -> Result<(Applied, T)> {
-        self.local_tx(account_id, "local.echo", |conn, out, now| {
-            self.require_account(conn, account_id)?;
-            let (conv_id, _) = self.conversation_or_stub(conn, account_id, &echo.chat_id, now)?;
-            let key = format!("local:{}", echo.client_id);
-            if let Some(row) = ch_db::get_message(conn, conv_id, &key)? {
-                return finish(conn, row.id);
-            }
-            let row = MessageRow {
-                conversation_id: conv_id,
-                message_id: key.clone(),
-                topic_id: echo.topic_id.clone(),
-                direction: "out".into(),
-                sent_at: echo.scheduled_at.map(ch_db::ts_to_millis).unwrap_or(now),
-                sender_id: echo.sender_id.clone(),
-                sender_name: echo.sender_name.clone(),
-                text: echo.text.clone(),
-                entities: echo.entities.clone(),
-                media: echo.media.clone(),
-                reply_to: echo.reply_to.clone(),
-                delivery: Some("sending".into()),
-                is_scheduled: echo.scheduled_at.is_some(),
-                created_at: now,
-                updated_at: now,
-                ..Default::default()
-            };
-            let id = ch_db::insert_message(conn, &row)?;
-            self.bump_preview(conn, conv_id, &MessageRow { id, ..row })?;
-            out.push(Change::MessagesUpserted {
-                chat_id: echo.chat_id.clone(),
-                created: vec![key],
-                updated: vec![],
-            });
-            finish(conn, id)
-        })
+    ) -> Result<(Applied, i64)> {
+        let now = now_millis();
+        let mut out = Applied::new(account_id, "local.echo");
+        self.require_account(conn, account_id)?;
+        let (conv_id, _) = self.conversation_or_stub(conn, account_id, &echo.chat_id, now)?;
+        let key = format!("local:{}", echo.client_id);
+        if let Some(row) = ch_db::get_message(conn, conv_id, &key)? {
+            return Ok((out, row.id));
+        }
+        let row = MessageRow {
+            conversation_id: conv_id,
+            message_id: key.clone(),
+            topic_id: echo.topic_id.clone(),
+            direction: "out".into(),
+            sent_at: echo.scheduled_at.map(ch_db::ts_to_millis).unwrap_or(now),
+            sender_id: echo.sender_id.clone(),
+            sender_name: echo.sender_name.clone(),
+            text: echo.text.clone(),
+            entities: echo.entities.clone(),
+            media: echo.media.clone(),
+            reply_to: echo.reply_to.clone(),
+            delivery: Some("sending".into()),
+            is_scheduled: echo.scheduled_at.is_some(),
+            created_at: now,
+            updated_at: now,
+            ..Default::default()
+        };
+        let id = ch_db::insert_message(conn, &row)?;
+        self.bump_preview(conn, conv_id, &MessageRow { id, ..row })?;
+        out.push(Change::MessagesUpserted {
+            chat_id: echo.chat_id.clone(),
+            created: vec![key],
+            updated: vec![],
+        });
+        Ok((out, id))
     }
 
     /// A `messages.send` / `send_file` / `send_album` / `forward` succeeded: adopt the local echo

@@ -3,7 +3,7 @@
 //! Request subscription/response semantics follow the first-party portal specifications:
 //! https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html
 //! https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.FileChooser.html
-use ch_app::{SaveDialog, SaveDialogCallback, SaveDialogError};
+use ch_app::{OpenFileDialog, SaveDialog, SaveDialogCallback, SaveDialogError};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -20,6 +20,9 @@ use zbus::{
 const PORTAL: &str = "org.freedesktop.portal.Desktop";
 const DESKTOP: &str = "/org/freedesktop/portal/desktop";
 const REQUEST: &str = "org.freedesktop.portal.Request";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DialogKind { Save, Open }
 
 #[derive(Default)]
 pub(crate) struct PortalSaveDialog {
@@ -50,6 +53,18 @@ impl Completion {
 
 impl SaveDialog for PortalSaveDialog {
     fn choose(&self, suggested_name: String, callback: SaveDialogCallback) {
+        self.start(DialogKind::Save, Some(suggested_name), callback);
+    }
+}
+
+impl OpenFileDialog for PortalSaveDialog {
+    fn choose_open(&self, callback: SaveDialogCallback) {
+        self.start(DialogKind::Open, None, callback);
+    }
+}
+
+impl PortalSaveDialog {
+    fn start(&self, kind: DialogKind, suggested_name: Option<String>, callback: SaveDialogCallback) {
         if self
             .busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -64,10 +79,10 @@ impl SaveDialog for PortalSaveDialog {
         });
         let worker = completion.clone();
         if std::thread::Builder::new()
-            .name("save-portal".into())
+            .name("file-portal".into())
             .spawn(move || {
                 let mut settled = true;
-                let result = choose_portal(&suggested_name, &mut settled);
+                let result = choose_portal(kind, suggested_name.as_deref(), &mut settled);
                 worker.finish(
                     if settled { result } else { Err(SaveDialogError::Uncertain) },
                     settled,
@@ -81,7 +96,8 @@ impl SaveDialog for PortalSaveDialog {
 }
 
 fn choose_portal(
-    suggested_name: &str,
+    kind: DialogKind,
+    suggested_name: Option<&str>,
     settled: &mut bool,
 ) -> Result<Option<PathBuf>, SaveDialogError> {
     let connection = Connection::session().map_err(|error| unavailable_at("session_connection", error))?;
@@ -120,18 +136,28 @@ fn choose_portal(
         "org.freedesktop.portal.FileChooser",
     )
     .map_err(|error| unavailable_at("chooser_proxy", error))?;
-    let name = safe_name(suggested_name);
-    let options = HashMap::from([
+    let name = safe_name(suggested_name.unwrap_or("attachment"));
+    let mut options = HashMap::from([
         ("handle_token", Value::from(token.as_str())),
-        ("current_name", Value::from(name.as_str())),
         ("modal", Value::from(false)),
     ]);
+    let (method, title) = match kind {
+        DialogKind::Save => {
+            options.insert("current_name", Value::from(name.as_str()));
+            ("SaveFile", "Save a new copy")
+        }
+        DialogKind::Open => {
+            options.insert("multiple", Value::from(false));
+            options.insert("directory", Value::from(false));
+            ("OpenFile", "Choose a file")
+        }
+    };
     // From this point a transport error cannot prove the chooser disappeared. Keep
     // the provider reserved for this process in that case; never open a second one.
     *settled = false;
     let handle: OwnedObjectPath = chooser
-        .call("SaveFile", &("", "Save a new copy", options))
-        .map_err(|error| unavailable_at("save_file_reply", error))?;
+        .call(method, &("", title, options))
+        .map_err(|error| unavailable_at("file_dialog_reply", error))?;
     if handle.as_str() != path {
         // The spec permits old portals to return another path, but subscription would
         // race there. We cannot establish ownership of that other handle to Close it.
@@ -148,13 +174,14 @@ fn choose_portal(
     }
     let (response, results): (u32, HashMap<String, OwnedValue>) =
         message.body().deserialize().map_err(|error| unavailable_at("response_body", error))?;
-    decode_response(response, results, settled)
+    decode_response(response, results, settled, kind)
 }
 
 fn decode_response(
     response: u32,
     mut results: HashMap<String, OwnedValue>,
     settled: &mut bool,
+    kind: DialogKind,
 ) -> Result<Option<PathBuf>, SaveDialogError> {
     // A well-formed terminal response settles the native interaction, including an
     // unusable success payload. Unknown response codes do not prove settlement.
@@ -163,7 +190,10 @@ fn decode_response(
             *settled = true;
             let uris = results.remove("uris").ok_or(SaveDialogError::Unavailable)?;
             let uris = Vec::<String>::try_from(uris).map_err(|error| unavailable_at("response_uris", error))?;
-            selected_path(&uris).map(Some)
+            match kind {
+                DialogKind::Save => selected_path(&uris),
+                DialogKind::Open => selected_open_path(&uris),
+            }.map(Some)
         }
         1 => {
             *settled = true;
@@ -197,6 +227,53 @@ fn request_path(sender: &str, token: &str) -> Option<String> {
         return None;
     }
     Some(format!("{DESKTOP}/request/{}/{token}", sender.replace('.', "_")))
+}
+
+fn selected_open_path(uris: &[String]) -> Result<PathBuf, SaveDialogError> {
+    let [uri] = uris else { return Err(SaveDialogError::Unavailable); };
+    if uri.len() > 16_384 || uri.contains('\\')
+        || uri.bytes().any(|byte| byte <= b' ' || byte == 0x7f)
+    {
+        return Err(SaveDialogError::Unavailable);
+    }
+    // URL normalization must not erase traversal or reinterpret an encoded separator.
+    let bytes = uri.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() || !bytes[i + 1].is_ascii_hexdigit() || !bytes[i + 2].is_ascii_hexdigit() {
+                return Err(SaveDialogError::Unavailable);
+            }
+            i += 3;
+        } else { i += 1; }
+    }
+    let literal = uri.to_ascii_lowercase();
+    if ["%00", "%2f", "%5c"].iter().any(|part| literal.contains(part))
+        || literal.replace("%2e", ".").split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return Err(SaveDialogError::Unavailable);
+    }
+    let path = selected_path(uris)?;
+    let raw = uri.split_once(':').and_then(|(_, rest)| rest.strip_prefix("//"))
+        .ok_or(SaveDialogError::Unavailable)?.as_bytes();
+    let hex = |byte: u8| char::from(byte).to_digit(16).map(|n| n as u8)
+        .ok_or(SaveDialogError::Unavailable);
+    let mut expected = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' {
+            let high = *raw.get(i + 1).ok_or(SaveDialogError::Unavailable)?;
+            let low = *raw.get(i + 2).ok_or(SaveDialogError::Unavailable)?;
+            expected.push(hex(high)? * 16 + hex(low)?);
+            i += 3;
+        } else { expected.push(raw[i]); i += 1; }
+    }
+    // On Linux these are the original filesystem bytes. The URL parser must not
+    // trim controls, rewrite a drive-shaped component, or add/remove a separator.
+    if path.as_os_str().as_encoded_bytes() != expected.as_slice() {
+        return Err(SaveDialogError::Unavailable);
+    }
+    Ok(path)
 }
 
 fn selected_path(uris: &[String]) -> Result<PathBuf, SaveDialogError> {
@@ -275,14 +352,14 @@ mod tests {
     fn response_codes_and_malformed_success_never_fabricate_a_path() {
         for response in [0, 1, 2, 99] {
             let mut settled = false;
-            let result = decode_response(response, HashMap::new(), &mut settled);
+            let result = decode_response(response, HashMap::new(), &mut settled, DialogKind::Save);
             assert_eq!(settled, response <= 2);
             if response == 1 { assert!(matches!(result, Ok(None))); }
             else { assert!(result.is_err()); }
         }
         let mut settled = false;
         let results = HashMap::from([("uris".into(), OwnedValue::from(42_u32))]);
-        assert!(decode_response(0, results, &mut settled).is_err());
+        assert!(decode_response(0, results, &mut settled, DialogKind::Save).is_err());
         assert!(settled);
     }
 
@@ -293,8 +370,30 @@ mod tests {
             .unwrap().build(&(0_u32, results)).unwrap();
         let (code, values): (u32, HashMap<String, OwnedValue>) = message.body().deserialize().unwrap();
         let mut settled = false;
-        assert_eq!(decode_response(code, values, &mut settled).unwrap(), Some(PathBuf::from("/synthetic/new-copy")));
+        assert_eq!(decode_response(code, values, &mut settled, DialogKind::Save).unwrap(), Some(PathBuf::from("/synthetic/new-copy")));
         assert!(settled);
+    }
+
+    #[test]
+    fn open_rejects_ambiguity_before_url_normalization() {
+        assert_eq!(selected_open_path(&["file:///tmp/a%20file".into()]).unwrap(), PathBuf::from("/tmp/a file"));
+        assert_eq!(selected_open_path(&["file:///tmp/%20a%20".into()]).unwrap(), PathBuf::from("/tmp/ a "));
+        for uri in ["file:///tmp/../private", "file:///tmp/%2e%2E/private", "file:///tmp/./a",
+            "file:///tmp/%2E/a", "file:///tmp/a%2fb", "file:///tmp/a%5Cb", "file:///tmp/a%00b",
+            "file:///tmp/a%", "file:///tmp/a%GG", "file:///tmp/a\\b", "file://localhost/tmp/a",
+            "file:///tmp/a\tb", "file:///tmp/a\rb", "file:///tmp/a\nb", "file:///tmp/a ",
+            " file:///tmp/a", "file:///tmp/a\u{7f}", "file:///tmp/.\n./private",
+            "file:///C|/a", "file:///C:"] {
+            assert!(selected_open_path(&[uri.into()]).is_err(), "{uri}");
+        }
+        assert!(selected_open_path(&[]).is_err());
+        assert!(selected_open_path(&["file:///tmp/a".into(), "file:///tmp/b".into()]).is_err());
+        let results = HashMap::from([("uris", Value::new(vec!["file:///tmp/%2e%2e/private".to_owned()]))]);
+        let message = zbus::Message::signal("/synthetic/request", REQUEST, "Response").unwrap().build(&(0_u32, results)).unwrap();
+        let (code, values) = message.body().deserialize().unwrap();
+        let mut settled = false;
+        assert!(decode_response(code, values, &mut settled, DialogKind::Open).is_err());
+        assert!(settled, "a malformed path cannot turn a terminal chooser response into an unresolved dialog");
     }
 
     #[test]

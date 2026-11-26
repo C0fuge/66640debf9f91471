@@ -1,6 +1,8 @@
 //! Outbox state machine against a scripted transport on a paused tokio clock: no plugin
 //! process, no real time, every sleep is virtual.
 
+#[path = "outbox/admission.rs"]
+mod admission;
 mod common;
 
 use std::collections::VecDeque;

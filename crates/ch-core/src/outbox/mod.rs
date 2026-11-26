@@ -27,7 +27,7 @@ mod worker;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use ch_db::types::{OutboxRow, outbox_state};
+use ch_db::types::{AccountRow, OutboxRow, outbox_state};
 use ch_db::{Millis, now_millis};
 use ch_protocol::dto::{Media, MediaKind, ReplyRef};
 use ch_protocol::events::{TransferDirection, TransferProgressEvent};
@@ -72,6 +72,9 @@ pub enum OutboxError {
     /// A request that cannot be built (`send_album` with fewer than two items, …).
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    /// The expected owner or retained intent differs. No foreign row is exposed.
+    #[error("outbox admission conflict")]
+    AdmissionConflict,
     /// Database.
     #[error(transparent)]
     Db(#[from] ch_db::Error),
@@ -589,6 +592,40 @@ impl std::fmt::Debug for Outbox {
     }
 }
 
+fn validate_admission_id(id: &str) -> Result<()> {
+    if id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        Ok(())
+    } else {
+        Err(OutboxError::InvalidRequest("invalid local client ID".into()))
+    }
+}
+
+fn matching_admission(
+    tx: &rusqlite::Transaction<'_>,
+    owner: &AccountRow,
+    client_id: &str,
+    request: &OutboxRequest,
+) -> Result<Option<OutboxItem>> {
+    let current = ch_db::get_account(tx, &owner.account_id)?;
+    if !current.is_some_and(|a| a.plugin_id == owner.plugin_id && a.created_at == owner.created_at) {
+        return Err(OutboxError::AdmissionConflict);
+    }
+    let Some(row) = ch_db::get_outbox_by_client_id(tx, client_id)? else {
+        return Ok(None);
+    };
+    let kind = request.kind();
+    if row.account_id != owner.account_id
+        || &row.chat_id != request.chat_id()
+        || row.topic_id.as_ref() != request.topic_id()
+        || row.kind != kind.as_str()
+        || row.method != kind.method()
+        || row.params != request.params(&owner.account_id, client_id)
+    {
+        return Err(OutboxError::AdmissionConflict);
+    }
+    Ok(Some(OutboxItem::from_row(&row)))
+}
+
 impl Outbox {
     /// Build on a shared ingest (the same one the event sink writes through) and a transport
     /// (the [`crate::host::HostHandle`]). Workers start with [`Outbox::start`].
@@ -730,15 +767,72 @@ impl Outbox {
         if self.inner.stopping.is_cancelled() {
             return Err(OutboxError::Stopped);
         }
+        self.enqueue_inner(account_id, None, request, sender)
+    }
+
+    /// Admit a predetermined local client ID, or return its identical retained row.
+    /// After row deletion only the caller's durable claim can prevent reinsertion.
+    /// This ID does not deduplicate file sends at the plugin or platform.
+    pub fn enqueue_with_id(
+        &self,
+        owner: &AccountRow,
+        client_id: &str,
+        request: OutboxRequest,
+        sender: Option<EchoSender>,
+    ) -> Result<OutboxItem> {
+        validate_admission_id(client_id)?;
+        self.enqueue_inner(&owner.account_id, Some((owner, client_id)), request, sender)
+    }
+
+    /// Recover a retained admission under one read snapshot, without scheduling a worker.
+    /// Absence does not establish that a previous admission never committed.
+    pub fn get_matching_admission(
+        &self,
+        owner: &AccountRow,
+        client_id: &str,
+        request: &OutboxRequest,
+    ) -> Result<Option<OutboxItem>> {
+        validate_admission_id(client_id)?;
         request.validate()?;
-        self.inner.plugin_of(account_id)?;
+        let g = self.inner.ingest();
+        let tx = rusqlite::Transaction::new_unchecked(
+            g.db().conn(),
+            rusqlite::TransactionBehavior::Deferred,
+        )
+        .map_err(ch_db::Error::from)?;
+        let item = matching_admission(&tx, owner, client_id, request)?;
+        tx.commit().map_err(ch_db::Error::from)?;
+        Ok(item)
+    }
+
+    fn enqueue_inner(
+        &self,
+        account_id: &str,
+        fixed: Option<(&AccountRow, &str)>,
+        request: OutboxRequest,
+        sender: Option<EchoSender>,
+    ) -> Result<OutboxItem> {
+        request.validate()?;
         let kind = request.kind();
-        let (applied, row) = {
+        let (applied, item) = {
             let g = self.inner.ingest();
-            let conn = g.db().conn();
-            let client_id: String = conn
-                .query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))
-                .map_err(ch_db::Error::from)?;
+            // BEGIN IMMEDIATE reserves the writer across connections before either lookup.
+            let tx = g.db().transaction()?;
+            let client_id: String = if let Some((owner, id)) = fixed {
+                if let Some(item) = matching_admission(&tx, owner, id, &request)? {
+                    return Ok(item);
+                }
+                id.to_owned()
+            } else {
+                if ch_db::get_account(&tx, account_id)?.is_none() {
+                    return Err(OutboxError::UnknownAccount(account_id.to_owned()));
+                }
+                tx.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))
+                    .map_err(ch_db::Error::from)?
+            };
+            if self.inner.stopping.is_cancelled() {
+                return Err(OutboxError::Stopped);
+            }
             let mut row = OutboxRow {
                 account_id: account_id.to_owned(),
                 chat_id: request.chat_id().clone(),
@@ -750,24 +844,45 @@ impl Outbox {
                 created_at: self.inner.now(),
                 ..Default::default()
             };
-            let (applied, id) = if let Some(echo) = request.echo(&client_id, sender.as_ref()) {
-                let (a, id) = g.apply_local_echo_with(account_id, &echo, |conn, echo_id| {
-                    row.echo_message_id = Some(echo_id);
-                    Ok(ch_db::insert_outbox(conn, &row)?)
-                })?;
-                (Some(a), id)
-            } else {
-                (None, ch_db::insert_outbox(conn, &row)?)
+            let mut applied = None;
+            if let Some(echo) = request.echo(&client_id, sender.as_ref()) {
+                let (change, echo_id) = g.apply_local_echo_in(&tx, account_id, &echo)?;
+                row.echo_message_id = Some(echo_id);
+                applied = Some(change);
+            }
+            let id = match ch_db::insert_outbox(&tx, &row) {
+                Ok(id) => id,
+                Err(e) => {
+                    if let Some((owner, id)) = fixed
+                        && matches!(&e, ch_db::Error::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
+                    {
+                        // Discard any speculative echo before comparing the committed winner.
+                        tx.rollback().map_err(ch_db::Error::from)?;
+                        drop(g);
+                        return self.get_matching_admission(owner, id, &request)?.ok_or(e.into());
+                    }
+                    return Err(e.into());
+                }
             };
-            (applied, Inner::row_in(&g, id)?)
+            let stored = ch_db::get_outbox(&tx, id)?.ok_or(OutboxError::NotFound(id))?;
+            tx.commit().map_err(ch_db::Error::from)?;
+            (applied, OutboxItem::from_row(&stored))
         };
-        let item = OutboxItem::from_row(&row);
+
         info!(account = account_id, id = item.id, kind = kind.as_str(), chat = %item.chat_id, "outbox: enqueued");
         if let Some(a) = applied {
             self.inner.publish(OutboxChange::Ingested(a));
         }
         self.inner.publish(OutboxChange::Item(item.clone()));
-        Self::refresh_worker(&self.inner, account_id)?;
+        if let Err(error) = Self::refresh_worker(&self.inner, account_id) {
+            if fixed.is_none() {
+                return Err(error);
+            }
+            // Stable-ID callers need the evidence of a successful local commit even if
+            // scheduling failed. Outbox::start/start_account can pick up the queued row.
+            tracing::warn!(account = account_id, id = item.id, "outbox: admitted but worker refresh failed");
+        }
         Ok(item)
     }
 

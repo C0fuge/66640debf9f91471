@@ -98,7 +98,7 @@ impl From<OutboxError> for Failure {
         match e {
             OutboxError::InvalidRequest(_) => Self::Invalid,
             OutboxError::NotFound(_) | OutboxError::UnknownAccount(_) => Self::Missing,
-            OutboxError::WrongState { .. } => Self::Conflict,
+            OutboxError::WrongState { .. } | OutboxError::AdmissionConflict => Self::Conflict,
             OutboxError::Stopped => Self::Unavailable,
             _ => Self::Internal,
         }

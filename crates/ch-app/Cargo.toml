@@ -11,6 +11,7 @@ ch-db = { path = "../ch-db" }
 ch-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "=0.10.9"
 tokio = { workspace = true, features = ["net", "signal"] }
 tempfile.workspace = true
 tokio-util.workspace = true

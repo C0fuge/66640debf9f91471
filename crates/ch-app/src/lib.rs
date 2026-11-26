@@ -7,6 +7,8 @@ mod cache_file;
 mod save_file;
 mod media;
 pub use media::{SaveDialog, SaveDialogCallback, SaveDialogError};
+mod file_dialog;
+pub use file_dialog::OpenFileDialog;
 mod events;
 mod projection;
 mod wire;

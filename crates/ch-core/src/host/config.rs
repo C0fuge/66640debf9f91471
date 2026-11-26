@@ -134,6 +134,11 @@ impl HostConfig {
         self.account_dir(account_id).join("cache")
     }
 
+    /// Private app-managed upload stages, separate from evictable media cache.
+    pub fn upload_dir(&self, account_id: &str) -> PathBuf {
+        self.account_dir(account_id).join("uploads")
+    }
+
     fn account_dir(&self, account_id: &str) -> PathBuf {
         // Account ids are chosen by the core (§5) but never trust them as path components.
         let safe: String = account_id
