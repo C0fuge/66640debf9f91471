@@ -1,41 +1,24 @@
-# Owner resumed
+# Owner pause — 2026-11-26
 
-Development resumed on explicit owner instruction. Verify is active again.
-Development runs locally; Actions builds/tests only. The verified source below
-remains the baseline. Next candidate is the frozen Telegram dialog pin/manual
-unread subset; no new application operation has been approved yet.
+Development paused on owner instruction. Verify is disabled remotely; cancellation
+requested for candidate run45841050067. Do not automatically resume. Inspect
+source/run state and re-enable Verify only after an explicit owner resume.
 
-# Verification handoff
+Last verified source205f30d08e80396ccd73e245bef295421b64226f passed
+[Verify45839366713](https://github.com/C0fuge/66640debf9f91471/actions/runs/45839366713).
+It adds Telegram dialog pin/unpin and manual unread set/clear. Telegram120,
+SDK48, fake8, MAX77, UI78, all Rust/native/Clippy/build gates and7Chromium
+scenarios passed. Verified app34 operations; Telegram40/119 methods. Real server
+accounts/native chooser and legacy migration remain unverified.
 
-Latest verified source: `db11338a2b54cb4bc820fe6b130925c5e8fb6ffb`.
-[Successful workflow](https://github.com/C0fuge/66640debf9f91471/actions/runs/45807435282).
-Artifacts contain logs, synthetic browser screenshots and Linux debug binaries.
-These are build/test results, not a production deployment or live-account test.
+Unverified sourcec923b06 contains the optional API1.1 chats.get contract and
+Telegram targeted getter. Earlier contract run45840387616 failed a stale fake
+plugin API-version expectation; this is corrected in the candidate, but its
+replacement run was stopped. Rerun this exact source before merging or claiming
+API1.1 verified. App setChatFlag/refreshChatFlags controls are not implemented.
 
-`Verify` runs on code pushes, manual dispatch and a configured daily schedule at
-00:23UTC (03:23 Moscow). Push/manual execution and scheduled run45580094701 were observed (the latter
-failed on an older candidate). Verify was re-enabled after an explicit owner resume. Both jobs must be successful for the exact source
-SHA. A short SHA is not a valid prefix filter for GitHub's `head_sha` API query;
-resolve it to the full commit before matching a run. Do not infer completion from
-an older green run or a green job whose peer job failed.
-
-Rust gates include workspace/no-default tests, two explicit fake integrations,
-an opt-in native portal test on a fresh private D-Bus session, Clippy, fake-plugin
-conformance and desktop/CLI builds. UI/Python gates include dependency-locked
-suites and actual headless Chromium with synthetic account/action/media/poll/reaction data.
-
-`Resolve dependency lock` is a separate manually triggered metadata-only workflow.
-Its artifact is a proposed Cargo lockfile and source hash, not build verification.
-Review exact dependency/version/feature changes before applying it.
-
-This public mirror accepts only reviewed sanitized source snapshots. Never push
-private history, account databases, messenger sessions, environment files, model
-credentials or subscription authentication. Actions builds/tests require no model
-API key. No cloud coding/model session is running or scheduled here.
-
-The verified app now has34 typed operations, including explicit single-file
-selection/review/admission, scoped recovery and independent copy/upload progress.
-Telegram remains39/119 methods. Retained-ID core admission is idempotent only
-while the outbox row survives; absent rows never authorize replay. Keep the
-16-file retention ceiling and pending reference-safe reclamation explicit.
-Migration, real-account and actual desktop chooser verification remain pending.
+Actions runs builds/tests only. No provider/API login, cloud coding session,
+personal data or private source history is published. Docs-only commits can
+have no CI run; compare full source SHA, not a short head_sha prefix. The prior
+file composer retains a16-file limit; reference-safe reclamation remains pending.
+Preserve existing app/data until separately verified import and switch-over.
