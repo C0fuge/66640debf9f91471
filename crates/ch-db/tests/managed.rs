@@ -51,7 +51,10 @@ fn message(path: &str) -> MessageRow {
         conversation_id: 1, message_id: "local:fixture".into(), direction: "out".into(),
         text: Some("caption".into()),
         media: Some(Media { kind: MediaKind::Document, path: Some(path.into()),
-            filename: Some("original.bin".into()), bytes: Some(7), ..Default::default() }),
+            filename: Some("original.bin".into()), bytes: Some(7), mime: None,
+            width: None, height: None, duration: None, thumb_path: None,
+            waveform: None, title: None, performer: None, has_spoiler: false,
+            sticker: None }),
         ..Default::default()
     }
 }
