@@ -70,7 +70,7 @@ test("browser correlates out-of-order replies, rejects pending sends and never r
   assert.deepEqual(await chats, []);
   first.receive({ change: { kind: "inventory" } });
   const send = client.enqueueText({ thread: { accountId: "account", chatId: "chat", topicId: null }, text: "draft" });
-  const rejected = assert.rejects(send, { code: "unavailable" });
+  const rejected = assert.rejects(send, { code: "unavailable", outcomeUnknown: true });
   first.close();
   await rejected;
   await reconnected;
@@ -93,7 +93,7 @@ test("browser retains all 16 server slots through local timeouts until a reply a
   socket.authenticate();
   const stop = await subscribed;
   const thread = { accountId: "account", chatId: "chat", topicId: null };
-  const timedOut = assert.rejects(client.enqueueText({ thread, text: "first" }), { code: "unavailable" });
+  const timedOut = assert.rejects(client.enqueueText({ thread, text: "first" }), { code: "unavailable", outcomeUnknown: true });
   context.mock.timers.tick(1);
   const accepted = client.enqueueText({ thread, text: "second" });
   const reads = Array.from({ length: 14 }, () => client.inventory({}));
@@ -208,4 +208,24 @@ test("chat flag transport loss classifies the setter as uncertain and refresh as
   await assert.rejects(client.setChatFlag({ thread, sessionId: "run", contextToken: "proof", flag: "markedUnread", value: false }),
     { code: "unavailable", outcomeUnknown: true });
   await assert.rejects(client.refreshChatFlags({ thread }), error => (error as { outcomeUnknown?: boolean }).outcomeUnknown === undefined);
+});
+
+test("text admission is a native mutation for lost, malformed and explicit unknown replies", async () => {
+  const thread = { accountId: "a", chatId: "c", topicId: null };
+  for (const invoke of [
+    async () => { throw Error("private transport failure"); },
+    async () => ({ ok: true }),
+    async () => ({ ok: false, error: { code: "internal", outcomeUnknown: true, message: "private worker failure" } }),
+    async () => ({ ok: false, error: { code: "internal", outcomeUnknown: "true" } }),
+  ]) {
+    const core = createNativeClient(invoke);
+    await assert.rejects(core.enqueueText({ thread, text: "draft" }), cause => {
+      const error = cause as { outcomeUnknown?: boolean; message: string };
+      return error.outcomeUnknown === true && !error.message.includes("private");
+    });
+  }
+  const refused = createNativeClient(async () => ({ ok: false, error: { code: "conflict" } }));
+  await assert.rejects(refused.enqueueText({ thread, text: "draft" }), cause =>
+    (cause as { code: string; outcomeUnknown?: boolean }).code === "conflict" &&
+    (cause as { outcomeUnknown?: boolean }).outcomeUnknown !== true);
 });

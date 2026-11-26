@@ -37,7 +37,7 @@ function unpack(reply: unknown, mutation: boolean): unknown {
   throw { ...failure("unavailable"), ...(mutation ? { outcomeUnknown: true } : {}) };
 }
 
-const messageMutations = new Set<keyof CoreOperations>(["editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll",
+const messageMutations = new Set<keyof CoreOperations>(["enqueueText", "editText", "deleteMessages", "pinMessage", "unpinMessage", "votePoll", "closePoll",
   "startMediaDownload", "startMediaSave", "cancelMediaJob", "setChatFlag", "setMessageReactions", "startFileSelection", "cancelFileSelection", "enqueueFile"]);
 
 export function createClient(send: Request, subscribe: CoreClient["subscribe"]): CoreClient {

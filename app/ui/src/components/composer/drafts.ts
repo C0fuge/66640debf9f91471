@@ -1,5 +1,6 @@
 import type { CoreClient, OutboxItem, ThreadKey } from "../../core";
 import { failureCode, failureText, threadId } from "../thread/shared";
+import { outcomeUnknown } from "../thread/actions";
 import { notifyLocalHistory } from "../thread/historySignal";
 
 interface Draft {
@@ -38,6 +39,24 @@ export function draftFor(client: CoreClient, thread: ThreadKey) {
 
 type Recover = () => Promise<void>;
 
+const object = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+function decimal(value: unknown): value is string {
+  return typeof value === "string" && /^-?(0|[1-9]\d{0,18})$/.test(value)
+    && BigInt(value) >= -9223372036854775808n && BigInt(value) <= 9223372036854775807n;
+}
+function textAcceptance(value: unknown, thread: ThreadKey): value is OutboxItem {
+  if (!object(value) || !object(value.thread)) return false;
+  return value.kind === "sendText" && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256
+    && new TextEncoder().encode(value.id).length <= 256
+    && value.thread.accountId === thread.accountId && value.thread.chatId === thread.chatId
+    && value.thread.topicId === thread.topicId
+    && typeof value.state === "string" && ["queued", "sending", "sent", "failed", "cancelled"].includes(value.state)
+    && typeof value.outcomeUnknown === "boolean" && value.doneBytes === null && value.totalBytes === null
+    && (value.echoRowKey === null || decimal(value.echoRowKey) && BigInt(value.echoRowKey) > 0n)
+    && (value.nextAttemptAt === null || value.state === "queued" && decimal(value.nextAttemptAt));
+}
+
 export async function checkAcceptance(entry: DraftEntry, client: CoreClient, thread: ThreadKey) {
   if (entry.snapshot().uncertain === "checking") return;
   entry.update({ uncertain: "checking", error: null });
@@ -62,11 +81,12 @@ export async function sendDraft(entry: DraftEntry, client: CoreClient, thread: T
   if (pending || !text.trim() || (uncertain && !(duplicateConfirmed && uncertain === "review"))) return;
   entry.update({ pending: true, uncertain: null, error: null });
   try {
-    await client.enqueueText({ thread, text });
+    const acceptance = await client.enqueueText({ thread, text });
+    if (!textAcceptance(acceptance, thread)) throw { code: "unavailable", outcomeUnknown: true };
     entry.update({ text: entry.snapshot().text === text ? "" : entry.snapshot().text });
   } catch (cause) {
     const code = failureCode(cause);
-    if (code === "unavailable" || code === undefined) {
+    if (outcomeUnknown(cause) || code === "unavailable" || code === undefined) {
       await recover();
     } else {
       entry.update({ error: failureText(cause) });
@@ -88,7 +108,7 @@ export async function changeOutbox(entry: DraftEntry, client: CoreClient, item: 
     entry.update({ outboxPhase: "reload" });
   } catch (cause) {
     const code = failureCode(cause);
-    const ambiguous = code === "unavailable" || !code;
+    const ambiguous = outcomeUnknown(cause) || code === "unavailable" || !code;
     entry.update({
       outboxPhase: ambiguous ? "reconcile" : "reload",
       outboxNotice: ambiguous ? "The action could not be confirmed. Check the current outbox state." : failureText(cause),
