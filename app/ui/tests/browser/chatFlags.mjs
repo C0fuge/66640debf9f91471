@@ -56,6 +56,15 @@ try {
   assert.equal((await requests()).length, count); assert.equal(await control("Unpin chat").count(), 0);
   await refresh(); await control("Pin chat").waitFor();
   assert.deepEqual((await requests()).at(-1).params.thread, { accountId: "Beta", chatId: "0", topicId: null });
+  // Only the committed fixture row moves it between tabs; a lost reply survives that unmount.
+  await control("Archive chat").click(); await dialog.waitFor({ state: "hidden" });
+  await button("Archive").click(); await menu("Beta").click(); await refresh();
+  await control("Move to inbox").waitFor();
+  await page.evaluate(() => window.flagFixture.lose());
+  await control("Move to inbox").click(); await dialog.waitFor({ state: "hidden" });
+  await button("Inbox").click(); await menu("Beta").click();
+  await dialog.getByText("Archived · Outcome unknown").waitFor();
+  await refresh(); await control("Archive chat").waitFor();
   await page.evaluate(() => window.flagFixture.disableManual());
   await control("Pin chat").waitFor({ state: "hidden" }); await refresh();
   assert.equal(await control("Mark as unread").isDisabled(), true);
@@ -78,7 +87,8 @@ try {
   });
   assert.deepEqual(mobile, { visible: true, controlsFit: true, chatListFits: true, noPageOverflow: true });
   await snap("chat-flags-mobile.png");
-  assert.equal((await requests()).filter(r => r.method === "setChatFlag").length, 5);
+  assert.equal((await requests()).filter(r => r.method === "setChatFlag").length, 7);
+  assert.deepEqual((await requests()).filter(r => r.method === "setChatFlag" && r.params.flag === "archived").map(r => r.params.value), [true, false]);
   assert.deepEqual(errors, []);
   console.log("Whole-chat preference controls passed Chromium checks.");
 } finally { await browser?.close(); await server.close(); }

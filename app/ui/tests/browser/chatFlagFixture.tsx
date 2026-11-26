@@ -7,21 +7,22 @@ import "../../src/styles.css";
 const accounts = ["Alpha", "Beta"].map(accountId => ({ accountId, pluginId: "fixture", label: accountId, enabled: true,
   phase: "running" as const, state: "connected", reconnecting: false }));
 const plugin: PluginSummary = { pluginId: "fixture", name: "Fixture", phase: "running", capabilities: {
-  "chat.get": {}, "chat.flags": true, "chat.pin": true, "chat.mark_unread": {} }, authMethods: [], settingsSchema: null, brandColor: null };
+  "chat.get": {}, "chat.flags": true, "chat.pin": true, "chat.mark_unread": {}, "chat.archive": true }, authMethods: [], settingsSchema: null, brandColor: null };
 const listeners = new Set<(change: CoreChange) => void>();
 const requests: CoreRequest[] = [];
 let delayed = false, lose = false, partial = false;
 let release = () => {};
 const emit = (change: CoreChange) => listeners.forEach(f => f(change));
-const flags = new Map<string, { pinned: boolean; markedUnread: boolean }>();
-const current = (t: ThreadKey) => flags.get(JSON.stringify(t)) ?? { pinned: false, markedUnread: false };
+const flags = new Map<string, { pinned: boolean; markedUnread: boolean; archived: boolean }>();
+const current = (t: ThreadKey) => flags.get(JSON.stringify(t)) ?? { pinned: false, markedUnread: false, archived: t.chatId === "100" };
 const unused = async () => { throw Error("Unexpected fixture operation"); };
 const client: CoreClient = {
   subscribe: async cb => { listeners.add(cb); return () => { listeners.delete(cb); }; },
   inventory: async () => structuredClone({ accounts, plugins: [plugin], composerAccess: { chooseFile: false }, mediaAccess: { saveCopy: false } }),
   listChats: async ({ accountId }) => Array.from({ length: 101 }, (_, i): ChatSummary => ({
-    thread: { accountId, chatId: String(i), topicId: null }, title: `${accountId} dialog ${i}`, archived: i === 100,
-    kind: "channel", canPost: false, pinned: false, markedUnread: false, muted: null, unreadCount: 7,
+    thread: { accountId, chatId: String(i), topicId: null }, title: `${accountId} dialog ${i}`,
+    ...current({ accountId, chatId: String(i), topicId: null }),
+    kind: "channel", canPost: false, muted: null, unreadCount: 7,
     lastMessageAt: null, lastMessagePreview: null, lastMessageKind: null })),
   refreshChatFlags: async params => {
     requests.push({ method: "refreshChatFlags", params });

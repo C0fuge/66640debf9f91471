@@ -15,7 +15,7 @@ def trace(name, params):
 
 
 class ChatFlags(Plugin):
-    capabilities = {"chat.get": True, "chat.flags": True, "chat.pin": True, "chat.mark_unread": True}
+    capabilities = {"chat.get": True, "chat.flags": True, "chat.pin": True, "chat.mark_unread": True, "chat.archive": True}
 
     def __init__(self):
         super().__init__()
@@ -51,13 +51,18 @@ class ChatFlags(Plugin):
         trace("chats.get", {"account_id": account.id, "chat_id": params.chat_id})
         if MODE == "hold-read":
             await self.release.wait()
-        pinned, unread = self.flags.get((account.id, params.chat_id), (False, False))
+        pinned, unread, archived = self.flags.get((account.id, params.chat_id), (False, False, True))
         conversation = {"id": params.chat_id, "kind": "group", "pinned": pinned, "marked_unread": unread,
-                        "title": "must not replace title", "unread_count": 999, "muted": False, "archived": False}
+                        "title": "must not replace title", "unread_count": 999, "muted": False, "archived": archived}
+        if MODE in ("sparse", "partial", "missing-archive"):
+            conversation.pop("archived")
         if MODE in ("sparse", "partial"):
             conversation.pop("marked_unread")
         if MODE == "sparse":
             conversation.pop("pinned")
+        if MODE == "archive-only":
+            conversation.pop("pinned")
+            conversation.pop("marked_unread")
         if MODE == "wrong-id":
             conversation["id"] = "foreign"
         if MODE == "wrong-kind":
@@ -72,14 +77,15 @@ class ChatFlags(Plugin):
 
     @method("chats.set_flags")
     async def set(self, account, params: T.ChatsSetFlagsParams):
-        changed = {key: getattr(params, key) for key in ("pinned", "marked_unread") if getattr(params, key) is not None}
+        changed = {key: getattr(params, key) for key in ("pinned", "marked_unread", "archived") if getattr(params, key) is not None}
         trace("chats.set_flags", {"account_id": account.id, "chat_id": params.chat_id, **changed})
         if MODE == "hold-write":
             await self.release.wait()
-        old = self.flags.get((account.id, params.chat_id), (False, False))
+        old = self.flags.get((account.id, params.chat_id), (False, False, True))
         pinned = params.pinned if params.pinned is not None else old[0]
         unread = params.marked_unread if params.marked_unread is not None else old[1]
-        self.flags[(account.id, params.chat_id)] = (pinned, unread)
+        archived = params.archived if params.archived is not None else old[2]
+        self.flags[(account.id, params.chat_id)] = (pinned, unread, archived)
         if MODE == "lost-write":
             await asyncio.Event().wait()
         if MODE == "unknown":

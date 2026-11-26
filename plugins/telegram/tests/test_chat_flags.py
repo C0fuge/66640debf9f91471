@@ -15,10 +15,12 @@ from telegram_plugin.plugin import TelegramPlugin
 READ = functions.messages.GetPeerDialogsRequest
 PIN = functions.messages.ToggleDialogPinRequest
 MARK = functions.messages.MarkDialogUnreadRequest
+ARCHIVE = functions.folders.EditPeerFoldersRequest
 
 
-def snapshot(peer=tl.PeerUser(17), entity=None, pinned=False, marked=False):
-    raw = tl.Dialog(peer, 10, 7, 9, 3, 2, 1, 0, tl.PeerNotifySettings(), pinned=pinned, unread_mark=marked)
+def snapshot(peer=tl.PeerUser(17), entity=None, pinned=False, marked=False, folder=None):
+    raw = tl.Dialog(peer, 10, 7, 9, 3, 2, 1, 0, tl.PeerNotifySettings(), pinned=pinned, unread_mark=marked,
+                    folder_id=folder)
     entity = entity or tl.User(17)
     users, chats = ([entity], []) if isinstance(entity, tl.User) else ([], [entity])
     return tl.messages.PeerDialogs([raw], [], chats, users, tl.updates.State(0, 0, NOW, 0, 0))
@@ -34,6 +36,9 @@ def setup(replies, *, peer=None, chat_id="17", read_only=False, **fields):
         target = tl.InputDialogPeer(peer)
         if isinstance(req, READ):
             assert req.peers == [target]
+        elif isinstance(req, ARCHIVE):
+            assert len(req.folder_peers) == 1 and req.folder_peers[0].peer == peer
+            assert req.folder_peers[0].folder_id in (0, 1)
         else:
             assert req.peer == target
             if isinstance(req, MARK):
@@ -159,7 +164,7 @@ def test_chat_get_reads_one_peer_under_account_lock_without_emitting():
                 await asyncio.sleep(0)
                 account.data["client"].get_input_entity.assert_not_awaited()
             assert to_wire(await pending) == {"conversation": {
-                "id": "17", "kind": "dm", "pinned": pin, "marked_unread": mark}}
+                "id": "17", "kind": "dm", "pinned": pin, "marked_unread": mark, "archived": False}}
             assert list(map(type, calls)) == [READ]
             account.conversations_upsert.assert_not_awaited()
     asyncio.run(exercise())

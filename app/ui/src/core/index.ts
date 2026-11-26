@@ -257,12 +257,13 @@ type InThread = { thread: ThreadKey };
 type OutboxTarget = InThread & { id: string };
 type AuthFlow = Account & { flow: string };
 
-export type ChatFlag = "pinned" | "markedUnread";
+export type ChatFlag = "pinned" | "markedUnread" | "archived";
 export interface ChatFlagContext extends InThread {
   sessionId: string;
   contextToken: string | null;
   pinned: boolean | null;
   markedUnread: boolean | null;
+  archived: boolean | null;
 }
 
 export interface CoreOperations {

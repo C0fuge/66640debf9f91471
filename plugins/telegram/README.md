@@ -26,8 +26,8 @@ Enter the numeric `api_id` in account settings and the application’s `api_hash
 | Required text send, `send.entities`, `send.silent`, `send.no_webpage` | `messages.send` | Plain or formatted text, replies, topic root, silent delivery and preview suppression. A supplied client ID determines the MTProto random ID. A successful acknowledgement echoes the client ID in the returned message and a message upsert. |
 | `messages.get`, `edit`, `edit.caption` | `messages.get`, `messages.edit` | Chat-scoped lookup, text/caption and entity edits, preview suppression, unchanged-edit retries. Media replacement is unsupported. |
 | `delete`, `delete.for_me`, `forward`, `forward.drop_author` | `messages.delete`, `messages.forward` | Batch deletion and forwarding with complete chat validation before mutation; silent forwarding and author/caption removal. Channel deletion only for me is rejected. Scheduling is unsupported. |
-| `chat.get` | `chats.get` | Reads one ordinary dialog and returns its ID, kind, pin and manual unread mark. The caller receives the observation in the response. |
-| `chat.flags`, `chat.pin`, `chat.mark_unread` | `chats.set_flags` | Pins and manual unread marks on ordinary dialogs. A single-dialog observation confirms the requested flags. A partial or interrupted write can require a refresh. |
+| `chat.get` | `chats.get` | Reads one ordinary dialog and returns its ID, kind, pin, manual unread mark and archive state. The caller receives the observation in the response. |
+| `chat.flags`, `chat.pin`, `chat.mark_unread`, `chat.archive` | `chats.set_flags` | Pins, manual unread marks and archive moves on ordinary dialogs. A single-dialog observation confirms the requested flags. A partial or interrupted write can require a refresh. |
 | `pin`, `unpin` | `messages.pin`, `messages.unpin` | Silent and personal private-chat pins, one-message or all-message unpinning, including paged unpin acknowledgements. |
 | `read_receipts`, `typing`, `drafts.sync` | `read.send_receipt`, `typing.send`, `drafts.save` | Explicit chat/topic receipts and supported typing actions; formatted chat drafts and explicit clearing. Topic draft writes are rejected until their clearing semantics are verified. Server timestamps are authoritative. |
 | `media.download`, `avatars` | `media.download`, `avatars.download` | MTProto photo/document full files and static thumbnails, plus small/big user/chat avatars. Private atomic cache writes, cancellation cleanup, per-account download queue (larger priorities first), 2 GiB attachment and 16 MiB avatar limits. External web-document URL downloads are rejected. |
@@ -59,6 +59,36 @@ Unread listing follows the official Desktop's [initial oldest-batch request](htt
 Scoped requests verify a full matching peer using the locked `channel.forum` or `user.bot_forum_view` flags before dispatch. Basic groups and ordinary private chats cannot receive topic operations. Verified forums' General topic has id `1` and may lack a message topic header; group and bot topics keep their exact IDs. Monoforum peer identities are not silently treated as ordinary topic IDs. [Telegram forum identity and General topic semantics](https://core.telegram.org/api/forum)
 
 `reactions.read` sends only [readReactions](https://core.telegram.org/method/messages.readReactions), without also marking messages or mentions read. Success requires a real `messages.AffectedHistory` with zero remaining offset. A positive [affected-history offset](https://core.telegram.org/constructor/messages.affectedHistory) triggers another same-scope call only after that confirmed continuation, with a hard budget of **128 total read requests including the initial request**. A still-positive offset at that budget, nondecreasing/invalid acknowledgement, timeout, cancellation or other failure after dispatch becomes `NETWORK` with `outcome: "unknown"` and `retry_safe: false`; no completion is claimed and no write is automatically replayed. Read-only peer lookup and parameter validation before dispatch retain their original error classification. Cancellation releases the account's reaction lock, and no local reaction array, personal choice, or unread counter is reset from a guessed outcome. The same locked 1.46.0/layer-233 artifact cited below supplies both request constructors.
+
+## Dialog archive
+
+Archive moves use one `folders.editPeerFolders` request for the exact marked peer,
+with folder `1` to archive and `0` to move to the inbox. These API peer folders
+are separate from configurable dialog filters. An ordinary raw dialog's absent
+or zero folder means inbox; `1` means archive. Unsupported folder IDs fail
+explicitly instead of being guessed. This corrects Telethon 1.46.0's convenience
+`archived` property, which treats any non-null folder, including explicit zero,
+as archived. The exact locked request and response constructors are retained in
+the audited 1.46.0/layer-233 source.
+[Peer folders](https://core.telegram.org/api/folders#peer-folders) ·
+[Folder mutation](https://core.telegram.org/method/folders.editPeerFolders) ·
+[Raw dialog folder](https://core.telegram.org/constructor/dialog)
+
+The setter shares the account sync lock, validates the exact dialog before a
+write, and reads it again after every accepted `Updates` variant, including an
+empty or `UpdatesTooLong` response. Archive moves may change pin state, so the
+sparse acknowledged upsert includes the observed pin alongside archive state.
+A mixed pin/unread/archive request is sequential; an earlier effect is never
+rolled back or replayed after failure. Lost or malformed mutation replies and
+lost core acknowledgements remain uncertain. Only an exact read establishes the
+displayed state; the requested values never become local confirmations.
+
+`chats.sync(include_archived=false)` keeps its complete inventory and emits
+sparse archive/pin observations for archived rows while skipping their rich
+metadata and message previews. This allows previously cached inbox rows to
+converge after another client archives them. Bare `updateFolderPeers` updates do
+not establish the full peer kind or pin state and do not trigger network read
+fanout. Reconcile them through an explicit `chats.get` or `chats.sync`.
 
 ## Read-only sticker catalog
 
@@ -123,7 +153,7 @@ Telegram catalog/download or actual sticker rendering has been exercised.
 
 ## Remaining method groups
 
-The frozen registry contains 121 methods. The table above covers 39 core-to-plugin methods. The 80 core-to-plugin methods below remain unimplemented. The final two, `secrets.set` and `secrets.delete`, are host services for plugin callers. [Method registry](../../schemas/methods/registry.json)
+The registry contains 122 methods. The table above covers 41 core-to-plugin methods. The 79 core-to-plugin methods below remain unimplemented. The final two, `secrets.set` and `secrets.delete`, are host services for plugin callers. Archive extends an existing setter rather than adding another method. [Method registry](../../schemas/methods/registry.json)
 
 | Follow-up group | Pending methods |
 | --- | --- |
@@ -134,7 +164,7 @@ The frozen registry contains 121 methods. The table above covers 39 core-to-plug
 | Mentions and pins | `mentions.list_unread`, `mentions.read`, `pins.list` |
 | Scheduling | `scheduled.list`, `scheduled.edit`, `scheduled.delete`, `scheduled.send_now` |
 | Replies and forums | `replies.list`, `topics.list`, `topics.create`, `topics.edit`, `topics.pin` |
-| Chat settings and folders | Archive and mute fields of `chats.set_flags`, `chats.clear_history`, `chats.leave`, `chats.set_auto_delete`, `chats.reorder_pinned`, `folders.list`, `folders.create`, `folders.rename`, `folders.delete`, `folders.set_chats`, `folders.set_rules` |
+| Chat settings and folders | Mute fields of `chats.set_flags`, `chats.clear_history`, `chats.leave`, `chats.set_auto_delete`, `chats.reorder_pinned`, `folders.list`, `folders.create`, `folders.rename`, `folders.delete`, `folders.set_chats`, `folders.set_rules` |
 | Groups and members | `group.create`, `group.join_by_link`, `group.invite_link`, `group.edit_title`, `group.edit_about`, `group.edit_photo`, `group.set_permissions`, `group.set_slow_mode`, `members.list`, `members.ban`, `members.set_admin`, `members.invite`, `join_requests.list`, `join_requests.answer` |
 | Contacts, profile, privacy and sessions | `lookup.username`, `lookup.phone`, `contacts.set`, `contacts.info`, `contacts.common_chats`, `blocked.list`, `blocked.set`, `profile.get`, `profile.update`, `profile.photos`, `stories.list`, `privacy.get`, `privacy.set`, `two_factor.get`, `two_factor.set`, `sessions.list`, `sessions.terminate`, `ghost.apply`, `account.sign_out` |
 | Stickers, GIFs and emoji | `stickers.favorites`, `stickers.search`, `stickers.install`, `stickers.set_favorite`, `stickers.clip`, `stickers.send`, `gifs.list`, `gifs.search`, `gifs.thumb`, `gifs.clip`, `gifs.send`, `emoji.custom_files`, `emoji.packs`, `emoji.pack`, `emoji.animated` |

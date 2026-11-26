@@ -8,11 +8,11 @@ const account: AccountSummary = { accountId: "Alpha", label: null, pluginId: "fi
 const plugin: PluginSummary = { pluginId: "fixture", name: "Fixture", phase: "running", brandColor: null, capabilities: {
   "chat.get": {}, "chat.flags": true, "chat.pin": {}, "chat.mark_unread": false }, authMethods: [], settingsSchema: null };
 const allowed = () => flagPermissions(plugin, account, thread);
-const read = (override: Partial<ChatFlagContext> = {}): ChatFlagContext => ({ thread, sessionId: "run", contextToken: "one", pinned: false, markedUnread: null, ...override });
+const read = (override: Partial<ChatFlagContext> = {}): ChatFlagContext => ({ thread, sessionId: "run", contextToken: "one", pinned: false, markedUnread: null, archived: null, ...override });
 const core = (methods: Partial<CoreClient>) => methods as CoreClient;
 
 test("exact running account and individual live capability gates", () => {
-  assert.deepEqual(allowed(), { refresh: true, pinned: true, markedUnread: false });
+  assert.deepEqual(allowed(), { refresh: true, pinned: true, markedUnread: false, archived: false });
   for (const cap of [false, null, 1, "enabled", [], undefined]) {
     assert.equal(flagPermissions({ ...plugin, capabilities: { ...plugin.capabilities, "chat.get": cap as never } }, account, thread).refresh, false);
   }
@@ -60,6 +60,26 @@ test("late reads and malformed acknowledgements grant no further authority", asy
   await session.set("pinned", false);
   assert.equal(session.attempt("pinned"), "unknown");
   assert.equal(session.state().context, null);
+});
+
+test("archive capability is independent and a moved row retains uncertainty until exact review", async () => {
+  const permitted = () => flagPermissions({ ...plugin, capabilities: { ...plugin.capabilities, "chat.archive": {} } }, account, thread);
+  assert.equal(allowed().archived, false);
+  assert.equal(permitted().archived, true);
+  let observed = read({ archived: false });
+  const writes: unknown[] = [];
+  const client = core({ refreshChatFlags: async () => observed, setChatFlag: async params => {
+    writes.push(params); throw { code: "unavailable", outcomeUnknown: true };
+  } });
+  const first = flagSession(client, "fixture", thread, permitted);
+  await first.refresh(); await first.set("archived", true); first.invalidate();
+  const moved = flagSession(client, "fixture", thread, permitted);
+  assert.equal(moved.attempt("archived"), "unknown");
+  observed = read({ archived: null }); await moved.refresh(); await moved.set("archived", false);
+  assert.equal(moved.attempt("archived"), "unknown");
+  observed = read({ archived: true }); await moved.refresh();
+  assert.equal(moved.attempt("archived"), undefined);
+  assert.deepEqual(writes, [{ thread, sessionId: "run", contextToken: "one", flag: "archived", value: true }]);
 });
 
 test("unresolved attempts have bounded admission and exact refresh frees capacity without eviction", async () => {

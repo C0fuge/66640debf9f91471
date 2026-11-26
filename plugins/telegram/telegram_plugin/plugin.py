@@ -12,7 +12,7 @@ from .session import disconnect, make_client, options, platform_errors, session_
 
 class TelegramPlugin(Plugin):
     capabilities = {
-        "chat.get": True, "chat.flags": True, "chat.pin": True, "chat.mark_unread": True,
+        "chat.get": True, "chat.flags": True, "chat.pin": True, "chat.mark_unread": True, "chat.archive": True,
         "chat.sync": True, "contacts.list": True, "history.jump_to_date": True, "history.fill_gap": True,
         "send.entities": {"types": SEND_ENTITY_TYPES}, "send.silent": True, "send.no_webpage": True,
         "messages.get": True, "edit": True, "edit.caption": True, "delete": True, "delete.for_me": True,

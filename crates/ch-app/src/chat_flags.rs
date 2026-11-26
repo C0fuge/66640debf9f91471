@@ -33,6 +33,7 @@ const TTL: Duration = Duration::from_secs(60);
 pub(crate) enum Flag {
     Pinned,
     MarkedUnread,
+    Archived,
 }
 
 pub(crate) struct Set {
@@ -91,6 +92,7 @@ struct Proof {
     expires: Instant,
     pinned: Option<bool>,
     marked_unread: Option<bool>,
+    archived: Option<bool>,
 }
 
 struct Task {
@@ -148,6 +150,7 @@ impl Service {
         target: Arc<Target>,
         pinned: Option<bool>,
         marked_unread: Option<bool>,
+        archived: Option<bool>,
     ) -> Result<Value> {
         let mut s = self.state();
         if s.closed || target.run.is_cancelled() {
@@ -157,7 +160,7 @@ impl Service {
         s.proofs.retain(|_, p| {
             p.expires > now && !p.target.run.is_cancelled() && p.target.thread != target.thread
         });
-        let token = if pinned.is_some() || marked_unread.is_some() {
+        let token = if pinned.is_some() || marked_unread.is_some() || archived.is_some() {
             if s.proofs.len() >= LIMIT {
                 return Err(Failure::Conflict);
             }
@@ -172,6 +175,7 @@ impl Service {
                     expires: now + TTL,
                     pinned,
                     marked_unread,
+                    archived,
                 },
             );
             Some(id)
@@ -179,7 +183,7 @@ impl Service {
             None
         };
         Ok(
-            json!({"thread":target.thread,"sessionId":self.session,"contextToken":token,"pinned":pinned,"markedUnread":marked_unread}),
+            json!({"thread":target.thread,"sessionId":self.session,"contextToken":token,"pinned":pinned,"markedUnread":marked_unread,"archived":archived}),
         )
     }
     fn consume(&self, thread: &Thread, write: &Set) -> Result<Arc<Target>> {
@@ -195,6 +199,7 @@ impl Service {
         let known = match write.flag {
             Flag::Pinned => proof.pinned,
             Flag::MarkedUnread => proof.marked_unread,
+            Flag::Archived => proof.archived,
         };
         let proof = s.proofs.remove(&write.token).ok_or(Failure::Conflict)?;
         if known.is_none() || proof.expires <= Instant::now() {
@@ -302,9 +307,10 @@ async fn operate(
         return Err(Failure::Unsupported);
     }
     if let Some(write) = write {
-        let (cap, pinned, marked_unread) = match write.flag {
-            Flag::Pinned => ("chat.pin", Some(write.value), None),
-            Flag::MarkedUnread => ("chat.mark_unread", None, Some(write.value)),
+        let (cap, pinned, marked_unread, archived) = match write.flag {
+            Flag::Pinned => ("chat.pin", Some(write.value), None, None),
+            Flag::MarkedUnread => ("chat.mark_unread", None, Some(write.value), None),
+            Flag::Archived => ("chat.archive", None, None, Some(write.value)),
         };
         if !target.caps.has("chat.flags") || !target.caps.has(cap) {
             return Err(Failure::Unsupported);
@@ -314,6 +320,7 @@ async fn operate(
             chat_id: target.thread.chat_id.clone(),
             pinned,
             marked_unread,
+            archived,
             ..Default::default()
         };
         let raw = core
@@ -362,7 +369,7 @@ async fn operate(
         return Err(Failure::Conflict);
     }
     target.live(core)?;
-    let (pinned, marked_unread) = (obs.pinned, obs.marked_unread);
+    let (pinned, marked_unread, archived) = (obs.pinned, obs.marked_unread, obs.archived);
     let t = target.clone();
     let applied = core
         .ingest()
@@ -370,7 +377,7 @@ async fn operate(
             if cancel.is_cancelled() {
                 return Err(Failure::Unavailable);
             }
-            ing.apply_observed_chat_flags(&t.owner, &t.row, pinned, marked_unread, || {
+            ing.apply_observed_chat_flags(&t.owner, &t.row, pinned, marked_unread, archived, || {
                 !cancel.is_cancelled()
             })
             .map_err(|_| Failure::Internal)?
@@ -379,7 +386,7 @@ async fn operate(
         .await??;
     core.bus().publish_local("chat-flags", applied);
     target.live(core)?;
-    svc.review(target.clone(), pinned, marked_unread)
+    svc.review(target.clone(), pinned, marked_unread, archived)
 }
 
 #[cfg(test)]

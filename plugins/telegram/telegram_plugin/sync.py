@@ -1,5 +1,6 @@
 """Initial snapshots and sparse live events."""
 from telethon import events, functions, types as tl
+from contact_hub_sdk import types as dto
 
 from . import polls, reactions
 
@@ -18,12 +19,15 @@ async def dialogs(account, client, include_archived=True):
         # The closing snapshot is always complete. A caller may skip fetching
         # rich details for archived dialogs without hiding them in the core.
         ids.append(str(dialog.id))
-        if dialog.archived and not include_archived:
-            continue
-        batch.append(conversation(dialog))
-        if dialog.message and (preview := message(dialog.message)):
+        item = conversation(dialog)
+        if item.archived and not include_archived:
+            # Still converge archive/pin state of cached rows after another
+            # client moves them; only rich metadata and previews are skipped.
+            item = dto.Conversation(id=item.id, kind=item.kind, archived=True, pinned=item.pinned)
+        elif dialog.message and (preview := message(dialog.message)):
             polls.observe(account, [preview])
             previews.append(preview)
+        batch.append(item)
         if len(batch) == 32:
             await account.conversations_upsert(batch, ack=True)
             if previews:
@@ -44,6 +48,9 @@ async def sync_all(account, client):
 
 
 async def raw_update(account, update, client=None):
+    # Folder updates lack a full entity/kind and do not prove pin state. Reconcile
+    # them through an explicit exact chats.get or full sync, without read fanout
+    # or inventing a Conversation from a bare channel peer.
     if isinstance(update, tl.UpdateMessagePoll) and client is not None:
         await polls.refresh_live(account, client, update)
     elif isinstance(update, tl.UpdateMessageReactions) and client is not None:

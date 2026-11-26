@@ -1,6 +1,6 @@
 import type { AccountSummary, ChatFlag, ChatFlagContext, CoreClient, PluginSummary, ThreadKey } from "../core";
 
-export const chatFlags = ["pinned", "markedUnread"] as const;
+export const chatFlags = ["pinned", "markedUnread", "archived"] as const;
 const object = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 export function flagPermissions(plugin: PluginSummary | null | undefined, account: AccountSummary | null | undefined, thread: ThreadKey) {
   const active = thread.topicId === null && !!thread.chatId && !thread.chatId.startsWith("local:") &&
@@ -10,7 +10,7 @@ export function flagPermissions(plugin: PluginSummary | null | undefined, accoun
   const has = (key: string) => !!active && object(caps) && Object.hasOwn(caps, key) && (caps[key] === true || object(caps[key]));
   const refresh = has("chat.get");
   const write = refresh && has("chat.flags");
-  return { refresh, pinned: write && has("chat.pin"), markedUnread: write && has("chat.mark_unread") };
+  return { refresh, pinned: write && has("chat.pin"), markedUnread: write && has("chat.mark_unread"), archived: write && has("chat.archive") };
 }
 
 function matches(value: unknown, target: ThreadKey): value is ChatFlagContext {

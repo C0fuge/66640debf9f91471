@@ -35,7 +35,7 @@ class Stub:
         self.handlers = []
         self.sent = {}
         self.uploaded, self.stored_media = {}, {}
-        self.dialog_flags = {"pinned": False, "unread_mark": False}
+        self.dialog_flags = {"pinned": False, "unread_mark": False, "folder_id": None}
         self.poll_solutions = {}
         self.unread_reactions = {("17", None): {2, 5, 9}, ("-1000000000008", None): {11},
                                  ("-1000000000008", "42"): {41, 45}, ("18", "7"): {70, 72}}
@@ -92,7 +92,8 @@ class Stub:
     async def iter_dialogs(self, folder=None):
         if self.mode == 4:
             raise RuntimeError("synthetic-private-error")
-        raw = SimpleNamespace(read_inbox_max_id=2, read_outbox_max_id=4, unread_mark=self.dialog_flags["unread_mark"], draft=None)
+        raw = SimpleNamespace(read_inbox_max_id=2, read_outbox_max_id=4, unread_mark=self.dialog_flags["unread_mark"],
+                              folder_id=self.dialog_flags["folder_id"], draft=None)
         yield SimpleNamespace(id=17, dialog=raw, entity=USER, title="Sample", message=row(10), date=NOW,
                               is_user=True, is_group=False, archived=False, pinned=self.dialog_flags["pinned"], unread_count=0,
                               unread_mentions_count=0, unread_reactions_count=0)
@@ -181,6 +182,12 @@ class Stub:
                 raise errors.ChatAdminRequiredError(req)
             self.dialog_flags["unread_mark"] = req.unread
             return True
+        if isinstance(req, functions.folders.EditPeerFoldersRequest):
+            assert len(req.folder_peers) == 1 and req.folder_peers[0].peer == target.peer
+            folder = req.folder_peers[0].folder_id
+            assert folder in (0, 1)
+            self.dialog_flags.update(folder_id=folder, pinned=False)
+            return tl.Updates([tl.UpdateFolderPeers([tl.FolderPeer(PEER, folder)], 1, 1)], [], [], NOW, 1)
         if isinstance(req, functions.contacts.GetContactsRequest):
             return tl.contacts.Contacts([tl.Contact(17, True)], 1, [USER])
         if isinstance(req, functions.channels.GetChannelsRequest):

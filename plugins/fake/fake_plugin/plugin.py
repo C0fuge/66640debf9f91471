@@ -996,7 +996,7 @@ class FakePlugin(Plugin):
     async def get_chat(self, account, st: State, p: T.ChatsGetParams):
         conv = st.chat(p.chat_id).conv
         return T.ChatsGetResult(conversation=T.Conversation(
-            id=conv.id, kind=conv.kind, pinned=bool(conv.pinned), marked_unread=bool(conv.marked_unread)))
+            id=conv.id, kind=conv.kind, pinned=bool(conv.pinned), marked_unread=bool(conv.marked_unread), archived=bool(conv.archived)))
 
     @rpc("chats.set_flags")
     async def set_flags(self, account, st: State, p: T.ChatsSetFlagsParams):

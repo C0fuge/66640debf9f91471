@@ -121,12 +121,22 @@ def draft(raw):
     return None
 
 
+def archive_state(folder_id):
+    # API peer folders are separate from configurable dialog filters. Telegram
+    # defines only the default list (absent/0) and archive (1).
+    if folder_id is None:
+        return False
+    if type(folder_id) is int and folder_id in (0, 1):
+        return folder_id == 1
+    raise rpc.NotSupported("Unsupported Telegram dialog folder.", capability="chat.archive")
+
+
 def conversation(dialog):
     entity, raw = dialog.entity, dialog.dialog
     return dto.Conversation(id=str(dialog.id), kind="dm" if dialog.is_user else "group" if dialog.is_group else "channel",
                             title=dialog.title, peer_user_id=str(entity.id) if dialog.is_user else None,
                             is_self_chat=getattr(entity, "is_self", None), username=getattr(entity, "username", None),
-                            archived=dialog.archived, pinned=dialog.pinned, unread_count=dialog.unread_count,
+                            archived=archive_state(getattr(raw, "folder_id", None)), pinned=dialog.pinned, unread_count=dialog.unread_count,
                             unread_mentions=dialog.unread_mentions_count, unread_reactions=dialog.unread_reactions_count,
                             last_message_at=dialog.date, is_forum=getattr(entity, "forum", None),
                             read_inbox_max_id=sid(raw.read_inbox_max_id), read_outbox_max_id=sid(raw.read_outbox_max_id),

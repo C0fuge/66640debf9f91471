@@ -298,7 +298,7 @@ async fn context_limit_and_disabled_owner_block_before_any_mutation() {
                 caps: seed.target.caps.clone(), run: seed.target.run.clone(),
             });
             state.proofs.insert(format!("context-{n}"), Proof {
-                target, expires: Instant::now() + TTL, pinned: Some(false), marked_unread: None,
+                target, expires: Instant::now() + TTL, pinned: Some(false), marked_unread: None, archived: None,
             });
         }
     }
@@ -311,5 +311,70 @@ async fn context_limit_and_disabled_owner_block_before_any_mutation() {
     assert_eq!(set(&app, &thread, &c, "pinned", true).await["ok"], false);
     assert_eq!(refresh(&app, &thread).await["ok"], false);
     assert_eq!(calls(&app, "chats.set_flags"), 0);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_requires_an_observed_field_and_each_live_capability() {
+    for mode in ["missing-archive", "without-chat.archive", "without-chat.flags", "without-chat.get"] {
+        let (app, thread) = fixture(mode).await;
+        for value in [true, false] {
+            let c = refresh(&app, &thread).await;
+            if mode == "without-chat.get" {
+                assert_eq!(c["error"]["code"], "unsupported");
+                continue;
+            }
+            assert_eq!(set(&app, &thread, &c["value"], "archived", value).await["ok"], false);
+        }
+        assert_eq!(calls(&app, "chats.set_flags"), 0);
+        assert!(stored(&app, &thread).await.archived);
+        app.shutdown().await;
+    }
+    let (app, thread) = fixture("archive-only").await;
+    let c = refresh(&app, &thread).await["value"].clone();
+    assert!(c["pinned"].is_null() && c["markedUnread"].is_null());
+    assert_eq!(c["archived"], true);
+    assert!(c["contextToken"].is_string());
+    assert_eq!(set(&app, &thread, &c, "archived", false).await["ok"], true);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_moves_only_on_observed_state_and_sends_exact_boolean_once() {
+    let (app, thread) = fixture("good").await;
+    for value in [false, true] {
+        let c = refresh(&app, &thread).await["value"].clone();
+        assert_eq!(c["archived"], !value);
+        assert_eq!(set(&app, &thread, &c, "archived", value).await["ok"], true);
+        assert_eq!(stored(&app, &thread).await.archived, !value, "Empty is not an observation");
+        assert_eq!(set(&app, &thread, &c, "archived", value).await["ok"], false);
+        let fresh = refresh(&app, &thread).await;
+        assert_eq!(fresh["value"]["archived"], value);
+        let row = stored(&app, &thread).await;
+        assert_eq!(row.archived, value);
+        assert_eq!((row.title.as_deref(), row.muted, row.unread_count), (Some("Original title"), Some(true), 7));
+        for archived in [false, true] {
+            let chats = request(&app, "listChats", json!({"accountId":thread.account_id,"archived":archived})).await;
+            assert_eq!(chats["value"].as_array().unwrap().len(), usize::from(archived == value));
+        }
+    }
+    let mutations: Vec<_> = trace(&app).into_iter().filter(|v| v["method"] == "chats.set_flags").collect();
+    assert_eq!(mutations.len(), 2);
+    for (request, value) in mutations.iter().zip([false, true]) {
+        assert_eq!(request["params"], json!({"account_id":thread.account_id,"chat_id":thread.chat_id,"archived":value}));
+    }
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_lost_reply_requires_a_new_observation_without_replaying() {
+    let (app, thread) = fixture("unknown").await;
+    let c = refresh(&app, &thread).await["value"].clone();
+    let result = set(&app, &thread, &c, "archived", false).await;
+    assert_eq!(result["error"]["outcomeUnknown"], true);
+    assert!(stored(&app, &thread).await.archived);
+    assert_eq!(set(&app, &thread, &c, "archived", false).await["ok"], false);
+    assert_eq!(refresh(&app, &thread).await["value"]["archived"], false);
+    assert_eq!(calls(&app, "chats.set_flags"), 1);
     app.shutdown().await;
 }

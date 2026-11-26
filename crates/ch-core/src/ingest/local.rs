@@ -586,7 +586,7 @@ impl Ingest {
             .0)
     }
 
-    /// Commit only the two observed preference fields. Validate the owner and
+    /// Commit only observed preference fields. Validate the owner and
     /// row inside the same transaction so a late read cannot recreate a chat.
     pub fn apply_observed_chat_flags(
         &self,
@@ -594,6 +594,7 @@ impl Ingest {
         row: &ConversationRow,
         pinned: Option<bool>,
         marked_unread: Option<bool>,
+        archived: Option<bool>,
         is_current: impl FnOnce() -> bool,
     ) -> Result<Option<Applied>> {
         let (applied, matched) = self.local_tx(&owner.account_id, "local.observed_chat_flags", |conn, out, now| {
@@ -604,9 +605,9 @@ impl Ingest {
             let Some(mut current) = ch_db::get_conversation(conn, &owner.account_id, &row.chat_id)?
                 .filter(|c| !c.is_gone && c.id == row.id && c.created_at == row.created_at && c.kind == row.kind)
             else { return Ok(false); };
-            let flags = (pinned.or(current.pinned), marked_unread.or(current.marked_unread));
-            if flags != (current.pinned, current.marked_unread) {
-                (current.pinned, current.marked_unread) = flags;
+            let flags = (pinned.or(current.pinned), marked_unread.or(current.marked_unread), archived.unwrap_or(current.archived));
+            if flags != (current.pinned, current.marked_unread, current.archived) {
+                (current.pinned, current.marked_unread, current.archived) = flags;
                 current.updated_at = now;
                 ch_db::update_conversation(conn, &current)?;
                 out.push(Change::ConversationUpserted { chat_id: row.chat_id.clone(), created: false });

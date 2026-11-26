@@ -4,8 +4,11 @@ import asyncio
 from contact_hub_sdk import errors as rpc, types as dto
 from telethon import functions, types as tl
 
-from .mapping import identifier, peer_id, resolve_chat
+from .mapping import archive_state, identifier, peer_id, resolve_chat
 from .session import translated
+
+_UPDATES = (tl.Updates, tl.UpdatesCombined, tl.UpdatesTooLong, tl.UpdateShort,
+            tl.UpdateShortMessage, tl.UpdateShortChatMessage, tl.UpdateShortSentMessage)
 
 
 def uncertain(error=None):
@@ -44,6 +47,8 @@ async def observe(client, target, chat_id, fields, *, capability="chat.flags"):
         raise rpc.NotSupported("Telegram monoforums are unsupported.", capability=capability)
     kind = "dm" if cls is tl.User else "group" if cls is tl.Chat or entity.megagroup else "channel"
     flags = {"pinned": dialog.pinned, "marked_unread": dialog.unread_mark}
+    if "archived" in fields:
+        flags["archived"] = archive_state(dialog.folder_id)
     if any(type(flags[name]) is not bool for name in fields):
         raise rpc.Internal("Telegram returned invalid dialog flags.")
     return dto.Conversation(id=chat_id, kind=kind, **{name: flags[name] for name in fields})
@@ -51,26 +56,35 @@ async def observe(client, target, chat_id, fields, *, capability="chat.flags"):
 
 async def get(client, chat_id):
     target = tl.InputDialogPeer(await resolve_chat(client, chat_id))
-    conversation = await observe(client, target, chat_id, ("pinned", "marked_unread"), capability="chat.get")
+    conversation = await observe(client, target, chat_id, ("pinned", "marked_unread", "archived"), capability="chat.get")
     return dto.ChatsGetResult(conversation=conversation)
 
 
 async def set_flags(account, client, p):
-    fields = {name: getattr(p, name) for name in ("pinned", "marked_unread") if getattr(p, name) is not None}
+    fields = {name: getattr(p, name) for name in ("pinned", "marked_unread", "archived") if getattr(p, name) is not None}
     if not fields:
         identifier(p.chat_id, "chat_id", peer=True)
         return
     target = tl.InputDialogPeer(await resolve_chat(client, p.chat_id))
-    current = await observe(client, target, p.chat_id, fields)
+    # Moving a dialog between lists may affect its pin. Publish that observed
+    # side effect even when pinning was not part of the requested change.
+    observed_fields = tuple(dict.fromkeys((*fields, "pinned"))) if "archived" in fields else fields
+    current = await observe(client, target, p.chat_id, observed_fields)
     acknowledged = False
     failure = None
     for name, desired in fields.items():
         if getattr(current, name) is desired:
             continue
-        request = (functions.messages.ToggleDialogPinRequest(peer=target, pinned=desired) if name == "pinned"
-                   else functions.messages.MarkDialogUnreadRequest(peer=target, unread=desired))
+        if name == "archived":
+            request = functions.folders.EditPeerFoldersRequest([
+                tl.InputFolderPeer(peer=target.peer, folder_id=1 if desired else 0)])
+        elif name == "pinned":
+            request = functions.messages.ToggleDialogPinRequest(peer=target, pinned=desired)
+        else:
+            request = functions.messages.MarkDialogUnreadRequest(peer=target, unread=desired)
         try:
-            if await client(request) is not True:
+            result = await client(request)
+            if not (isinstance(result, _UPDATES) if name == "archived" else result is True):
                 raise rpc.NetworkError()
             acknowledged = True
         except asyncio.CancelledError:
@@ -87,7 +101,7 @@ async def set_flags(account, client, p):
 
     try:
         if acknowledged or failure:
-            current = await observe(client, target, p.chat_id, fields)
+            current = await observe(client, target, p.chat_id, observed_fields)
         await account.conversations_upsert([current], ack=True)
     except (Exception, asyncio.CancelledError) as exc:
         if acknowledged or failure:

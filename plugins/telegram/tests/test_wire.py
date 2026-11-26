@@ -32,6 +32,8 @@ if sys.argv[1] == 'legacy':
     plugin.capabilities = {k: v for k, v in plugin.capabilities.items() if k != 'chat.get'}
 elif sys.argv[1] == 'empty-object':
     plugin.capabilities = {**plugin.capabilities, 'chat.get': {}}
+elif sys.argv[1] == 'without-archive':
+    plugin.capabilities = {**plugin.capabilities, 'chat.archive': False}
 plugin.run()
 """
     with FakeCore([sys.executable, "-c", bootstrap, getattr(request, "param", "default")], plugin_dir=ROOT, tmp=tmp_path,
@@ -423,14 +425,14 @@ def test_cancelling_dispatched_unread_write_preserves_unknown_through_sdk_wire(c
 
 def test_dialog_flags_capabilities_scope_and_sparse_ack(core):
     caps = core.initialize()["capabilities"]
-    assert all(caps[key] is True for key in ("chat.flags", "chat.pin", "chat.mark_unread"))
-    assert not caps.get("chat.archive") and not caps.get("chat.mute")
+    assert all(caps[key] is True for key in ("chat.flags", "chat.pin", "chat.mark_unread", "chat.archive"))
+    assert not caps.get("chat.mute")
     start(core)
     start(core, name="b")
     p = {"account_id": "a", "chat_id": "17"}
     method = "chats.set_flags"
     start_events = len(core.all_events)
-    for field, value, cap in [("archived", False, "chat.archive"), ("muted", False, "chat.mute"),
+    for field, value, cap in [("muted", False, "chat.mute"),
                               ("mute_until", "2027-01-01T00:00:00Z", "chat.mute")]:
         error = core.error(method, {**p, "chat_id": "invalid", "pinned": True, field: value})
         assert error["data"] == {"code": "NOT_SUPPORTED", "capability": cap}
@@ -488,7 +490,7 @@ def test_chat_get_observes_the_selected_account_without_events(core):
     before = len(core.all_events)
     for account, marked in [("a", True), ("b", False)]:
         assert core.call("chats.get", {"account_id": account, "chat_id": "17"}) == {"conversation": {
-            "id": "17", "kind": "dm", "pinned": False, "marked_unread": marked}}
+            "id": "17", "kind": "dm", "pinned": False, "marked_unread": marked, "archived": False}}
     for owner, chat, code in [("missing", "17", "UNKNOWN_ACCOUNT"), ("a", "017", "INVALID_PARAMS"),
                               ("a", "99", "NOT_FOUND")]:
         assert core.error("chats.get", {"account_id": owner, "chat_id": chat})["data"]["code"] == code
@@ -501,3 +503,37 @@ def test_legacy_telegram_capability_gate_precedes_account_lookup(core):
     assert result["api_version"] == "1.0.0" and "chat.get" not in result["capabilities"]
     error = core.error("chats.get", {"account_id": "missing", "chat_id": "17"})
     assert error["data"] == {"code": "NOT_SUPPORTED", "capability": "chat.get"}
+
+
+def test_archive_is_account_scoped_and_sparse_through_sdk_wire(core):
+    start(core, name="a")
+    start(core, name="b")
+    p = {"account_id": "a", "chat_id": "17"}
+    assert core.call("chats.set_flags", {**p, "pinned": True}) == {}
+    for desired in (True, False):
+        before = len(core.all_events)
+        assert core.call("chats.set_flags", {**p, "archived": desired}) == {}
+        events = core.all_events[before:]
+        assert len(events) == 1 and events[0]["method"] == "conversations.upsert"
+        assert events[0]["params"]["conversations"] == [
+            {"id": "17", "kind": "dm", "archived": desired, "pinned": False}]
+        assert core.call("chats.get", p)["conversation"]["archived"] is desired
+        assert core.call("chats.get", {**p, "account_id": "b"})["conversation"]["archived"] is False
+        before = len(core.all_events)
+        assert core.call("chats.sync", {**p, "include_archived": True}) == {}
+        full = next(e["params"]["conversations"][0] for e in core.all_events[before:]
+                    if e["method"] == "conversations.upsert")
+        assert full["archived"] is desired
+        assert full["title"] == "Sample" and full["read_inbox_max_id"] == "2"
+    assert core.shutdown() == 0
+
+
+@pytest.mark.parametrize("core", ["without-archive"], indirect=True)
+def test_archive_false_requires_the_same_capability_and_preflights_mixed_changes(core):
+    assert core.initialize()["capabilities"]["chat.archive"] is False
+    for desired in (True, False):
+        error = core.error("chats.set_flags", {"account_id": "missing", "chat_id": "invalid",
+                                               "archived": desired, "pinned": True})
+        assert error["data"] == {"code": "NOT_SUPPORTED", "capability": "chat.archive"}
+    assert not core.all_events
+    assert core.shutdown() == 0
