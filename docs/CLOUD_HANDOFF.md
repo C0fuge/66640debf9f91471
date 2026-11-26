@@ -1,13 +1,13 @@
 # Verification handoff
 
-Latest verified source: `2c0959483edb9edae6f4f54e27987cee640c7e99`.
+Latest verified source: `dc808f36f854cbae471a5edd4cf8144f6ebfa7c1`.
 [Successful workflow](https://github.com/C0fuge/66640debf9f91471/actions/runs/45575407031).
 Artifacts contain logs, synthetic browser screenshots and Linux debug binaries.
 These are build/test results, not a production deployment or live-account test.
 
 `Verify` runs on code pushes, manual dispatch and a configured daily schedule at
-00:23UTC (03:23 Moscow). Push execution was observed; scheduled execution has not
-been independently confirmed. Both jobs must be successful for the exact source
+00:23UTC (03:23 Moscow). Push/manual execution and scheduled run45580094701 were observed (the latter
+failed on an older candidate). Verify was re-enabled after an explicit owner resume. Both jobs must be successful for the exact source
 SHA. A short SHA is not a valid prefix filter for GitHub's `head_sha` API query;
 resolve it to the full commit before matching a run. Do not infer completion from
 an older green run or a green job whose peer job failed.
@@ -15,7 +15,7 @@ an older green run or a green job whose peer job failed.
 Rust gates include workspace/no-default tests, two explicit fake integrations,
 an opt-in native portal test on a fresh private D-Bus session, Clippy, fake-plugin
 conformance and desktop/CLI builds. UI/Python gates include dependency-locked
-suites and actual headless Chromium with synthetic account/action/media/poll data.
+suites and actual headless Chromium with synthetic account/action/media/poll/reaction data.
 
 `Resolve dependency lock` is a separate manually triggered metadata-only workflow.
 Its artifact is a proposed Cargo lockfile and source hash, not build verification.
@@ -26,7 +26,9 @@ private history, account databases, messenger sessions, environment files, model
 credentials or subscription authentication. Actions builds/tests require no model
 API key. No cloud coding/model session is running or scheduled here.
 
-Next work is local development of ADR0008's app reactions and a read-only Telegram
-sticker catalog; neither candidate is included in the verified27-operation app.
+The verified app now has30 typed operations, including ordinary reaction views and
+full-set replacement. Telegram implements39 of119 methods, with80 pending.
+Next work is a reviewed single-file composer ingress and local admission seam;
+the current generic enqueue creates a new intent ID and cannot deduplicate callers.
 Migration and live-account verification remain pending. Preserve the existing app
 and its data until a separately verified switch-over.

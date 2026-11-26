@@ -1,24 +1,22 @@
 # Build progress
 
-Development runs locally. GitHub Actions runs builds/tests only, with no API key
-or provider login. All test accounts and messages are synthetic.
+Latest source `dc808f3` passed
+[Verify45794077036](https://github.com/C0fuge/66640debf9f91471/actions/runs/45794077036).
+Rust267, no-default core113, explicit native portal/fake integrations, Clippy,
+conformance144/0/71 and debug binaries passed. UI61, SDK48, fake8, MAX77 and
+Telegram110 passed, together with six real Chromium scenarios.
 
-## Verified first night batch
+The app has30 typed operations including bounded media jobs and explicit ordinary
+reaction replacement/reactor pages. Telegram implements39 of119 methods, including
+read-only base sticker catalogs/static thumbnails. MAX has partial auth/text/chat
+upserts and exact-ack deletion; history continuation and edit remain unsupported.
+No full messenger parity, real account/server behavior, or native desktop chooser
+interaction is claimed.
 
-Run45485427483 passed UI20, SDK41, fake8, Telegram28 and the Rust workspace,
-no-default core, Clippy, fake integrations/conformance and debug builds. It
-verifies the23-handler Telegram source snapshot, not full platform parity.
+Next source batch requires a reviewed file-ingress contract: existing SendFile
+worker reuse, durable local staging and caller-stable admission. No second send
+queue, generic renderer filesystem API, new DB migration or cloud model session
+is approved by this status file.
 
-## Next candidate, awaiting verification
-
-- Four typed app actions: edit/delete/pin/unpin, scoped validation, ingest effects,
-  uncertain-outcome projection, UI dialogs and browser fixtures.
-- Correct Draft snapshot content/freshness comparison, spec erratum and regressions.
-- Partial MAX foundation: private state/auth/events/text and durable send journal.
-  Required history continuation is intentionally unsupported pending verified
-  server boundaries; real accounts/server behavior remain unverified.
-- Full platform source audit and proposals in docs/platform-coverage.md and
-  docs/api-contract-gaps.md.
-
-The next workflow also runs headless account/action UI checks with screenshots.
-A published candidate is not a claim that its tests have passed; inspect Actions.
+Source is sanitized; all CI accounts/messages/files are synthetic. No migration
+or old-app deletion has occurred. See BUILD_PLAN.md and CLOUD_HANDOFF.md.
