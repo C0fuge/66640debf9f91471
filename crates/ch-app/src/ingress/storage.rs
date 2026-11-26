@@ -152,6 +152,9 @@ impl Service {
         (inv.complete, entries)
     }
     pub(super) async fn refresh(self: &Arc<Self>) {
+        let Ok(_refresh) = self.refresh_gate.try_lock() else {
+            return;
+        };
         let epoch = {
             let l = lock(&self.ledger);
             if l.closed
@@ -166,11 +169,17 @@ impl Service {
         let Ok(slot) = self.scan.clone().try_acquire_owned() else {
             return;
         };
+        let Ok(reader) = self.readers.clone().try_read_owned() else {
+            return;
+        };
+        if self.stop.is_cancelled() {
+            return;
+        }
         let s = self.clone();
         // A read request may be dropped during metadata I/O; the blocking task retains the
         // scan permit. No path is published, deleted or enqueued by this operation.
         let Ok((complete, candidates)) = tokio::task::spawn_blocking(move || {
-            let _slot = slot;
+            let (_reader, _slot) = (reader, slot);
             s.import_candidates()
         })
         .await
@@ -178,8 +187,10 @@ impl Service {
             return;
         };
         let mut imported = Vec::new();
+        let mut complete = complete;
         for (owner, b) in candidates {
             let Ok((generation, _guard)) = self.core.accounts().storage_lease(&owner).await else {
+                complete = false;
                 continue;
             };
             let m = &b.manifest;
@@ -219,6 +230,12 @@ impl Service {
             if e.generation.is_cancelled() || l.ids.contains_key(&e.stage) {
                 continue;
             }
+            // Inventory is bounded to 256 managed entries. Retain prior session receipts,
+            // but do not allow repeated partial inventories to grow a second unbounded ledger.
+            if l.entries.len().saturating_sub(l.keys.len()) >= 256 {
+                l.scanned_epoch = None;
+                break;
+            }
             let account = e.thread.account_id.clone();
             l.insert(e);
             events::notify(&self.changes, &account);
@@ -237,20 +254,21 @@ impl Service {
             return;
         };
         if matches!(b.manifest.phase, fs::Phase::Ready) && e.outbox_row.is_none() {
-            if matches!(
-                self.outbox.get_by_client_id(&b.manifest.client_id),
-                Ok(None)
-            ) {
-                return;
-            }
+            let problem = match self.outbox.get_by_client_id(&b.manifest.client_id) {
+                Ok(None) => return,
+                Ok(Some(_)) => Problem::new("conflict", "integrity"),
+                Err(_) => Problem::new("unavailable", "storage"),
+            };
             let mut l = lock(&self.ledger);
             if let Some(current) = l
                 .entries
                 .get_mut(&n)
                 .filter(|r| r.active.is_none() && r.state == State::Ready)
             {
-                current.state = State::Failed;
-                current.problem = Some(Problem::new("conflict", "integrity"));
+                if problem.reason == "integrity" {
+                    current.state = State::Failed;
+                }
+                current.problem = Some(problem);
             }
             return;
         }
@@ -443,10 +461,13 @@ pub(super) fn unreferenced(
             };
             remaining = left;
             let Some(len) = row
-                .get::<_, Option<usize>>(0)
+                .get::<_, Option<i64>>(0)
                 .map_err(|_| fs::Error::Integrity)?
             else {
                 continue;
+            };
+            let Ok(len) = usize::try_from(len) else {
+                return Ok(false);
             };
             if len > 65536 || len > bytes {
                 return Ok(false);

@@ -11,6 +11,11 @@ enum Action {
 }
 type Work<T> = std::result::Result<T, Problem>;
 
+struct Run {
+    capabilities: Arc<ch_protocol::Capabilities>,
+    token: CancellationToken,
+}
+
 struct Job {
     s: Arc<Service>,
     seq: u64,
@@ -19,7 +24,7 @@ struct Job {
     stage: String,
     cancel: CancellationToken,
     generation: CancellationToken,
-    handshake: Option<Arc<ch_protocol::Capabilities>>,
+    run: Option<Run>,
 }
 impl Service {
     async fn gates(
@@ -27,11 +32,22 @@ impl Service {
         owner: AccountRow,
         t: Thread,
         intent: Option<fs::Intent>,
-    ) -> Result<Arc<ch_protocol::Capabilities>> {
+    ) -> Result<Run> {
         let s = self.clone();
         blocking(move || {
-            s.eligible(&owner, &t, intent.as_ref())
-                .map(|(_, caps)| caps)
+            let token = s
+                .core
+                .host()
+                .running_account_token(&owner.plugin_id, &owner.account_id)
+                .ok_or(Failure::Unavailable)?;
+            let (_, capabilities) = s.eligible(&owner, &t, intent.as_ref())?;
+            if token.is_cancelled() {
+                return Err(Failure::Unavailable);
+            }
+            Ok(Run {
+                capabilities,
+                token,
+            })
         })
         .await
     }
@@ -74,9 +90,18 @@ impl Service {
             .clone()
             .try_acquire_owned()
             .map_err(|_| Failure::Conflict)?;
+        let reader = self
+            .readers
+            .clone()
+            .try_read_owned()
+            .map_err(|_| Failure::Unavailable)?;
+        if self.stop.is_cancelled() {
+            return Err(Failure::Unavailable);
+        }
         let service = self.clone();
         let owner_copy = owner.clone();
         let (_slot, _guard) = blocking(move || {
+            let _reader = reader;
             let inv = service
                 .store()
                 .map_err(|_| Failure::Unavailable)?
@@ -91,7 +116,10 @@ impl Service {
             return Ok(v);
         }
         l.capacity()?;
-        if l.keys.len() >= KEYS || l.unsettled_charge || generation.is_cancelled() {
+        if l.keys.len() >= KEYS || l.unsettled_charge {
+            return Err(Failure::Conflict);
+        }
+        if generation.is_cancelled() || handshake.token.is_cancelled() {
             return Err(Failure::Conflict);
         }
         let stage = token().map_err(|_| Failure::Internal)?;
@@ -158,8 +186,31 @@ impl Service {
             }
             Ok(None)
         };
-        if let Some(v) = existing(&lock(&self.ledger))? {
-            return Ok(v);
+        let recovery = {
+            let l = lock(&self.ledger);
+            if existing(&l)?.is_some() {
+                let n = Self::sequence(&l, &id, &thread, &owner)?;
+                Some((n, l.entries[&n].clone()))
+            } else {
+                None
+            }
+        };
+        if let Some((n, old)) = recovery {
+            let service = self.clone();
+            return blocking(move || {
+                service.reconcile(n, &old, &owner);
+                let l = lock(&service.ledger);
+                let actual = l
+                    .entries
+                    .get(&n)
+                    .filter(|e| e.owned(&thread, &owner))
+                    .ok_or(Failure::Missing)?;
+                if actual.intent.as_ref() != Some(&intent) {
+                    return Err(Failure::Conflict);
+                }
+                Ok(actual.render(&service.session))
+            })
+            .await;
         }
         let handshake = self
             .gates(owner.clone(), thread.clone(), Some(intent.clone()))
@@ -211,7 +262,7 @@ impl Service {
         n: u64,
         owner: AccountRow,
         action: Action,
-        handshake: Option<Arc<ch_protocol::Capabilities>>,
+        run: Option<Run>,
     ) -> Value {
         // Called while admission/close and the four-job limit are locked together.
         let e = l.entries.get_mut(&n).expect("registered ingress receipt");
@@ -225,7 +276,7 @@ impl Service {
             stage: e.stage.clone(),
             cancel,
             generation: e.generation.clone(),
-            handshake,
+            run,
         });
         let value = e.render(&self.session);
         events::notify(&self.changes, &e.thread.account_id);
@@ -250,7 +301,11 @@ impl Job {
         self.s.notify(self.seq);
     }
     fn check(&self, life: &CancellationToken) -> std::result::Result<(), fs::Error> {
-        if self.cancel.is_cancelled() || self.generation.is_cancelled() || life.is_cancelled() {
+        if self.cancel.is_cancelled()
+            || self.generation.is_cancelled()
+            || self.run.as_ref().is_some_and(|r| r.token.is_cancelled())
+            || life.is_cancelled()
+        {
             Err(fs::Error::Cancelled)
         } else {
             Ok(())
@@ -262,13 +317,19 @@ impl Job {
             .eligible(&self.owner, &self.thread, intent)
             .map_err(|_| fs::Error::TargetChanged)?;
         if !self
-            .handshake
+            .run
             .as_ref()
-            .is_some_and(|original| Arc::ptr_eq(original, &live))
+            .is_some_and(|r| !r.token.is_cancelled() && Arc::ptr_eq(&r.capabilities, &live))
         {
             return Err(fs::Error::TargetChanged);
         }
         Ok(limit)
+    }
+    async fn run_revoked(&self) {
+        match &self.run {
+            Some(run) => run.token.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
     }
     async fn run(self: &Arc<Self>, action: Action) -> Work<()> {
         let lease = self
@@ -284,6 +345,7 @@ impl Job {
             let slot = tokio::select! {
                 _=self.cancel.cancelled()=>return Err(fs::Error::Cancelled.into()),
                 _=life.cancelled()=>return Err(fs::Error::TargetChanged.into()),
+                _=self.run_revoked()=>return Err(fs::Error::TargetChanged.into()),
                 slot=self.s.scan.clone().acquire_owned()=>slot.map_err(|_|fs::Error::Cancelled)?,
             };
             let j = self.clone();
@@ -306,6 +368,7 @@ impl Job {
                 biased;
                 _=self.cancel.cancelled()=>return Err(fs::Error::Cancelled.into()),
                 _=life.cancelled()=>return Err(fs::Error::TargetChanged.into()),
+                _=self.run_revoked()=>return Err(fs::Error::TargetChanged.into()),
                 answer=rx=>answer,
             };
             match answer {
@@ -337,6 +400,7 @@ impl Job {
             biased;
             _=self.cancel.cancelled()=>return Err(fs::Error::Cancelled.into()),
             _=life.cancelled()=>return Err(fs::Error::TargetChanged.into()),
+            _=self.run_revoked()=>return Err(fs::Error::TargetChanged.into()),
             s=self.s.scan.clone().acquire_owned()=>s.map_err(|_|fs::Error::Cancelled)?,
         };
         let j = self.clone();
@@ -399,6 +463,10 @@ impl Job {
             limit,
             |n| {
                 self.check(life)?;
+                #[cfg(test)]
+                if n == size {
+                    self.s.at("copy-publication")?;
+                }
                 if n == size && size > self.effective(None)? {
                     return Err(fs::Error::TooLarge);
                 }
@@ -458,6 +526,15 @@ impl Job {
         if m.size > self.effective(Some(i))? {
             return Err(fs::Error::TooLarge.into());
         }
+        if self
+            .s
+            .outbox
+            .get_by_client_id(&m.client_id)
+            .map_err(|_| fs::Error::Storage)?
+            .is_some()
+        {
+            return Err(fs::Error::Integrity.into());
+        }
         // The same lock as cancel decides which side wins the hand-off.
         {
             let mut l = lock(&self.s.ledger);
@@ -482,6 +559,9 @@ impl Job {
         if life.is_cancelled() || m.size > self.effective(Some(i))? {
             return Err(fs::Error::TargetChanged.into());
         }
+        #[cfg(test)]
+        self.s.at("claimed")?;
+        self.check(life)?;
         let checked = claim.checked_path()?;
         let req = request(claim.manifest(), i, &checked)?;
         self.s
@@ -494,6 +574,8 @@ impl Job {
             e.outbox_row = Some("present");
             e.problem = None;
         });
+        #[cfg(test)]
+        self.s.at("committed")?;
         let consumed = claim.consume()?;
         self.s.inventory_changed();
         self.update(|e| {
@@ -522,6 +604,8 @@ impl Job {
             Ok(safe)
         });
         drop(tx);
+        #[cfg(test)]
+        let result = result.and_then(|()| self.s.at("discard-settlement"));
         self.s.inventory_changed();
         if matches!(result, Err(fs::Error::Unknown)) {
             lock(&self.s.ledger).unsettled_charge = true;

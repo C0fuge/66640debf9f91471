@@ -222,6 +222,9 @@ impl Ledger {
         }
     }
 }
+#[cfg(test)]
+type TestCheckpoint = dyn Fn(&str) -> std::result::Result<(), fs::Error> + Send + Sync;
+
 pub(crate) struct Service {
     core: Arc<Core>,
     db: Arc<Mutex<Db>>,
@@ -233,6 +236,10 @@ pub(crate) struct Service {
     stop: CancellationToken,
     scan: Arc<Semaphore>,
     starts: tokio::sync::Mutex<()>,
+    refresh_gate: tokio::sync::Mutex<()>,
+    readers: Arc<tokio::sync::RwLock<()>>,
+    #[cfg(test)]
+    checkpoint: Mutex<Option<Arc<TestCheckpoint>>>,
 }
 impl Service {
     pub(crate) async fn new(
@@ -252,6 +259,10 @@ impl Service {
             stop: CancellationToken::new(),
             scan: Arc::new(Semaphore::new(1)),
             starts: tokio::sync::Mutex::new(()),
+            refresh_gate: tokio::sync::Mutex::new(()),
+            readers: Arc::new(tokio::sync::RwLock::new(())),
+            #[cfg(test)]
+            checkpoint: Mutex::new(None),
         });
         s.refresh().await;
         Ok(s)
@@ -272,6 +283,8 @@ impl Service {
         for t in tasks {
             let _ = t.await;
         }
+        // Cancelled list/start callers may leave read-only blocking I/O running.
+        let _drained = self.readers.write().await;
     }
     pub(crate) fn invalidate(&self, account: Option<&str>, plugin: Option<&str>) {
         let l = lock(&self.ledger);
@@ -346,6 +359,11 @@ impl Service {
             .filter(|n| l.entries[n].owned(t, owner))
             .ok_or(Failure::Missing)
     }
+    #[cfg(test)]
+    fn at(&self, phase: &str) -> std::result::Result<(), fs::Error> {
+        let hook = lock(&self.checkpoint).clone();
+        if let Some(f) = hook { f(phase) } else { Ok(()) }
+    }
     fn notify(&self, seq: u64) {
         if let Some(e) = lock(&self.ledger).entries.get(&seq) {
             events::notify(&self.changes, &e.thread.account_id);
@@ -357,24 +375,31 @@ impl Service {
         key: Option<String>,
         cursor: Option<String>,
     ) -> Result<Value> {
-        let owner = self.owner(&thread).await?;
-        self.refresh().await;
         if key.as_deref().is_some_and(|k| !valid_key(k)) || (key.is_some() && cursor.is_some()) {
             return Err(Failure::Invalid);
         }
+        let owner = self.owner(&thread).await?;
+        self.refresh().await;
+        let (generation, guard) = self.core.accounts().storage_lease(&owner).await?;
+        let reader = self
+            .readers
+            .clone()
+            .try_read_owned()
+            .map_err(|_| Failure::Unavailable)?;
+        if self.stop.is_cancelled() {
+            return Err(Failure::Unavailable);
+        }
         let s = self.clone();
-        blocking(move||{
+        blocking(move || {
+            let (_reader,_guard)=(reader,guard);
             let (selected,remaining)={
                 let l=lock(&s.ledger);
-                let before=match cursor.as_deref(){
-                    None=>u64::MAX,
-                    Some(c)=>{
-                        let (session,id)=c.split_once('.').ok_or(Failure::Invalid)?;
-                        s.session(session)?;
-                        Self::sequence(&l,id,&thread,&owner).map_err(|_|Failure::Invalid)?
-                    }
-                };
-                let rows:Vec<_>=if let Some(k)=key.as_deref(){
+                let before=if let Some(c)=cursor.as_deref() {
+                    let (session,id)=c.split_once('.').ok_or(Failure::Invalid)?;
+                    s.session(session)?;
+                    Self::sequence(&l,id,&thread,&owner).map_err(|_|Failure::Invalid)?
+                }else{u64::MAX};
+                let rows: Vec<_>=if let Some(k)=key.as_deref() {
                     l.keys.get(k).and_then(|n|l.entries.get(n).filter(|e|e.owned(&thread,&owner)).map(|e|(*n,e.clone()))).into_iter().collect()
                 }else{
                     l.entries.range(..before).rev().filter(|(_,e)|e.owned(&thread,&owner)).take(PAGE+1).map(|(&n,e)|(n,e.clone())).collect()
@@ -389,17 +414,15 @@ impl Service {
                 s.reconcile(n,&old,&owner);
                 let l=lock(&s.ledger);
                 let actual=l.entries.get(&n).ok_or(Failure::Missing)?;
-                let item=actual.render(&s.session);
-                items.push(item);
+                if !actual.owned(&thread,&owner){continue;}
+                items.push(actual.render(&s.session));
                 if serde_json::to_vec(&items).map_err(|_|Failure::Internal)?.len()>MAX_REPLY-256{
                     items.pop();more=true;break;
                 }
                 last=Some(format!("{}.{}",s.session,actual.stage));
             }
-            let page=json!({"sessionId":s.session,"items":items,"nextCursor":if more{last}else{None},"remainingRequestKeys":remaining});
-            // Changes concurrent with our snapshot must not disclose receipts to a replacement owner.
-            s.current_owner(&owner)?;
-            Ok(page)
+            if generation.is_cancelled(){return Err(Failure::Missing);}
+            Ok(json!({"sessionId":s.session,"items":items,"nextCursor":if more{last}else{None},"remainingRequestKeys":remaining}))
         }).await
     }
 }

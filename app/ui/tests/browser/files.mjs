@@ -40,6 +40,7 @@ try {
   await files().getByLabel("File caption", { exact: true }).fill(" literal file caption ");
   assert.equal(await count("enqueueFile"), 0, "review and options are local only");
   assert.equal(await files().locator("report").count(), 0, "filename remains escaped text");
+  assert.equal(await files().getByText("The connection is unavailable.", { exact: true }).count(), 0, "a recovered receipt clears the stale transport notice");
   await snapshot("files-ready-review.png");
   await files().getByRole("button", { name: "Send file", exact: true }).click();
   await files().getByText("Admission unconfirmed", { exact: true }).waitFor();
@@ -67,6 +68,11 @@ try {
   await files().getByText(/Sent files are retained/).waitFor();
   await snapshot("files-retained-capacity.png");
   assert.equal(await count("enqueueFile"), 2);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await snapshot("files-retained-capacity-mobile.png");
+  assert.equal(await page.getByLabel("Message", { exact: true }).inputValue(), "Preserve this text draft");
+  const bounds = await page.getByLabel("Message", { exact: true }).boundingBox();
+  assert.ok(bounds && bounds.y >= 0 && bounds.y + bounds.height <= 844, "message draft stays inside the mobile viewport");
   assert.deepEqual(errors, []);
   console.log("File composer passed Chromium checks.");
 } finally { await browser?.close(); await server.close(); }

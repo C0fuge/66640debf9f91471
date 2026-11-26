@@ -162,6 +162,20 @@ impl HostHandle {
             .map(|r| r.info.clone())
     }
 
+    /// A revocable child token for this account's current successful start on
+    /// the running plugin. A stop, disable, or process exit invalidates it.
+    pub fn running_account_token(
+        &self,
+        plugin_id: &str,
+        account_id: &str,
+    ) -> Option<CancellationToken> {
+        self.0.registry.running_account_token(plugin_id, account_id)
+    }
+
+    pub(crate) fn revoke_account_run(&self, plugin_id: &str, account_id: &str) {
+        self.0.registry.revoke_account_run(plugin_id, account_id);
+    }
+
     /// State changes as they happen. A slow subscriber may see `Lagged`; re-read the
     /// snapshot then.
     pub fn subscribe(&self) -> broadcast::Receiver<StateChange> {

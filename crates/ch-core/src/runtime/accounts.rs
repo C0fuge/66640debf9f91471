@@ -433,17 +433,33 @@ impl Accounts {
 
     /// Switch "wanted": persist it, then start or stop the account.
     pub async fn set_enabled(&self, account_id: &str, enabled: bool) -> Result<()> {
+        let me = self.clone();
+        let id = account_id.to_owned();
+        tokio::spawn(async move { me.set_enabled_owned(&id, enabled).await }).await?
+    }
+
+    async fn set_enabled_owned(&self, account_id: &str, enabled: bool) -> Result<()> {
+        let lock = self.lock_for(account_id);
+        let _guard = lock.lock().await;
         let row = self.row(account_id).await?;
         if row.enabled != enabled {
-            let id = account_id.to_owned();
+            let owner = row.clone();
+            let host = self.0.host.clone();
             self.db(move |db| {
-                Ok(ch_db::update_account_meta(
-                    db.conn(),
-                    &id,
-                    row.label.as_deref(),
-                    row.position,
+                let tx = db.transaction()?;
+                storage::check_owner(&tx, &owner)?;
+                ch_db::update_account_meta(
+                    &tx,
+                    &owner.account_id,
+                    owner.label.as_deref(),
+                    owner.position,
                     enabled,
-                )?)
+                )?;
+                tx.commit().map_err(ch_db::Error::from)?;
+                if !enabled {
+                    host.revoke_account_run(&owner.plugin_id, &owner.account_id);
+                }
+                Ok(())
             })
             .await?;
             self.0
@@ -454,11 +470,10 @@ impl Accounts {
                 }));
         }
         if enabled {
-            self.start(account_id).await
+            self.start_row(&row).await
         } else {
-            let lock = self.lock_for(account_id);
-            let _g = lock.lock().await;
-            let row = self.row(account_id).await?;
+            // Also revoke a directly started host account on repeat disable.
+            self.0.host.revoke_account_run(&row.plugin_id, account_id);
             self.stop_on_host(&row).await;
             Ok(())
         }

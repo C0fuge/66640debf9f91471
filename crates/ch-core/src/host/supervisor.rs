@@ -45,6 +45,17 @@ use super::transport::{Frame, FrameError, FrameReader, encode};
 pub(crate) struct AccountRecord {
     pub info: AccountInfo,
     pub spec: AccountSpec,
+    // One interval of successful account.start on this process. Status events
+    // and duplicate starts preserve it; callers only receive child tokens.
+    run: Option<CancellationToken>,
+}
+
+impl AccountRecord {
+    fn revoke_run(&mut self) {
+        if let Some(run) = self.run.take() {
+            run.cancel();
+        }
+    }
 }
 
 pub(crate) struct PluginEntry {
@@ -83,6 +94,11 @@ impl Registry {
             if e.state == state {
                 return;
             }
+            if !state.is_running() {
+                for record in e.accounts.values_mut() {
+                    record.revoke_run();
+                }
+            }
             e.state = state.clone();
         }
         let _ = self.changes.send(StateChange::Plugin {
@@ -93,6 +109,33 @@ impl Registry {
 
     pub fn plugin_state(&self, plugin_id: &str) -> Option<PluginState> {
         self.lock().get(plugin_id).map(|e| e.state.clone())
+    }
+
+    pub fn running_account_token(
+        &self,
+        plugin_id: &str,
+        account_id: &str,
+    ) -> Option<CancellationToken> {
+        let g = self.lock();
+        let entry = g.get(plugin_id)?;
+        if !entry.state.is_running() {
+            return None;
+        }
+        let record = entry.accounts.get(account_id)?;
+        if !record.info.wanted || record.info.phase != AccountPhase::Running {
+            return None;
+        }
+        record.run.as_ref().map(CancellationToken::child_token)
+    }
+
+    pub fn revoke_account_run(&self, plugin_id: &str, account_id: &str) {
+        if let Some(record) = self
+            .lock()
+            .get_mut(plugin_id)
+            .and_then(|e| e.accounts.get_mut(account_id))
+        {
+            record.revoke_run();
+        }
     }
 
     /// Mutate (creating if needed) one account record and broadcast the result.
@@ -111,9 +154,17 @@ impl Registry {
                 .or_insert_with(|| AccountRecord {
                     info: AccountInfo::new(plugin_id, account_id),
                     spec: AccountSpec::default(),
+                    run: None,
                 });
             let before = rec.info.clone();
             f(rec);
+            if !rec.info.wanted || rec.info.phase != AccountPhase::Running {
+                rec.revoke_run();
+            } else if e.state.is_running()
+                && (!before.wanted || before.phase != AccountPhase::Running)
+            {
+                rec.run = Some(CancellationToken::new());
+            }
             if rec.info == before {
                 return Some(before);
             }
@@ -414,6 +465,9 @@ impl Supervisor {
             let idle = match self.run_process(&deliver_tx).await {
                 Outcome::Shutdown(reply) => break reply,
                 Outcome::Restart => {
+                    // A requested restart must start each wanted account on the
+                    // replacement process just like recovery from a process exit.
+                    self.park_accounts("plugin restarting");
                     self.failures = 0;
                     continue;
                 }

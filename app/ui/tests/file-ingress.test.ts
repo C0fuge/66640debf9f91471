@@ -124,3 +124,15 @@ test("upload progress remains exact and never borrows local copy progress", () =
   assert.equal(uploadNotice({ ...item, doneBytes: "01" }), null);
   assert.equal(uploadNotice({ ...item, kind: "sendText" }), null);
 });
+
+
+test("an unconfirmed cancellation cannot repeat from an older ready snapshot", async () => {
+  let calls = 0;
+  const client = core({ cancelFileSelection: async () => { calls++; throw { code: "unavailable", outcomeUnknown: true }; } });
+  await assert.rejects(changeFile(client, ready, "cancel"));
+  learnFilePage(client, { ...page, items: [ready] });
+  await assert.rejects(changeFile(client, ready, "cancel"), { code: "conflict" });
+  assert.equal(calls, 1);
+  learnFilePage(client, { ...page, items: [{ ...ready, state: "cancelled" }] });
+  assert.equal(fileAction(client, ready), undefined);
+});

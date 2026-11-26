@@ -11,6 +11,7 @@
                                when `acked` is true), then answers with next_cursor "sent=<n>"
                    "stray"     emits an event for an account that is not started, as a request
                    "malformed" writes a batch array and a shapeless object; reports the reply code
+  hold_stop      waits for a synthetic marker in state_dir before replying to account.stop
   crash_on_start exits 1 before reading anything
   old_api        answers initialize with api_version 0.9.0
   garbage        prints a non-JSON line to stdout after initialize
@@ -156,6 +157,11 @@ def handle_request(req_id, method, params):
         if acc not in STARTED:
             error(req_id, -32008, "UNKNOWN_ACCOUNT", "not started")
             return
+        if MODE == "hold_stop":
+            marker = os.path.join(STARTED[acc]["state_dir"], "release-stop")
+            deadline = time.monotonic() + 5
+            while not os.path.exists(marker) and time.monotonic() < deadline:
+                time.sleep(0.005)
         del STARTED[acc]
         notify("status", {"account_id": acc, "state": "disconnected", "reconnecting": False})
         reply(req_id, {})
@@ -166,6 +172,8 @@ def handle_request(req_id, method, params):
             error(req_id, -32008, "UNKNOWN_ACCOUNT", "not started")
             return
         chat = params.get("chat_id", "")
+        if chat == "run_status":
+            notify("status", {"account_id": acc, "state": "connected", "detail": "updated", "reconnecting": False})
         if chat == "slow":
             ev = threading.Event()
             PENDING_CANCELS[req_id] = ev

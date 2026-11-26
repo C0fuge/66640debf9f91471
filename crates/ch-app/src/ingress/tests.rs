@@ -346,8 +346,14 @@ async fn strict_scope_limits_and_explicit_discard_retain_a_referenced_ready_stag
         .recover(&app.ingress.fs_owner(&a), id)
         .unwrap();
     let path = stage.managed_path();
-    let saved = path.to_str().unwrap().to_owned();
-    app.read(move|db|{db.conn().execute("INSERT INTO media_file(path,account_id,kind,last_access_at,created_at) VALUES (?1,'fixture','full',1,1)",[saved]).map_err(ch_db::Error::from)?;Ok(())}).await.unwrap();
+    // A generic pre-existing core reference may use a different absolute spelling.
+    let alias = f.source.path().join("stage-alias");
+    std::os::unix::fs::symlink(path.parent().unwrap(), &alias).unwrap();
+    let saved = alias.join("bytes").to_str().unwrap().to_owned();
+    app.read(move|db|{
+        db.conn().execute("INSERT INTO media_file(path,account_id,kind,last_access_at,created_at) VALUES (?1,'fixture','full',1,1)",[saved]).map_err(ch_db::Error::from)?;
+        Ok(())
+    }).await.unwrap();
     let mut cancel = f.scope(&app);
     cancel["stageId"] = json!(id);
     assert_eq!(
@@ -404,5 +410,246 @@ async fn cap_shapes_and_optional_presence_are_checked_before_launch() {
         call(&app, "enqueueFile", p).await["error"]["code"],
         "unsupported"
     );
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uncertain_unlink_keeps_charge_and_full_store_refuses_new_keys() {
+    let (f, app) = Fixture::new(caps()).await;
+    f.start(&app, "discard").await;
+    let ready = f.state(&app, "discard", "ready").await;
+    let initial = f.page(&app, None).await["remainingRequestKeys"].clone();
+    *lock(&app.ingress.checkpoint) = Some(Arc::new(|point| {
+        if point == "discard-settlement" {
+            Err(fs::Error::Unknown)
+        } else {
+            Ok(())
+        }
+    }));
+    let mut p = f.scope(&app);
+    p["stageId"] = ready["stageId"].clone();
+    call(&app, "cancelFileSelection", p).await;
+    f.state(&app, "discard", "failed").await;
+    assert_eq!(app.ingress.store().unwrap().inventory().total.slots, 0);
+    assert_eq!(f.start(&app, "new").await["error"]["code"], "conflict");
+    assert_eq!(f.start(&app, "discard").await["value"]["state"], "failed");
+    assert_eq!(f.page(&app, None).await["remainingRequestKeys"], initial);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_startup_manifests_are_imported_after_owner_lifecycle_refresh() {
+    let (f, app) = Fixture::new(caps()).await;
+    f.start(&app, "before").await;
+    let ready = f.state(&app, "before", "ready").await;
+    let root = app.core.host().config().upload_dir("fixture");
+    app.shutdown().await;
+    drop(app);
+    let hidden = f.root.path().join("fixture-hidden-uploads");
+    std::fs::rename(&root, &hidden).unwrap();
+    let app = f.reopen().await;
+    assert_eq!(
+        f.page(&app, None).await["items"].as_array().unwrap().len(),
+        0
+    );
+    app.core
+        .accounts()
+        .set_enabled("fixture", false)
+        .await
+        .unwrap();
+    std::fs::rename(hidden, root).unwrap();
+    app.core
+        .accounts()
+        .set_enabled("fixture", true)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = f.page(&app, None).await;
+            if page["items"][0]["stageId"] == ready["stageId"] {
+                assert!(page["items"][0]["requestKey"].is_null());
+                assert_eq!(page["items"][0]["state"], "ready");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(f.calls().is_empty());
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equal_birth_replacement_cannot_observe_old_terminal_metadata_or_reuse_key() {
+    let (f, app) = Fixture::new(caps()).await;
+    f.start(&app, "old").await;
+    let ready = f.state(&app, "old", "ready").await;
+    let owner = app.core.accounts().get("fixture").await.unwrap().unwrap();
+    app.core.accounts().remove("fixture").await.unwrap();
+    app.read(move|db|{
+        // The same synthetic wall-clock millisecond is returned on both creations.
+        let sql=format!("CREATE TRIGGER same_birth AFTER INSERT ON account BEGIN UPDATE account SET created_at={} WHERE account_id=NEW.account_id; END;",owner.created_at);
+        db.conn().execute_batch(&sql).map_err(ch_db::Error::from)?;
+        Ok(())
+    }).await.unwrap();
+    let replacement = app
+        .core
+        .accounts()
+        .add(NewAccount::new("ingress_fixture").id("fixture"))
+        .await
+        .unwrap();
+    assert_eq!(replacement.created_at, owner.created_at);
+    let page = f.page(&app, None).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 0);
+    assert!(
+        f.page(&app, Some("old")).await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(f.start(&app, "old").await["error"]["code"], "not_found");
+    let mut cancel = f.scope(&app);
+    cancel["stageId"] = ready["stageId"].clone();
+    assert_eq!(
+        call(&app, "cancelFileSelection", cancel).await["error"]["code"],
+        "not_found"
+    );
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn copy_publication_guard_drains_before_removing_account_directory() {
+    let (f, app) = Fixture::new(caps()).await;
+    let app = Arc::new(app);
+    let (reached, rx) = tokio::sync::oneshot::channel();
+    let reached = Mutex::new(Some(reached));
+    let (release, end) = std::sync::mpsc::channel();
+    let end = Mutex::new(end);
+    *lock(&app.ingress.checkpoint) = Some(Arc::new(move |point| {
+        if point == "copy-publication"
+            && let Some(signal) = lock(&reached).take()
+        {
+            let _ = signal.send(());
+            lock(&end).recv_timeout(Duration::from_secs(8)).unwrap();
+        }
+        Ok(())
+    }));
+    let owner = app.core.accounts().get("fixture").await.unwrap().unwrap();
+    let (revoked, lease) = app.core.accounts().storage_lease(&owner).await.unwrap();
+    drop(lease);
+    f.start(&app, "copy").await;
+    tokio::time::timeout(Duration::from_secs(8), rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let removing = app.clone();
+    let task = tokio::spawn(async move {
+        removing.core.accounts().remove("fixture").await.unwrap();
+    });
+    tokio::time::timeout(Duration::from_secs(5), revoked.cancelled())
+        .await
+        .unwrap();
+    assert!(!task.is_finished());
+    assert!(app.core.host().config().state_dir("fixture").exists());
+    release.send(()).unwrap();
+    task.await.unwrap();
+    app.shutdown().await;
+    assert!(!app.core.host().config().upload_dir("fixture").exists());
+    assert!(f.calls().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_consume_after_commit_recovers_exact_row_and_never_enqueues_again() {
+    let (f, app) = Fixture::new(caps()).await;
+    *lock(&app.ingress.checkpoint) = Some(Arc::new(|pt| {
+        if pt == "committed" {
+            Err(fs::Error::Unknown)
+        } else {
+            Ok(())
+        }
+    }));
+    f.start(&app, "lost").await;
+    let ready = f.state(&app, "lost", "ready").await;
+    let id = ready["stageId"].as_str().unwrap();
+    call(&app, "enqueueFile", f.enqueue(&app, id)).await;
+    f.state(&app, "lost", "enqueued").await;
+    app.shutdown().await;
+    drop(app);
+    let app = f.reopen().await;
+    let row = f.page(&app, None).await["items"][0].clone();
+    assert_eq!(row["state"], "enqueued");
+    assert_eq!(row["outboxRow"], "present");
+    assert_eq!(
+        call(&app, "enqueueFile", f.enqueue(&app, id)).await["value"]["outboxId"],
+        row["outboxId"]
+    );
+    assert_eq!(app.outbox.list("fixture").unwrap().len(), 1);
+    assert!(f.calls().len() <= 1);
+    app.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quota_and_receipt_bounds_preserve_exact_scope_and_continuations() {
+    let (f, app) = Fixture::new(caps()).await;
+    f.start(&app, "first").await;
+    f.state(&app, "first", "ready").await;
+    let owner = app.core.accounts().get("fixture").await.unwrap().unwrap();
+    let fsowner = app.ingress.fs_owner(&owner);
+    let mut inv = app.ingress.store().unwrap().inventory();
+    assert!(inv.complete);
+    inv.total.slots = 16;
+    assert!(storage::budget(&inv, &fsowner, 1).is_err());
+    inv.total.slots = 0;
+    inv.total.bytes = (8u64 << 30) - 1;
+    assert!(storage::budget(&inv, &fsowner, 1).is_ok());
+    assert!(storage::budget(&inv, &fsowner, 2).is_err());
+    inv.total.bytes = 0;
+    inv.per_directory.values_mut().next().unwrap().bytes = (4u64 << 30) - 1;
+    assert!(storage::budget(&inv, &fsowner, 1).is_ok());
+    assert!(storage::budget(&inv, &fsowner, 2).is_err());
+    // Populate synthetic process receipts without opening thousands of native dialogs.
+    {
+        let mut l = lock(&app.ingress.ledger);
+        let base = l.entries.values().next().unwrap().clone();
+        for k in 1..KEYS {
+            let mut e = base.clone();
+            e.stage = format!("{k:032x}");
+            e.key = Some(format!("key{k}"));
+            e.state = State::Cancelled;
+            e.bound = None;
+            e.active = None;
+            l.insert(e);
+        }
+    }
+    let page = f.page(&app, None).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), PAGE);
+    assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_REPLY);
+    assert_eq!(page["remainingRequestKeys"], 0);
+    let cursor = page["nextCursor"].clone();
+    let next = call(
+        &app,
+        "listFileStages",
+        json!({"thread":f.thread,"requestKey":null,"cursor":cursor}),
+    )
+    .await;
+    assert_eq!(next["value"]["items"].as_array().unwrap().len(), PAGE);
+    assert_ne!(
+        next["value"]["items"][0]["stageId"],
+        page["items"][0]["stageId"]
+    );
+    let mut other = f.thread.clone();
+    other.topic_id = None;
+    assert_eq!(
+        call(
+            &app,
+            "listFileStages",
+            json!({"thread":other,"requestKey":null,"cursor":cursor})
+        )
+        .await["error"]["code"],
+        "invalid_request"
+    );
+    assert_eq!(f.start(&app, "fresh").await["error"]["code"], "conflict");
+    assert_eq!(f.start(&app, "first").await["value"]["state"], "ready");
     app.shutdown().await;
 }

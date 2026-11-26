@@ -4,7 +4,7 @@ The TypeScript declarations in `app/ui/src/core/index.ts` define the Phase 3 wir
 
 ## Transport
 
-The Tauri adapter invokes `core_request` with one argument named `request`, containing a `CoreRequest`. The Rust dispatcher allowlists the methods in `CoreOperations`. Return the matching `CoreReply`. For example, `{"request":{"method":"inventory","params":{}}}` returns `{"ok":true,"value":{"plugins":[],"accounts":[],"mediaAccess":{"saveCopy":false}}}` on an empty browser installation. Client methods resolve to the value or reject with a `CoreFailure`. Adapter transport failures reject with `unavailable`. Never automatically replay a mutation after a lost reply.
+The Tauri adapter invokes `core_request` with one argument named `request`, containing a `CoreRequest`. The Rust dispatcher allowlists the methods in `CoreOperations`. Return the matching `CoreReply`. For example, `{"request":{"method":"inventory","params":{}}}` returns `{"ok":true,"value":{"plugins":[],"accounts":[],"mediaAccess":{"saveCopy":false},"composerAccess":{"chooseFile":false}}}` on an empty browser installation. Client methods resolve to the value or reject with a `CoreFailure`. Adapter transport failures reject with `unavailable`. Never automatically replay a mutation after a lost reply.
 
 `subscribe` installs a listener on `core-change` and resolves once it is active. Its return value removes that listener idempotently. The future loopback, token-authenticated development server uses the same requests, replies and invalidations, with transport-level request correlation. Plugin RPC, SQL, native paths, arbitrary invoke names and secret-store operations are private to Rust.
 
@@ -167,7 +167,20 @@ filter, account, target or expired context.
 
 `enqueueText` validates a nonblank body and thread ownership, checks known posting restrictions and delegates to `Outbox::enqueue(SendText)`. Preserve the original text. An empty entity list is omitted when constructing the plugin request. Formatted sends require `send.entities`. Keep the original draft until acceptance. An ambiguous transport error requires reloading outbox and history before another user-initiated send.
 
-Expose only text sends through `listOutbox` in this slice. A whole-chat snapshot includes items from its topics. A topic snapshot includes just that topic. Every item's thread identifies its exact destination. Its opaque ID is the outbox-generated client ID. The bridge resolves it through `get_by_client_id` and verifies the exact thread before forwarding cancel or retry to the outbox. An item can point at a bubble via echoRowKey, which can become null. `outcomeUnknown` is true for the core's `last_error.data.reason == "outcome_unknown"`. Do not expose raw plugin error data. Cancel is permitted for queued or sending items and can race completion or reconciliation. Retry is for failed items. Surface possible duplicate delivery and require an explicit user choice for an unknown outcome. Re-read the actual state on conflict.
+`listOutbox` includes text and file sends. Whole-chat reads include topics, selected-topic reads are exact. Each receipt includes its actual thread, opaque client ID, `kind` (`sendText` or `sendFile`), nullable decimal `doneBytes`/`totalBytes`, and nullable echoRowKey. File transfer counters require a matching core upload observation. Cancel a queued/sending item using its exact receipt thread; delivery can win the race. Only failed text items support manual retry. A text row with an unknown delivery outcome requires explicit confirmation before retry. File delivery uncertainty stays visible through the existing outcomeUnknown projection.
+
+## Single-file composer
+
+The four operations and exact shapes are in [ADR0009](adr/0009-single-file-composer-ingress.md). Subscribe to account invalidations and read `listFileStages({thread, cursor:null, requestKey:null})` for the current file-ingress session. Other subsystems' tokens cannot authorize these operations.
+
+- `startFileSelection({thread,sessionId,requestKey})` captures one explicit user choice. A same-key replay returns its existing process receipt. Linux desktop uses the native portal, sharing one reservation with Save. The browser demo has no provider unless its isolated devserver starts with `--file-fixture`.
+- `listFileStages` reads up to 16 receipts for the exact thread. Supply either a current-process request key or a continuation token. Recovered durable stages have a null requestKey and the new session ID.
+- `enqueueFile({thread,sessionId,stageId,caption,asFile,spoiler})` starts verification and returns a FileStage. The literal caption is limited to 1024 Unicode scalars and 4096 UTF-8 bytes. Rust rechecks live permissions and options, verifies the immutable staged bytes, and durably claims this stage before its single initial outbox admission.
+- `cancelFileSelection({thread,sessionId,stageId})` requests local cancellation or explicit ready-file discard. Once admission has started, use `cancelOutbox` on an eligible retained delivery receipt. Failure to prove a ready file unreferenced retains its bytes.
+
+`Inventory.composerAccess.chooseFile` indicates native provider setup. Selection/copy, local admission and network transfer have independent states. UI receives bounded metadata and opaque identifiers. Recover a lost start through its key, then read its stage; a lost enqueue never warrants a new file send. A consumed stage with a missing outbox row still proves local admission. A recovered claim with a missing row stays admissionUnknown. Neither permits resubmission. All file mutations can return transport outcomeUnknown; list is a read.
+
+Retained bytes are limited to 2 GiB/file, 4 GiB/account, 8 GiB total and 16 byte stages. The service keeps consumed and uncertain files. Reaching a byte or stage ceiling can prevent future selections until reference-safe reclamation is implemented. A process accepts 4096 selection keys, at most four owned jobs and one active copy/hash scan. Explicit discard and reads remain available at the key limit.
 
 ## Message actions
 

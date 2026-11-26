@@ -22,13 +22,13 @@ function StageRow({ client, stage, access, restricted, busy, mutate }: {
   const tooLarge = access.maxBytes !== null && stage.bytes !== null && BigInt(stage.bytes) > BigInt(access.maxBytes);
   const send = editable && !busy && !restricted && access.canSend && !tooLarge && validCaption(draft.caption)
     && (!draft.asFile || access.asFile) && (!draft.spoiler || access.spoiler);
-  const canCancel = ["choosing", "copying", "ready", "verifying"].includes(stage.state) && !action?.pending;
+  const canCancel = ["choosing", "copying", "ready", "verifying"].includes(stage.state) && !action?.pending && action?.kind !== "cancel";
   const notice = stageNotice(stage);
   return <li className="composer-file-stage">
     <div className="composer-outbox-row"><strong>{stage.name ?? "Selected file"}</strong><span>{labels[stage.state]}</span></div>
     {stage.bytes !== null && <div className="composer-file-meta">{size(stage.bytes)}
       {stage.format !== null && <span> · {stage.format === "other" ? "File" : `${stage.format.toUpperCase()} header`}</span>}</div>}
-    {stage.state === "copying" && <div className="composer-status">Copied {size(stage.copiedBytes)} of {size(stage.bytes)}</div>}
+    {stage.state === "copying" && <div className="composer-status">{stage.copiedBytes === null ? "Copy progress unavailable." : `Copied ${size(stage.copiedBytes)}${stage.bytes === null ? "" : ` of ${size(stage.bytes)}`}`}</div>}
     {notice && <div className="composer-warning" role="status">{notice}</div>}
     {action && !action.pending && <div className="composer-warning" role="status">
       The {action.kind === "send" ? "send" : "cancel"} request could not be confirmed. Reload file status; it will not be repeated automatically.
@@ -65,7 +65,7 @@ export function FileComposer({ client, chat }: { client: CoreClient; chat: ChatS
     }
     if (active()) {
       learnFilePage(client, { ...next, items });
-      setInventory(inv); setPage({ ...next, items }); changed(n => n + 1);
+      setInventory(inv); setPage({ ...next, items }); setNotice(null); changed(n => n + 1);
     }
   }
   const reads = useAccountReads(client, thread.accountId, read);

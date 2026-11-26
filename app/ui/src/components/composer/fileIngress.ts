@@ -90,7 +90,7 @@ export function rememberFileDraft(client: CoreClient, stage: FileStage, intent: 
 export const validCaption = (s: string) => Array.from(s).length <= 1024 && new TextEncoder().encode(s).length <= 4096;
 export async function changeFile(client: CoreClient, stage: FileStage, kind: "send" | "cancel", intent: FileSend = { caption: "", asFile: false, spoiler: false }): Promise<FileStage> {
   const l = ledger(client), id = actionKey(stage), previous = l.actions.get(id);
-  if (previous && (previous.pending || kind === "send")) throw { code: "conflict" };
+  if (previous && (previous.pending || kind === "send" || previous.kind === "cancel")) throw { code: "conflict" };
   if (kind === "send" && (stage.state !== "ready" || !validCaption(intent.caption))) throw { code: "invalid_request" };
   if (l.actions.size >= 4096 && !previous) throw { code: "conflict" };
   const a: Action = { thread: { ...stage.thread }, sessionId: stage.sessionId, stageId: stage.stageId, kind, pending: true };

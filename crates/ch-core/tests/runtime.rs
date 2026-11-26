@@ -611,3 +611,120 @@ async fn account_creation_never_adopts_or_erases_an_unowned_namespace() {
     assert!(roots.join("orphan/uploads/marker").is_file());
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_authority_follows_the_account_start_not_status_or_shared_capabilities() {
+    let (_env, core) = storage_fixture().await;
+    let plugin = "storage_fixture";
+    let id = "run-test";
+    let h = core.host();
+    assert!(h.running_account_token(plugin, id).is_none());
+    let row = core.accounts().add(storage_account(id)).await.unwrap();
+    core.accounts().start(id).await.unwrap();
+    wait_connected(&core, plugin, id).await;
+    let run = h.running_account_token(plugin, id).unwrap();
+    let sibling = h.running_account_token(plugin, id).unwrap();
+    sibling.cancel();
+    assert!(!run.is_cancelled());
+    assert!(!h.running_account_token(plugin, id).unwrap().is_cancelled());
+    let handshake = h
+        .plugin_state(plugin)
+        .unwrap()
+        .capabilities()
+        .unwrap()
+        .clone();
+    let _: Value = h
+        .call(
+            plugin,
+            "messages.fetch_recent",
+            &json!({"account_id":id,"chat_id":"run_status","limit":1}),
+        )
+        .await
+        .unwrap();
+    wait_account(h, plugin, id, secs(5.), |a| {
+        a.detail.as_deref() == Some("updated")
+    })
+    .await;
+    assert!(!run.is_cancelled());
+
+    h.stop_account(plugin, id).await.unwrap();
+    assert!(run.is_cancelled());
+    assert!(h.running_account_token(plugin, id).is_none());
+    core.accounts().start(&row.account_id).await.unwrap();
+    let second = h.running_account_token(plugin, id).unwrap();
+    assert!(Arc::ptr_eq(
+        &handshake,
+        h.plugin_state(plugin).unwrap().capabilities().unwrap()
+    ));
+    assert!(!second.is_cancelled());
+
+    let mut states = h.subscribe();
+    h.restart_plugin(plugin).await.unwrap();
+    assert!(second.is_cancelled());
+    let third = tokio::time::timeout(secs(10.), async {
+        loop {
+            if let Some(token) = h.running_account_token(plugin, id) {
+                break token;
+            }
+            states.recv().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!Arc::ptr_eq(
+        &handshake,
+        h.plugin_state(plugin).unwrap().capabilities().unwrap()
+    ));
+    assert!(!third.is_cancelled());
+    core.shutdown().await;
+    assert!(third.is_cancelled());
+    assert!(h.running_account_token(plugin, id).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_disable_and_reenable_complete_in_order_and_revoke_old_run() {
+    let env = Env::new();
+    let plugin = "hold_stop";
+    let id = "toggle-test";
+    env.misbehaving(plugin, "hold_stop", json!({}));
+    let mut config = core_config(&env, &Arc::new(MemorySecretStore::new()));
+    config.autostart = false;
+    config.host.timeout_scale = 1.0;
+    let core = Core::open(config).await.unwrap();
+    let accounts = core.accounts();
+    accounts.add(NewAccount::new(plugin).id(id)).await.unwrap();
+    wait_connected(&core, plugin, id).await;
+    let run = core.host().running_account_token(plugin, id).unwrap();
+    let mut events = core.subscribe();
+    {
+        let mut disable = Box::pin(accounts.set_enabled(id, false));
+        tokio::select! {
+            result=&mut disable=>panic!("disable returned before the plugin settled: {result:?}"),
+            _=wait_change(&mut events,secs(5.),|c|matches!(c,CoreChange::Account(AccountChange::Enabled {account_id,enabled:false}) if account_id==id).then_some(()))=>{}
+        }
+    }
+    assert!(run.is_cancelled());
+    assert!(core.host().running_account_token(plugin, id).is_none());
+    {
+        let mut enable = Box::pin(accounts.set_enabled(id, true));
+        tokio::select! {
+            biased;
+            result=&mut enable=>panic!("enable overtook the outstanding account.stop: {result:?}"),
+            _=std::future::ready(())=>{}
+        }
+    }
+    assert!(!accounts.get(id).await.unwrap().unwrap().enabled);
+    let marker = core.host().config().state_dir(id).join("release-stop");
+    std::fs::write(marker, b"release").unwrap();
+    wait_change(&mut events,secs(5.),|c|matches!(c,CoreChange::Account(AccountChange::Enabled {account_id,enabled:true}) if account_id==id).then_some(())).await;
+    wait_connected(&core, plugin, id).await;
+    assert!(
+        !core
+            .host()
+            .running_account_token(plugin, id)
+            .unwrap()
+            .is_cancelled()
+    );
+    assert!(run.is_cancelled());
+    core.shutdown().await;
+}
