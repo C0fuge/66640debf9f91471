@@ -1,5 +1,11 @@
 # ADR 0010: observed whole-chat preference controls
 
+Implementation verified on 2026-11-26: source `d1d4e89` / public `d34cc06`,
+[Verify45847181736](https://github.com/C0fuge/66640debf9f91471/actions/runs/45847181736)
+passed the matched app/backend/UI, lifecycle regression and browser gates.
+The app now exposes36 operations; the original acceptance and release conditions
+below record the decision before implementation. Real server accounts remain untested.
+
 Status: accepted for implementation by root, 2026-11-26, within the owner's resumed development instruction. This approves one optional plugin read method chats.get (API1.1.0, same-major compatibility) and matched setChatFlag/refreshChatFlags app operations. No database migration, new remote product feature, account inventory scan or renderer-selected RPC. App stays34 and the old plugin contract remains the verified baseline until the coherent amendment passes gates. Implement/review contract+SDK changes before the app controls.
 
 ## Application operation
