@@ -35,6 +35,7 @@ class Stub:
         self.handlers = []
         self.sent = {}
         self.uploaded, self.stored_media = {}, {}
+        self.dialog_flags = {"pinned": False, "unread_mark": False}
         self.poll_solutions = {}
         self.unread_reactions = {("17", None): {2, 5, 9}, ("-1000000000008", None): {11},
                                  ("-1000000000008", "42"): {41, 45}, ("18", "7"): {70, 72}}
@@ -91,9 +92,9 @@ class Stub:
     async def iter_dialogs(self, folder=None):
         if self.mode == 4:
             raise RuntimeError("synthetic-private-error")
-        raw = SimpleNamespace(read_inbox_max_id=2, read_outbox_max_id=4, unread_mark=False, draft=None)
+        raw = SimpleNamespace(read_inbox_max_id=2, read_outbox_max_id=4, unread_mark=self.dialog_flags["unread_mark"], draft=None)
         yield SimpleNamespace(id=17, dialog=raw, entity=USER, title="Sample", message=row(10), date=NOW,
-                              is_user=True, is_group=False, archived=False, pinned=False, unread_count=0,
+                              is_user=True, is_group=False, archived=False, pinned=self.dialog_flags["pinned"], unread_count=0,
                               unread_mentions_count=0, unread_reactions_count=0)
         if self.mode == 5 and self.attempt == 1:
             asyncio.get_running_loop().call_later(.15, self._lost.set_result, None)
@@ -165,6 +166,21 @@ class Stub:
                       and (req.top_msg_id is None or str(req.top_msg_id) == (key[1] or "1")) for mid in mids)
 
     async def __call__(self, req):
+        target = tl.InputDialogPeer(tl.InputPeerUser(17, 0))
+        if isinstance(req, functions.messages.GetPeerDialogsRequest):
+            assert req.peers == [target]
+            raw = tl.Dialog(PEER, 10, 2, 4, 0, 0, 0, 0, tl.PeerNotifySettings(), **self.dialog_flags)
+            return tl.messages.PeerDialogs([raw], [], [], [USER], tl.updates.State(0, 0, NOW, 0, 0))
+        if isinstance(req, functions.messages.ToggleDialogPinRequest):
+            assert req.peer == target
+            self.dialog_flags["pinned"] = req.pinned
+            return True
+        if isinstance(req, functions.messages.MarkDialogUnreadRequest):
+            assert req.peer == target and req.parent_peer is None
+            if self.mode == 10:
+                raise errors.ChatAdminRequiredError(req)
+            self.dialog_flags["unread_mark"] = req.unread
+            return True
         if isinstance(req, functions.contacts.GetContactsRequest):
             return tl.contacts.Contacts([tl.Contact(17, True)], 1, [USER])
         if isinstance(req, functions.channels.GetChannelsRequest):

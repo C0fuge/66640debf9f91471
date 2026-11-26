@@ -413,3 +413,60 @@ def test_cancelling_dispatched_unread_write_preserves_unknown_through_sdk_wire(c
     assert response["error"]["data"] == {"code": "NETWORK", "outcome": "unknown", "retry_safe": False}
     assert core.call("reactions.list_unread", {**p, "limit": 2}) == {"message_ids": ["2", "5"]}
     assert core.shutdown() == 0
+
+
+def test_dialog_flags_capabilities_scope_and_sparse_ack(core):
+    caps = core.initialize()["capabilities"]
+    assert all(caps[key] is True for key in ("chat.flags", "chat.pin", "chat.mark_unread"))
+    assert not caps.get("chat.archive") and not caps.get("chat.mute")
+    start(core)
+    start(core, name="b")
+    p = {"account_id": "a", "chat_id": "17"}
+    method = "chats.set_flags"
+    start_events = len(core.all_events)
+    for field, value, cap in [("archived", False, "chat.archive"), ("muted", False, "chat.mute"),
+                              ("mute_until", "2027-01-01T00:00:00Z", "chat.mute")]:
+        error = core.error(method, {**p, "chat_id": "invalid", "pinned": True, field: value})
+        assert error["data"] == {"code": "NOT_SUPPORTED", "capability": cap}
+    assert core.call(method, {**p, "archived": None, "marked_unread": None}) == {}
+    assert core.error(method, {**p, "chat_id": "017"})["data"]["field"] == "chat_id"
+    assert len(core.all_events) == start_events
+
+    for pin, mark in [(True, True), (False, True), (True, False), (False, False)]:
+        assert core.call(method, {**p, "pinned": pin, "marked_unread": mark}) == {}
+        event = core.all_events[-1]
+        assert event["method"] == "conversations.upsert" and "id" in event
+        assert event["params"]["conversations"] == [{"id": "17", "kind": "dm", "pinned": pin, "marked_unread": mark}]
+    assert core.call(method, {**p, "pinned": True}) == {}
+    assert len(core.all_events) == start_events + 5
+    for owner, expected in [("a", True), ("b", False)]:
+        before = len(core.all_events)
+        assert core.call("chats.sync", {"account_id": owner}) == {}
+        conversation = next(e["params"]["conversations"][0] for e in core.all_events[before:]
+                            if e["method"] == "conversations.upsert")
+        assert conversation["pinned"] is expected and conversation["marked_unread"] is False
+        assert conversation["read_inbox_max_id"] == "2" and conversation["title"] == "Sample"
+
+
+def test_dialog_flags_partial_refusal_and_lost_ack(core):
+    start(core, mode=10)
+    method = "chats.set_flags"
+    params = {"account_id": "a", "chat_id": "17", "pinned": True, "marked_unread": True}
+    before = len(core.all_events)
+    error = core.error(method, params)
+    assert error["data"] == {"code": "NETWORK", "reason": "outcome_unknown", "outcome": "unknown", "retry_safe": False}
+    assert len(core.all_events) == before + 1
+    assert core.all_events[-1]["params"]["conversations"] == [
+        {"id": "17", "kind": "dm", "pinned": True, "marked_unread": False}]
+    core.auto_answer = False
+    for desired, cancel in [(False, True), (True, False)]:
+        rid = core.send_request(method, {**params, "pinned": desired, "marked_unread": None})
+        event = core.request("conversations.upsert")
+        assert event["params"]["conversations"] == [{"id": "17", "kind": "dm", "pinned": desired}]
+        if cancel:
+            core.cancel(rid)
+        else:
+            core.answer(event, error={"code": -32007, "message": "Timed out", "data": {"code": "TIMEOUT"}})
+        data = core.response(rid)["error"]["data"]
+        assert data["outcome"] == "unknown" and data["retry_safe"] is False
+    core.auto_answer = True
