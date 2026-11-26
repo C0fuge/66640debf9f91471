@@ -1,7 +1,14 @@
+# Owner pause
+
+Development paused by the owner. Verify is disabled remotely and no run remains
+active. Do not resume automatically. On explicit resume inspect exact source/run
+state and re-enable the workflow. This docs-only checkpoint may have no CI run;
+use the successful source SHA below.
+
 # Verification handoff
 
-Latest verified source: `dc808f36f854cbae471a5edd4cf8144f6ebfa7c1`.
-[Successful workflow](https://github.com/C0fuge/66640debf9f91471/actions/runs/45794077036).
+Latest verified source: `db11338a2b54cb4bc820fe6b130925c5e8fb6ffb`.
+[Successful workflow](https://github.com/C0fuge/66640debf9f91471/actions/runs/45807435282).
 Artifacts contain logs, synthetic browser screenshots and Linux debug binaries.
 These are build/test results, not a production deployment or live-account test.
 
@@ -26,9 +33,9 @@ private history, account databases, messenger sessions, environment files, model
 credentials or subscription authentication. Actions builds/tests require no model
 API key. No cloud coding/model session is running or scheduled here.
 
-The verified app now has30 typed operations, including ordinary reaction views and
-full-set replacement. Telegram implements39 of119 methods, with80 pending.
-Next work is a reviewed single-file composer ingress and local admission seam;
-the current generic enqueue creates a new intent ID and cannot deduplicate callers.
-Migration and live-account verification remain pending. Preserve the existing app
-and its data until a separately verified switch-over.
+The verified app now has34 typed operations, including explicit single-file
+selection/review/admission, scoped recovery and independent copy/upload progress.
+Telegram remains39/119 methods. Retained-ID core admission is idempotent only
+while the outbox row survives; absent rows never authorize replay. Keep the
+16-file retention ceiling and pending reference-safe reclamation explicit.
+Migration, real-account and actual desktop chooser verification remain pending.

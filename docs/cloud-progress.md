@@ -1,32 +1,22 @@
-## Current candidate: single-file composer
+# Build progress — paused
 
-Verified helper source52a98b3 passed Verify45801837583: native shared Open/Save,
-private staging, retained outbox admission, Rust/Clippy/builds and UI/Python/browser
-gates. The app flow below is a new candidate, not a verified release. Its four
-operations, explicit file review and lifecycle integration are under test; follow-up
-review fixes and account-run tokens are still being completed. No real accounts,
-native desktop chooser or imported legacy data were tested. Stable main still
-has30 operations until this whole flow passes integrated gates.
+The owner paused development. Verify is disabled remotely; no build is active.
+Resume only on a new owner instruction, inspect state and re-enable the workflow.
 
-# Build progress
+Exact source `db11338a2b54cb4bc820fe6b130925c5e8fb6ffb` passed
+[Verify45807435282](https://github.com/C0fuge/66640debf9f91471/actions/runs/45807435282). Rust workspace309, core no-default126, private native
+Open/Save transport, two fake integrations, Clippy and debug builds passed;
+conformance144/0/71. UI78, SDK48, fake8, MAX77, Telegram110 and7Chromium scenarios
+passed. Reviewed desktop/mobile screenshots and401 sanitized source files.
 
-Latest source `dc808f3` passed
-[Verify45794077036](https://github.com/C0fuge/66640debf9f91471/actions/runs/45794077036).
-Rust267, no-default core113, explicit native portal/fake integrations, Clippy,
-conformance144/0/71 and debug binaries passed. UI61, SDK48, fake8, MAX77 and
-Telegram110 passed, together with six real Chromium scenarios.
+The app has34 operations, including explicit file selection/review/send and
+separate admission/delivery recovery. Text drafts survive ambiguous file replies;
+file retries are denied. Retention is deliberately bounded:16 byte-bearing stages,
+8GiB overall,4GiB/account,2GiB/file or a lower account limit. Reference-safe
+consumed-file reclamation remains pending. This is not full messenger parity.
 
-The app has30 typed operations including bounded media jobs and explicit ordinary
-reaction replacement/reactor pages. Telegram implements39 of119 methods, including
-read-only base sticker catalogs/static thumbnails. MAX has partial auth/text/chat
-upserts and exact-ack deletion; history continuation and edit remain unsupported.
-No full messenger parity, real account/server behavior, or native desktop chooser
-interaction is claimed.
-
-Next source batch requires a reviewed file-ingress contract: existing SendFile
-worker reuse, durable local staging and caller-stable admission. No second send
-queue, generic renderer filesystem API, new DB migration or cloud model session
-is approved by this status file.
-
-Source is sanitized; all CI accounts/messages/files are synthetic. No migration
-or old-app deletion has occurred. See BUILD_PLAN.md and CLOUD_HANDOFF.md.
+Telegram implements39/119 methods (31 handlers plus8 SDK builtins);80 remain.
+MAX is a partial auth/text/chat/delete foundation, with edit/history limitations.
+Real-account/server behavior and actual desktop chooser remain unverified.
+No legacy import, credential copy or existing-app deletion occurred. All CI data
+is synthetic. Cloud jobs contain no coding agent, API key or provider login.
