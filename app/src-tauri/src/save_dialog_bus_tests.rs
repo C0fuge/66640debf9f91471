@@ -191,7 +191,11 @@ fn native_portal_private_bus_transport() {
             let uncertain = matches!(scenario, Scenario::WrongHandle | Scenario::LostReply);
             if !uncertain { wait_settled(&provider); }
             assert_eq!(provider.busy.load(Ordering::Acquire), uncertain, "{kind:?}/{scenario:?}");
-            assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Disconnected)));
+            // Receiving the result can wake us before the FnOnce callback drops
+            // its sender, especially when uncertainty keeps busy permanently set.
+            // Wait for that drop while still rejecting any second callback value.
+            assert!(matches!(receiver.recv_timeout(Duration::from_secs(1)),
+                Err(mpsc::RecvTimeoutError::Disconnected)));
             if uncertain {
                 for blocked in [DialogKind::Save, DialogKind::Open] {
                     assert!(matches!(begin(&provider, blocked).recv_timeout(Duration::from_secs(1)).unwrap(), Err(SaveDialogError::Unavailable)));
