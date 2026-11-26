@@ -2,7 +2,7 @@
   "id": "telegram",
   "name": "Telegram",
   "version": "0.1.0",
-  "api_version": "1.1.0",
+  "api_version": "1.2.0",
   "entry": ["./.venv/bin/python", "-m", "telegram_plugin"],
   "brand_color": "#229ED9",
   "multi_account": true,

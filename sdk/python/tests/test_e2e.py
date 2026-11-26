@@ -193,7 +193,7 @@ def test_eof_drops_requests_past_the_budget(core):
 
 @pytest.mark.parametrize("core", [["legacy"]], indirect=True)
 def test_new_core_accepts_legacy_plugin_without_chat_get(core):
-    result = core.initialize(api_version="1.1.0")
+    result = core.initialize(api_version=API_VERSION)
     assert result["api_version"] == "1.0.0" and "chat.get" not in result["capabilities"]
     start(core)
     assert core.call("ping") == {}
@@ -204,7 +204,7 @@ def test_new_core_accepts_legacy_plugin_without_chat_get(core):
 @pytest.mark.parametrize("core", [["modern"]], indirect=True)
 def test_legacy_core_can_use_common_methods_with_new_plugin(core):
     result = core.initialize(api_version="1.0.0")
-    assert result["api_version"] == "1.1.0" and result["capabilities"]["chat.get"] == {}
+    assert result["api_version"] == API_VERSION and result["capabilities"]["chat.get"] == {}
     start(core)
     assert core.call("ping") == {}
 
@@ -345,3 +345,36 @@ def test_stop_right_after_start_flushes_the_start_events_first(core):
     assert order[0] == (start_id, None) and order[-1] == (stop_id, None)
     assert order[1][0] is None and order[1][1] in ("connecting", "connected")
     assert order[-2] == (None, "disconnected")
+
+
+@pytest.mark.parametrize("core", [["legacy"], ["minor"], ["source"]], indirect=True)
+@pytest.mark.parametrize("core_version", ["1.0.0", "1.1.0", "1.2.0"])
+def test_mixed_minor_source_promise_keeps_common_operations_compatible(core, core_version, tmp_path):
+    from contact_hub_sdk import file_source_released_on_success
+    result = core.initialize(api_version=core_version)
+    assert result["api_version"] in ("1.0.0", "1.1.0", "1.2.0")
+    promised = file_source_released_on_success(result["capabilities"])
+    assert promised is (result["api_version"] == "1.2.0")
+    start(core)
+    assert core.call("messages.fetch_recent", {**ACC, "chat_id":"c", "limit":1})["messages"][0]["id"] == "0"
+    if promised:
+        path = tmp_path / "source.bin"
+        path.write_bytes(b"synthetic")
+        reply = core.call("messages.send_file", {**ACC, "chat_id":"c", "path":str(path)})
+        assert reply["message"]["media"]["bytes"] == 9
+        path.unlink()
+        assert core.call("ping") == {}
+    assert core.shutdown() == 0
+
+
+@pytest.mark.parametrize("core", [["source", "true"], ["source", "empty"], ["source", "unknown"]], indirect=True)
+def test_upload_still_works_without_the_optional_source_promise(core, tmp_path):
+    from contact_hub_sdk import file_source_released_on_success
+    result = core.initialize()
+    assert not file_source_released_on_success(result["capabilities"])
+    start(core)
+    path = tmp_path / "source.bin"
+    path.write_bytes(b"synthetic")
+    reply = core.call("messages.send_file", {**ACC, "chat_id":"c", "path":str(path)})
+    assert reply["message"]["media"]["bytes"] == 9
+    assert core.shutdown() == 0

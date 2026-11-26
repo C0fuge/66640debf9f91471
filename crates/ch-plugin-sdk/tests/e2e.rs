@@ -166,7 +166,7 @@ async fn handshake_start_call_errors_cancel_stop_shutdown() {
 
     // Handshake; a second initialize is INVALID_REQUEST (§4.1).
     let init = core.initialize().await.unwrap();
-    assert_eq!(init["api_version"], "1.1.0");
+    assert_eq!(init["api_version"], "1.2.0");
     assert_eq!(init["plugin_version"], "9.9.9");
     assert_eq!(
         init["capabilities"],
@@ -484,7 +484,7 @@ async fn settings_defaults_come_from_plugin_json_and_any_major_is_answered() {
         .unwrap();
     assert_eq!(
         (init["api_version"].as_str(), &init["capabilities"]),
-        (Some("1.1.0"), &json!({}))
+        (Some("1.2.0"), &json!({}))
     );
     core.start("a", json!({"port": 2})).await.unwrap();
     assert_eq!(core.event("status").await["state"], "connected");
@@ -738,4 +738,39 @@ async fn echo_example_process() {
     let mut core = spawn_echo(tmp.path());
     core.initialize().await.unwrap();
     core.wait_exit().await.expect("exits on EOF");
+}
+
+#[tokio::test]
+async fn optional_source_promise_survives_older_core_handshakes() {
+    for core_version in ["1.0.0", "1.1.0", "1.2.0"] {
+        let plugin = PluginBuilder::new()
+            .capability_with("send.file", &json!({"source_release":"on_success"}))
+            .method(
+                "messages.send_file",
+                |_c: Call<MessagesSendFileParams>| async move {
+                    Err::<MessageResult, _>(error::not_supported("send.file"))
+                },
+            )
+            .method(
+                "messages.fetch_recent",
+                |_c: Call<MessagesFetchRecentParams>| async move {
+                    Ok(PagedMessagesResult::default())
+                },
+            )
+            .method("messages.send", |_c: Call<MessagesSendParams>| async move {
+                Err::<MessageResult, _>(error::not_supported("send.file"))
+            })
+            .build()
+            .unwrap();
+        let mut core = FakeCore::new(plugin);
+        let plugin_dir = core.dir().to_path_buf();
+        let reply = core.call("initialize", json!({"api_version":core_version,"core_version":"test",
+            "plugin_dir":plugin_dir,"locale":"en-US","log_level":"debug"})).await.unwrap();
+        assert_eq!(reply["api_version"], "1.2.0");
+        let caps: ch_protocol::Capabilities =
+            serde_json::from_value(reply["capabilities"].clone()).unwrap();
+        assert!(caps.has("send.file") && caps.file_source_released_on_success());
+        assert_eq!(core.call("ping", json!({})).await.unwrap(), json!({}));
+        core.shutdown().await;
+    }
 }

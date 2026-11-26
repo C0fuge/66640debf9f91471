@@ -248,4 +248,39 @@ mod tests {
         assert_eq!(file, "common.json");
         assert_eq!(v["type"], "string");
     }
+
+    #[test]
+    fn source_release_declaration_is_open_but_not_implicitly_trusted() {
+        let schemas = Schemas::embedded();
+        let reference = "capabilities.json#/$defs/Capabilities";
+        for flag in [
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!({}),
+            serde_json::json!({"source_release": "future"}),
+            serde_json::json!({"source_release": "on_success"}),
+        ] {
+            let value = serde_json::json!({"send.file": flag});
+            assert!(schemas.validate(reference, &value).is_empty());
+            let caps: ch_protocol::Capabilities = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                caps.file_source_released_on_success(),
+                flag == serde_json::json!({"source_release": "on_success"})
+            );
+        }
+        for malformed in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let value = serde_json::json!({"send.file": {"source_release": malformed}});
+            assert!(!schemas.validate(reference, &value).is_empty());
+            // Runtime raw capability tolerance is deliberately independent of conformance.
+            let caps: ch_protocol::Capabilities = serde_json::from_value(value).unwrap();
+            assert!(caps.has("send.file"));
+            assert!(!caps.file_source_released_on_success());
+        }
+    }
 }

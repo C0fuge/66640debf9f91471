@@ -22,6 +22,7 @@ Minimal plugin::
 """
 
 from . import capabilities, errors, types
+from .capability_policy import file_source_released_on_success
 from .errors import (
     AuthRequired,
     Cancelled,
@@ -45,6 +46,7 @@ from .wire import DecodeError, format_timestamp, from_wire, parse_timestamp, to_
 __version__ = "1.0.0"
 
 __all__ = [
+    "file_source_released_on_success",
     "API_VERSION",
     "DEFAULT_TIMEOUT_SECONDS",
     "EVENTS",

@@ -36,6 +36,24 @@ elif sys.argv[1] == 'without-archive':
     plugin.capabilities = {**plugin.capabilities, 'chat.archive': False}
 elif sys.argv[1] == 'without-mentions':
     plugin.capabilities = {k: v for k, v in plugin.capabilities.items() if k != 'mentions.unread'}
+elif sys.argv[1] == 'source-close':
+    from contextlib import contextmanager
+    from contact_hub_sdk import plugin as sdk_plugin, types as dto
+    from telegram_plugin import uploads
+    held = []
+    original_file = uploads.local_file
+    @contextmanager
+    def tracked_file(path):
+        with original_file(path) as opened:
+            held.append(opened[0])
+            yield opened
+    uploads.local_file = tracked_file
+    original_wire = sdk_plugin.to_wire
+    def checked_wire(result):
+        if isinstance(result, dto.MessageResult) and result.message.media is not None:
+            assert held and all(source.closed for source in held), 'response preceded source closure'
+        return original_wire(result)
+    sdk_plugin.to_wire = checked_wire
 plugin.run()
 """
     with FakeCore([sys.executable, "-c", bootstrap, getattr(request, "param", "default")], plugin_dir=ROOT, tmp=tmp_path,
@@ -485,7 +503,7 @@ def test_dialog_flags_partial_refusal_and_lost_ack(core):
 @pytest.mark.parametrize("core", ["default", "empty-object"], indirect=True)
 def test_chat_get_observes_the_selected_account_without_events(core):
     result = core.initialize()
-    assert result["api_version"] == "1.1.0" and result["capabilities"]["chat.get"] in (True, {})
+    assert result["api_version"] == "1.2.0" and result["capabilities"]["chat.get"] in (True, {})
     start(core, name="a")
     start(core, name="b")
     core.call("chats.set_flags", {"account_id": "a", "chat_id": "17", "marked_unread": True})
@@ -602,4 +620,19 @@ def test_lost_and_cancelled_mention_writes_remain_unknown_through_sdk(core):
     core.cancel(request)
     assert core.response(request)["error"]["data"] == {"code": "NETWORK", "outcome": "unknown", "retry_safe": False}
     assert core.call("mentions.list_unread", {**p, "limit": 2}) == {"message_ids": ["41", "45"]}
+    assert core.shutdown() == 0
+
+
+@pytest.mark.parametrize("core", ["source-close"], indirect=True)
+def test_send_file_success_is_serialized_only_after_the_real_source_handle_closes(core, tmp_path):
+    from contact_hub_sdk import file_source_released_on_success
+    result = core.initialize()
+    assert file_source_released_on_success(result["capabilities"])
+    start(core)
+    selected = tmp_path / "synthetic-source.bin"
+    selected.write_bytes(b"fixture")
+    reply = core.call("messages.send_file", {"account_id":"a", "chat_id":"17", "path":str(selected), "kind":"document"})
+    assert reply["message"]["media"]["kind"] == "document"
+    selected.unlink()
+    assert core.call("ping") == {}
     assert core.shutdown() == 0

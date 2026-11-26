@@ -289,7 +289,7 @@ class FakePlugin(Plugin):
         "send.entities": {"types": ENTITY_TYPES},
         "send.silent": True,
         "quote_reply": True,
-        "send.file": {"max_bytes": MAX_UPLOAD},
+        "send.file": {"max_bytes": MAX_UPLOAD, "source_release": "on_success"},
         "send.voice": True,
         "send.video_note": True,
         "send.spoiler": True,

@@ -67,6 +67,19 @@ impl Capabilities {
         self.0.get(key.as_ref()).is_some_and(Flag::is_on)
     }
 
+    /// The API 1.2 send-file source-lifetime promise, independently of upload support.
+    /// This is never sufficient cleanup permission without that attempt's validated success
+    /// and the core's own source/reference/lease checks. Unknown/malformed values grant none.
+    pub fn file_source_released_on_success(&self) -> bool {
+        match self.get("send.file") {
+            Some(Flag::Params(params)) => {
+                params.get("source_release").and_then(serde_json::Value::as_str)
+                    == Some("on_success")
+            }
+            _ => false,
+        }
+    }
+
     /// The raw flag.
     pub fn get(&self, key: impl AsRef<str>) -> Option<&Flag> {
         self.0.get(key.as_ref())

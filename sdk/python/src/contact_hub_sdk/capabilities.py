@@ -29,6 +29,7 @@ class SendFileParams:
     """SendFileParams (capabilities.json)."""
 
     max_bytes: int | None = None
+    source_release: str | None = None
 
 
 @dataclass(kw_only=True, slots=True)

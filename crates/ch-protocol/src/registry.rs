@@ -93,7 +93,7 @@ impl MethodInfo {
     }
 }
 
-/// Every method of API v1.1.0, in spec order.
+/// Every method of API v1.2.0, in spec order.
 pub const METHODS: &[MethodInfo] = &[
     MethodInfo {
         name: "initialize",

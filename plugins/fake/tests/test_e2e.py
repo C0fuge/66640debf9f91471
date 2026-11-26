@@ -21,7 +21,7 @@ def no_partials(core: FakeCore) -> bool:
 
 def test_full_session(core: FakeCore):
     init = core.initialize()
-    assert init["api_version"] == "1.1.0" and init["plugin_version"] == "0.1.0"
+    assert init["api_version"] == "1.2.0" and init["plugin_version"] == "0.1.0"
     assert init["capabilities"]["auth.interactive"] is True
     assert core.call("ping") == {}
     assert code_of(core.error("messages.fetch_recent", {**A, "chat_id": "c0", "limit": 1})) == "UNKNOWN_ACCOUNT"

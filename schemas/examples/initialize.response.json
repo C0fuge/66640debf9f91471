@@ -2,7 +2,7 @@
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "api_version": "1.0.0",
+    "api_version": "1.2.0",
     "plugin_version": "0.3.1",
     "capabilities": {
       "edit": {
@@ -11,7 +11,8 @@
       "delete": true,
       "delete.for_me": true,
       "send.file": {
-        "max_bytes": 26214400
+        "max_bytes": 26214400,
+        "source_release": "on_success"
       },
       "send.album": {
         "max": 10

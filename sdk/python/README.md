@@ -50,6 +50,13 @@ if __name__ == "__main__":
 - Capability-gated parameters (a `schedule_at` without `send.schedule`) are answered with
   `NOT_SUPPORTED` before your handler runs. The table is the registry's `gated_params`
   (`schemas/methods/registry.json`, `METHODS[name].gated_params`), not SDK code.
+- API 1.2 adds the optional capability object parameter
+  `"send.file": {"source_release": "on_success"}`. Declare it only when every source
+  read, handle and task has settled before a successful `messages.send_file` response
+  is serialized. `file_source_released_on_success(caps)` recognizes only that exact
+  string; unknown strings keep uploads compatible but grant no promise. An error,
+  cancellation or message event gives no lifetime proof. See spec §15 for the core's
+  additional ownership/reference checks before any managed-copy removal.
 - Updates of `Conversation`, `Topic` and `Message` are merged by the core: set only the
   fields that changed; a field left `None` is not sent and means "unchanged" (spec 8.4).
 - `account.settings` already holds the `settings_schema` defaults from `plugin.json`.

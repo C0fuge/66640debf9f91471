@@ -458,7 +458,10 @@ fn capability_keys_match_schema() {
     with_params.enable_with("edit", &capabilities::WindowParams::default());
     with_params.enable_with(
         "send.file",
-        &capabilities::SendFileParams { max_bytes: Some(1) },
+        &capabilities::SendFileParams {
+            max_bytes: Some(1),
+            source_release: Some("on_success".into()),
+        },
     );
     with_params.enable_with("polls.create", &capabilities::PollsCreateParams::default());
     with_params.enable_with("x-fake.thing", &json!({"a": 1}));
@@ -637,5 +640,29 @@ fn envelope_method_names_include_the_v1_vendor_namespace() {
         "x-demo..ready",
     ] {
         assert!(!valid(name), "{name}");
+    }
+}
+
+#[test]
+fn source_release_schema_is_open_but_does_not_accept_malformed_known_shapes() {
+    let validator = Schemas::load().validator("capabilities.json#/$defs/Capabilities");
+    for value in [
+        json!(true),
+        json!(false),
+        json!({}),
+        json!({"source_release":"on_success"}),
+        json!({"source_release":"future", "future_param":true}),
+    ] {
+        assert!(validator.is_valid(&json!({"send.file":value})), "{value}");
+    }
+    for malformed in [json!(null), json!(1), json!(false), json!([]), json!({})] {
+        let wire = json!({"send.file":{"source_release":malformed}});
+        assert!(
+            !validator.is_valid(&wire),
+            "known non-string promise shapes fail conformance"
+        );
+        let runtime: Capabilities = serde_json::from_value(wire).unwrap();
+        assert!(runtime.has("send.file"));
+        assert!(!runtime.file_source_released_on_success());
     }
 }

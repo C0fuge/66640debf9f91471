@@ -1,4 +1,4 @@
-# Contact Hub plugin API, version 1.1.0
+# Contact Hub plugin API, version 1.2.0
 
 This is the public contract between the Contact Hub core (the "host") and a
 messenger plugin. It is self-contained: with this document and the JSON Schemas in
@@ -31,6 +31,10 @@ Contents
 20. Checklist for a new plugin
 
 Version 1.1.0 adds the optional single-dialog read `chats.get` and its capability `chat.get`.
+Version 1.2.0 adds the optional `send.file.source_release` capability parameter.
+Only its exact `on_success` value promises source-read settlement before a successful
+`messages.send_file` response (§15). It adds no method, DTO or RPC parameter and
+does not change upload support or source ownership for peers without the promise.
 
 Changes since the first draft (before the 1.0.0 freeze). Merge-updated DTOs
 (`Conversation`, `Topic`, `Message`) lost their on-wire defaults: every non-required
@@ -197,7 +201,7 @@ this same mechanism, with no private shortcuts.
 | `id` | string, `^[a-z][a-z0-9_]{1,31}$` | yes | The platform id. Appears in `account_id`s, log names and `ext` namespaces. Immutable once published. |
 | `name` | string | yes | Human name of the platform ("Discord"). |
 | `version` | semver string | yes | The plugin's own version. |
-| `api_version` | semver string | yes | The API this plugin implements (this document: `1.1.0`). Compared by major version (§18). |
+| `api_version` | semver string | yes | The API this plugin implements (this document: `1.2.0`). Compared by major version (§18). |
 | `entry` | array of strings, ≥1 | yes | argv to spawn. `entry[0]` that starts with `./` is resolved against the plugin directory; otherwise it is looked up on `PATH`. The working directory is the plugin directory. |
 | `icon` | string | no | Path, relative to the plugin directory, of an SVG or PNG. |
 | `brand_color` | `#RRGGBB` | yes | Used for the platform badge. |
@@ -1631,7 +1635,7 @@ conformance suite calls each one.
 | `send.effects` | `effect_id` | |
 | `quote_reply` | `reply_to.quote_*` | |
 | `comments.send` | `comment_to` | |
-| `send.file` | `messages.send_file` | `{max_bytes: 2147483648}` |
+| `send.file` | `messages.send_file` | `{max_bytes: 2147483648, source_release?: "on_success"}`; the optional lifetime promise is separate from upload support (§15). |
 | `send.voice`, `send.video_note`, `send.spoiler`, `send.as_file`, `send.ttl` | the matching `send_file` options | |
 | `send.album` | `messages.send_album` | `{max: 10}` |
 | `edit` | `messages.edit` (text) | `{window_seconds: null}` (null = no limit) |
@@ -1782,6 +1786,30 @@ stores them for the UI's `ext` consumers and never acts on them.
   resets the request's timeout on each one.
 - Cancellation is `$/cancelRequest` for the request (§11.0). On cancel, delete any
   partial file.
+- **Optional upload-source lifetime promise (API 1.2).** A plugin MAY advertise
+  `send.file: {source_release: "on_success", ...}`. It MUST then send a successful
+  `messages.send_file` response only after all reads of that request's source
+  have completed, all source handles (including duplicated handles) are closed,
+  and all tasks which may access that source have settled. It MUST NOT retain
+  permission to read or reopen the source later for that request. Future separately
+  authorized requests remain separate operations. Independent copies in the
+  plugin's cache and already copied in-memory data are unaffected.
+  The parameter is an **open string**: only the exact case-sensitive value
+  `on_success` is recognized. Unknown strings keep ordinary upload support but
+  grant no source release authority. Boolean `send.file: true`, `{}`, an absent
+  parameter, null or a malformed non-string value never imply this promise.
+  Malformed known parameter shapes fail schema/conformance validation; a receiver
+  that tolerates them at runtime MUST still fail closed for the promise, without
+  treating an otherwise enabled upload capability as an opt-in. Do not globally
+  tighten the capability handshake or reject unrelated object parameters.
+  An error, timeout, cancellation, progress of 100%, message event or delivery
+  state `Sent` is not a successful-response lifetime proof. The promise alone is
+  not permission to unlink: the core still needs an exact validated successful
+  attempt, source identity and absence/detachment of its live references/readers.
+  Nothing here transfers ownership of an original user-selected file or permits
+  deleting state files. Without this opt-in, successful upload replies carry no
+  new input-file lifetime guarantee. The existing cache eviction rule above
+  applies only to `cache_dir`, not upload source paths.
 - Stickers, GIFs and emoji files are cache content too (`stickers.thumb`,
   `gifs.clip`, `emoji.custom_files`, `reactions.effect`, `emoji.animated`): same
   rules, same directory.
@@ -1831,7 +1859,7 @@ user that "{platform} may still show you online".
 
 ## 18. Versioning and stability
 
-- `api_version` is **semver**. This document is `1.1.0`. The core and the plugin
+- `api_version` is **semver**. This document is `1.2.0`. The core and the plugin
   each state theirs in `initialize`; they are compatible when the **major** versions
   are equal. (The amendments listed under "Changes since the first draft" were made
   before anything shipped and did not bump the version.)
@@ -1849,7 +1877,7 @@ user that "{platform} may still show you online".
 - Methods are never required retroactively. The required set is fixed for v1:
   `initialize`, `shutdown`, `ping`, `account.start`, `account.stop`,
   `messages.fetch_recent`, `messages.send`.
-- A minor bump (1.1.0) means something was added; a plugin can detect it from the
+- A minor bump (such as 1.2.0) means something was added; a plugin can detect it from the
   core's `api_version` in `initialize` and use the addition when present. A patch
   bump clarifies text or schemas without changing the wire.
 - **Deprecation**: a feature slated for removal in the next major is marked

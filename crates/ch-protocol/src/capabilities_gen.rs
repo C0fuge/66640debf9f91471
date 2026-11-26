@@ -1,4 +1,4 @@
-//! Types generated once from `schemas/capabilities.json` (API v1.1.0). The schemas are the contract; the
+//! Types generated once from `schemas/capabilities.json` (API v1.2.0). The schemas are the contract; the
 //! tests in `tests/` keep these types in step with them. `str_enum!` enums keep unknown values
 //! as `Unknown(String)` (spec §18).
 #![allow(clippy::struct_excessive_bools, missing_docs, unused_imports)]
@@ -22,6 +22,10 @@ pub struct SendFileParams {
     /// Default: 2147483648.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
+    /// Only the exact `on_success` promise settles source reads before a successful send-file
+    /// response. Unknown/absent values grant no release authority (API 1.2, spec §15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_release: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

@@ -2,7 +2,7 @@
   "id": "{{plugin_id}}",
   "name": "{{display_name}}",
   "version": "0.1.0",
-  "api_version": "1.0.0",
+  "api_version": "1.2.0",
   "entry": ["./.venv/bin/python", "-m", "{{module_name}}"],
   "brand_color": "#4A90D9",
   "multi_account": true,

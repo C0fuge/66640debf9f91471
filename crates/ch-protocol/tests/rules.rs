@@ -329,3 +329,35 @@ fn manifest_validation() {
     m.api_version = "2.0.0".into();
     assert!(!m.is_compatible());
 }
+
+#[test]
+fn source_lifetime_promise_is_exact_optional_and_separate_from_upload_support() {
+    for release in [
+        json!(null), json!(true), json!(false), json!(1), json!([]), json!({}),
+        json!("ON_SUCCESS"), json!("on_success "), json!("later"), json!("on_success"),
+    ] {
+        let caps: Capabilities =
+            serde_json::from_value(json!({"send.file":{"source_release":release}})).unwrap();
+        assert!(
+            caps.has("send.file"),
+            "an optional malformed/unknown promise does not disable raw upload support"
+        );
+        assert_eq!(
+            caps.file_source_released_on_success(),
+            release == json!("on_success")
+        );
+    }
+    for value in [json!(true), json!(false), json!({})] {
+        let caps: Capabilities = serde_json::from_value(json!({"send.file":value})).unwrap();
+        assert!(!caps.file_source_released_on_success());
+        assert_eq!(caps.has("send.file"), value != json!(false));
+    }
+    assert!(!Capabilities::default().file_source_released_on_success());
+    let params: capabilities::SendFileParams =
+        serde_json::from_value(json!({"source_release":"future", "future":1})).unwrap();
+    assert_eq!(params.source_release.as_deref(), Some("future"));
+    for older in ["1.0.0", "1.1.0", "1.2.0"] {
+        assert!(versions_compatible(API_VERSION, older));
+        assert!(versions_compatible(older, API_VERSION));
+    }
+}

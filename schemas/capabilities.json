@@ -139,7 +139,13 @@
     },
     "SendFileParams": {
       "type": "object",
-      "properties": { "max_bytes": { "type": "integer", "minimum": 1, "default": 2147483648 } },
+      "properties": {
+        "max_bytes": { "type": "integer", "minimum": 1, "default": 2147483648 },
+        "source_release": {
+          "type": "string",
+          "description": "Added in API 1.2. The exact value on_success promises all reads, handles and tasks using a messages.send_file source have settled before a successful response. This is an open string: unknown values are ignored and grant no source release authority. Absent grants none. No promise on error, cancellation or events."
+        }
+      },
       "additionalProperties": true
     },
     "SendAlbumParams": {

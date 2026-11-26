@@ -25,7 +25,7 @@
     }
   },
   "properties": {
-    "api_version": { "const": "1.1.0" },
+    "api_version": { "const": "1.2.0" },
     "methods": {
       "type": "array",
       "items": {
@@ -57,7 +57,7 @@
     "events": { "type": "array", "items": { "$ref": "../events.json#/$defs/EventName" } },
     "cancel": { "const": "$/cancelRequest" }
   },
-  "api_version": "1.1.0",
+  "api_version": "1.2.0",
   "default_timeout_seconds": 60,
   "cancel": "$/cancelRequest",
   "events": [

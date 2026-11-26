@@ -2,7 +2,7 @@
   "id": "fake",
   "name": "Fake",
   "version": "0.1.0",
-  "api_version": "1.0.0",
+  "api_version": "1.2.0",
   "entry": ["./.venv/bin/python", "-m", "fake_plugin"],
   "icon": "icon.svg",
   "brand_color": "#8E44AD",

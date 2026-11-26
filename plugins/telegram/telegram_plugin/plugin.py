@@ -19,7 +19,7 @@ class TelegramPlugin(Plugin):
         "forward": True, "forward.drop_author": True, "pin": True, "unpin": True,
         "read_receipts": True, "typing": {"actions": list(activity.TYPING)}, "drafts.sync": True,
         "media.download": True, "avatars": True,
-        "send.file": {"max_bytes": 2 * 1024**3}, "send.as_file": True, "send.spoiler": True,
+        "send.file": {"max_bytes": 2 * 1024**3, "source_release": "on_success"}, "send.as_file": True, "send.spoiler": True,
         "send.voice": True, "send.ttl": True, "send.album": {"max": 10},
         "polls.create": {"quiz": True, "multiple": True, "anonymous": True, "max_options": polls.MAX_OPTIONS},
         "polls.vote": True, "polls.close": True,

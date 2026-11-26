@@ -118,6 +118,7 @@ def test_real_telethon_upload_stream_interface_offline(tmp_path):
         try:
             with uploads.local_file(str(selected)) as (stream, size, filename):
                 result = await value.upload_file(stream, file_size=size, file_name=filename, progress_callback=progress)
+            assert stream.closed
             assert result.name == "fixture.bin"
             request = value._call.await_args.args[1]
             assert isinstance(request, functions.upload.SaveFilePartRequest) and request.bytes == b"fixture"

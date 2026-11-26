@@ -4,6 +4,8 @@ Build the CLI with `cargo build -p ch-cli`. Run `ch plugin test ./my-plugin` aga
 
 The suite starts the plugin in its own directory with fresh temporary HOME, XDG, data, cache and state directories. It answers secret requests in memory. The default checks cover the manifest, transport, lifecycle and observed frames. Plugins execute with the caller's filesystem and network permissions.
 
+The capability check validates API 1.2's optional `send.file.source_release` as an open string. Only `on_success` declares the source-lifetime promise; unknown strings preserve uploads without granting that promise. Malformed non-string values fail conformance, even though a runtime may tolerate the raw upload capability. A passing schema or successful send does not prove that a separate process closed every source handle or settled every background task: authors must verify that semantic promise in their implementation and tests. The built-in Telegram and fake plugins check actual SDK response serialization against source closure.
+
 Full platform-method probes require an **offline, disposable fake or recording**. Supply its test account id using `--fixture-account`. This enables interactive auth and mutating requests, including sending to a chat announced by the fixture. Use a stationary dataset to compare consecutive sync snapshots and history pages. Use only synthetic settings and auth answers. A typed operational error proves the error shape and leaves feature behavior unverified. SKIP results explain missing observations.
 
 With each example's manifest entry already built, run the following from the checkout.

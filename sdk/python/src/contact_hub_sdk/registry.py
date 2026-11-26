@@ -8,7 +8,7 @@ from typing import Any
 
 from . import types as T
 
-API_VERSION = '1.1.0'
+API_VERSION = '1.2.0'
 CANCEL_METHOD = '$/cancelRequest'
 #: Timeout for requests without their own, both directions (spec 4.6, 12).
 DEFAULT_TIMEOUT_SECONDS = 60

@@ -1,4 +1,4 @@
-//! Contact Hub plugin API, version 1.1.0 — the wire contract between the core and a plugin.
+//! Contact Hub plugin API, version 1.2.0 — the wire contract between the core and a plugin.
 //!
 //! This crate is the Rust rendering of `docs/plugin-api.md` and `schemas/`: the JSON-RPC
 //! envelope, the manifest, every DTO, event, method params/result, the error codes, the
@@ -87,7 +87,7 @@ pub use manifest::{AuthMethod, Manifest};
 pub use registry::{GatedParam, GatedValue, METHODS, MethodInfo};
 
 /// The API version this crate implements (spec §18).
-pub const API_VERSION: &str = "1.1.0";
+pub const API_VERSION: &str = "1.2.0";
 
 /// The major version of [`API_VERSION`]; the compatibility rule compares only this.
 pub const API_MAJOR: u64 = 1;

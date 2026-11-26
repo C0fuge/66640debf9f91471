@@ -86,6 +86,25 @@ class LegacyEcho(Echo):
     api_version = "1.0.0"
 
 
+class MinorEcho(ChatEcho):
+    api_version = "1.1.0"
+
+
+class SourceEcho(ChatEcho):
+    capabilities = {**ChatEcho.capabilities, "send.file": {"source_release": "on_success"}}
+
+    @method("messages.send_file")
+    async def send_file(self, account, p: T.MessagesSendFileParams):
+        with open(p.path, "rb") as source:
+            payload = source.read()
+        return T.MessageResult(message=T.Message(id="file", chat_id=p.chat_id, direction="out", sent_at=AT,
+            media=T.Media(kind="document", bytes=len(payload))))
+
+
 if __name__ == "__main__":
-    modes = {"modern": ChatEcho, "legacy": LegacyEcho}
-    (modes[sys.argv[1]] if len(sys.argv) > 1 else Echo)().run()
+    modes = {"modern": ChatEcho, "legacy": LegacyEcho, "minor": MinorEcho, "source": SourceEcho}
+    plugin = (modes[sys.argv[1]] if len(sys.argv) > 1 else Echo)()
+    if len(sys.argv) > 2 and isinstance(plugin, SourceEcho):
+        flag = {"true": True, "empty": {}, "unknown": {"source_release": "future"}}[sys.argv[2]]
+        plugin.capabilities = {**plugin.capabilities, "send.file": flag}
+    plugin.run()
