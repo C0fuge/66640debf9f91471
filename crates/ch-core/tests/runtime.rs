@@ -441,7 +441,7 @@ fn default_data_dir_follows_adr_0001() {
 
 async fn storage_fixture() -> (Env, Core) {
     let env = Env::new();
-    env.misbehaving("storage-fixture", "good", json!({}));
+    env.misbehaving("storage_fixture", "good", json!({}));
     let mut config = core_config(&env, &Arc::new(MemorySecretStore::new()));
     config.autostart = false;
     let core = Core::open(config).await.unwrap();
@@ -449,7 +449,7 @@ async fn storage_fixture() -> (Env, Core) {
 }
 
 fn storage_account(id: &str) -> NewAccount {
-    NewAccount::new("storage-fixture").id(id).no_start()
+    NewAccount::new("storage_fixture").id(id).no_start()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -599,11 +599,11 @@ async fn account_creation_never_adopts_or_erases_an_unowned_namespace() {
         ));
         assert!(accounts.get(id).await.unwrap().is_none());
     }
-    let automatic = roots.join("storage-fixture-1");
+    let automatic = roots.join("storage_fixture-1");
     std::fs::create_dir(&automatic).unwrap();
     assert!(matches!(
         accounts
-            .add(NewAccount::new("storage-fixture").no_start())
+            .add(NewAccount::new("storage_fixture").no_start())
             .await,
         Err(RuntimeError::AccountExists(_))
     ));
