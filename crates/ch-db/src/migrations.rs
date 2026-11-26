@@ -41,6 +41,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0004_sync_outbox",
         sql: include_str!("../migrations/0004_sync_outbox.sql"),
     },
+    Migration {
+        version: 5,
+        name: "0005_managed_sources",
+        sql: include_str!("../migrations/0005_managed_sources.sql"),
+    },
 ];
 
 /// The newest schema version this build knows.

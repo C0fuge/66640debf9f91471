@@ -7,6 +7,7 @@ use crate::types::{MediaFileRow, MessageRow, MessageVersionRow, ReactionRow, rea
 use crate::{Json, Millis, Result, json_opt};
 
 use super::{changes, collect, opt};
+use super::managed::{RefConsumer, RefWrite};
 
 const MSG_COLS: &str = "id, conversation_id, message_id, topic_id, direction, sent_at, sender_id, sender_name, \
     sender_title, text, entities_json, media_kind, media_json, reply_to_json, reply_to_id, forward_from_json, \
@@ -121,6 +122,7 @@ pub fn find_messages_in_dms(
 
 /// Insert a message (`id` ignored). Derived columns are computed here. Returns the rowid.
 pub fn insert_message(conn: &Connection, m: &MessageRow) -> Result<i64> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(&format!(
         "INSERT INTO message ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,\
          ?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44)",
@@ -172,11 +174,14 @@ pub fn insert_message(conn: &Connection, m: &MessageRow) -> Result<i64> {
         m.created_at,
         m.updated_at
     ])?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    write.finish(RefConsumer::Message, id)?;
+    Ok(id)
 }
 
 /// Write every mutable column of a message (by `m.id`), including a re-key of `message_id`.
 pub fn update_message(conn: &Connection, m: &MessageRow) -> Result<bool> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(
         "UPDATE message SET message_id=?2, topic_id=?3, direction=?4, sent_at=?5, sender_id=?6, sender_name=?7,
             sender_title=?8, text=?9, entities_json=?10, media_kind=?11, media_json=?12, reply_to_json=?13,
@@ -233,7 +238,9 @@ pub fn update_message(conn: &Connection, m: &MessageRow) -> Result<bool> {
         m.compute_has_link(),
         m.updated_at
     ])?;
-    Ok(changes(conn) > 0)
+    let changed = changes(conn) > 0;
+    write.finish(RefConsumer::Message, m.id)?;
+    Ok(changed)
 }
 
 /// Hard-delete a message row (versions and reactions cascade; FTS via trigger).
@@ -406,6 +413,7 @@ pub fn insert_message_version(
     m: &MessageRow,
     replaced_at: Millis,
 ) -> Result<i64> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(
         "INSERT INTO message_version (message_id, text, entities_json, media_json, edited_at, replaced_at)
          VALUES (?1,?2,?3,?4,?5,?6)",
@@ -418,7 +426,9 @@ pub fn insert_message_version(
         m.edited_at,
         replaced_at
     ])?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    write.finish(RefConsumer::MessageVersion, id)?;
+    Ok(id)
 }
 
 /// Edit history of a message, oldest first.
@@ -535,6 +545,7 @@ fn media_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MediaFileRow> 
 
 /// Record (or touch) a cache file.
 pub fn upsert_media_file(conn: &Connection, f: &MediaFileRow) -> Result<()> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(
         "INSERT INTO media_file (path, account_id, kind, message_id, media_kind, bytes, created_at, last_access_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
@@ -553,6 +564,7 @@ pub fn upsert_media_file(conn: &Connection, f: &MediaFileRow) -> Result<()> {
         f.created_at,
         f.last_access_at
     ])?;
+    write.finish(RefConsumer::MediaFile, f.path.clone())?;
     Ok(())
 }
 

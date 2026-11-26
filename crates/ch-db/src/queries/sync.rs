@@ -6,6 +6,7 @@ use crate::types::{HistoryGapRow, HistoryStateRow, OutboxRow, PresenceLogRow, ou
 use crate::{Json, Millis, Result, json_opt, now_millis};
 
 use super::{changes, collect, opt};
+use super::managed::{RefConsumer, RefWrite};
 
 // ---- outbox --------------------------------------------------------------------------------
 
@@ -42,6 +43,7 @@ fn outbox_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxRow> {
 
 /// Enqueue an item (`id` ignored; `state` forced to `queued`). Returns the rowid.
 pub fn insert_outbox(conn: &Connection, o: &OutboxRow) -> Result<i64> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(
         "INSERT INTO outbox (account_id, chat_id, topic_id, client_id, kind, method, params_json, state, attempts,
             next_attempt_at, echo_message_id, created_at, updated_at)
@@ -60,7 +62,9 @@ pub fn insert_outbox(conn: &Connection, o: &OutboxRow) -> Result<i64> {
         o.echo_message_id,
         o.created_at
     ])?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    write.finish(RefConsumer::Outbox, id)?;
+    Ok(id)
 }
 
 /// One item.

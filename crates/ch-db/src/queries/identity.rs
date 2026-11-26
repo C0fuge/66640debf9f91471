@@ -8,6 +8,7 @@ use crate::types::{CategoryRow, HandleRow, PersonRow};
 use crate::{Json, Result, json_opt, now_millis, parse_json_opt};
 
 use super::{changes, collect, opt};
+use super::managed::{RefConsumer, RefWrite};
 
 // ---- person --------------------------------------------------------------------------------
 
@@ -239,6 +240,7 @@ pub fn get_handle_by_id(conn: &Connection, id: i64) -> Result<Option<HandleRow>>
 
 /// Insert a handle (`id` ignored). Returns the rowid.
 pub fn insert_handle(conn: &Connection, h: &HandleRow) -> Result<i64> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(&format!(
         "INSERT INTO platform_handle ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
         &HANDLE_COLS[4..] // without "id, "
@@ -266,11 +268,14 @@ pub fn insert_handle(conn: &Connection, h: &HandleRow) -> Result<i64> {
         h.first_seen_at,
         h.last_seen_at
     ])?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    write.finish(RefConsumer::PlatformHandle, id)?;
+    Ok(id)
 }
 
 /// Write every mutable column of a handle (by `h.id`).
 pub fn update_handle(conn: &Connection, h: &HandleRow) -> Result<bool> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(
         "UPDATE platform_handle SET person_id=?2, link_source=?3, display_name=?4, first_name=?5,
             last_name=?6, username=?7, phone=?8, avatar_path=?9, is_bot=?10, is_contact=?11,
@@ -299,7 +304,9 @@ pub fn update_handle(conn: &Connection, h: &HandleRow) -> Result<bool> {
         json_opt(&h.ext)?,
         h.last_seen_at
     ])?;
-    Ok(changes(conn) > 0)
+    let changed = changes(conn) > 0;
+    write.finish(RefConsumer::PlatformHandle, h.id)?;
+    Ok(changed)
 }
 
 /// Just the presence snapshot.
@@ -309,18 +316,24 @@ pub fn set_handle_status(
     status: &ch_protocol::dto::OnlineStatus,
     at: crate::Millis,
 ) -> Result<bool> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(
         "UPDATE platform_handle SET status_json = ?2, status_at = ?3, last_seen_at = ?3 WHERE id = ?1",
     )?
     .execute(params![id, Json(status), at])?;
-    Ok(changes(conn) > 0)
+    let changed = changes(conn) > 0;
+    write.finish(RefConsumer::PlatformHandle, id)?;
+    Ok(changed)
 }
 
 /// Just the avatar.
 pub fn set_handle_avatar(conn: &Connection, id: i64, path: Option<&str>) -> Result<bool> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached("UPDATE platform_handle SET avatar_path = ?2 WHERE id = ?1")?
         .execute(params![id, path])?;
-    Ok(changes(conn) > 0)
+    let changed = changes(conn) > 0;
+    write.finish(RefConsumer::PlatformHandle, id)?;
+    Ok(changed)
 }
 
 /// Link a handle to a person (or unlink with `None`), recording how.

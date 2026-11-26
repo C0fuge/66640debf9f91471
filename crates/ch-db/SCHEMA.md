@@ -2,9 +2,14 @@
 
 SQLite, WAL, `foreign_keys=ON`, busy timeout 5 s, `STRICT` tables. Migrations are numbered SQL
 files in `migrations/` (all `IF NOT EXISTS`, so re-running one is harmless), applied on open in
-their own transactions and stamped into `PRAGMA user_version` (current: 4). A file newer than the
+their own transactions and stamped into `PRAGMA user_version` (current: 5). A file newer than the
 build is refused (`SchemaTooNew`). `migrations::fixups` runs on every open for idempotent
 add-missing-column repairs.
+
+Migration 0005 adds inert managed-upload source/attempt/journal metadata and an
+atomically maintained conservative reverse-reference index. Its bounded coverage,
+writer matrix and authority limits are documented in [MANAGED_REFERENCES.md](MANAGED_REFERENCES.md).
+It enables no registration, source dispatch, path detachment or filesystem cleanup.
 
 `Db::transaction` uses `BEGIN IMMEDIATE` for service writes. It waits for the WAL writer
 before reading, so another service cannot commit between a validation read and its update.

@@ -6,6 +6,7 @@ use crate::types::{ConversationRow, DraftRow, FolderRow, MemberRow, TopicRow};
 use crate::{Json, Millis, Result, json_opt, now_millis};
 
 use super::{changes, collect, opt};
+use super::managed::{RefConsumer, RefWrite};
 
 // ---- conversation --------------------------------------------------------------------------
 
@@ -107,6 +108,7 @@ pub fn conversation_rowid(
 
 /// Insert a conversation (`id` ignored). Returns the rowid.
 pub fn insert_conversation(conn: &Connection, c: &ConversationRow) -> Result<i64> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(&format!(
         "INSERT INTO conversation ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,\
          ?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43)",
@@ -157,11 +159,14 @@ pub fn insert_conversation(conn: &Connection, c: &ConversationRow) -> Result<i64
         c.created_at,
         c.updated_at
     ])?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    write.finish(RefConsumer::Conversation, id)?;
+    Ok(id)
 }
 
 /// Write every mutable column of a conversation (by `c.id`).
 pub fn update_conversation(conn: &Connection, c: &ConversationRow) -> Result<bool> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(
         "UPDATE conversation SET kind=?2, title=?3, peer_user_id=?4, parent_chat_id=?5, username=?6, about=?7,
             archived=?8, muted=?9, mute_until=?10, pinned=?11, pin_order=?12, unread_count=?13,
@@ -216,7 +221,9 @@ pub fn update_conversation(conn: &Connection, c: &ConversationRow) -> Result<boo
         c.last_message_kind,
         c.updated_at
     ])?;
-    Ok(changes(conn) > 0)
+    let changed = changes(conn) > 0;
+    write.finish(RefConsumer::Conversation, c.id)?;
+    Ok(changed)
 }
 
 /// Chat list of an account: live chats (not gone), newest first. `archived`: `None` = both.

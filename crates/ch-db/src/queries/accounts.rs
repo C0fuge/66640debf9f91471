@@ -6,6 +6,7 @@ use crate::types::{AccountRow, PluginRow};
 use crate::{Json, Millis, Result, now_millis};
 
 use super::{changes, collect, opt};
+use super::managed::{RefConsumer, RefWrite};
 
 const PLUGIN_COLS: &str = "plugin_id, name, version, api_version, install_dir, brand_color, icon_path, \
     manifest_json, enabled, installed, first_seen_at, last_seen_at";
@@ -29,6 +30,7 @@ fn plugin_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRow> {
 
 /// Insert or refresh a plugin's manifest facts. `enabled` is kept on update.
 pub fn upsert_plugin(conn: &Connection, p: &PluginRow) -> Result<()> {
+    let write = RefWrite::begin(conn)?;
     conn.prepare_cached(&format!(
         "INSERT INTO plugin ({PLUGIN_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
          ON CONFLICT(plugin_id) DO UPDATE SET name=excluded.name, version=excluded.version,
@@ -51,6 +53,7 @@ pub fn upsert_plugin(conn: &Connection, p: &PluginRow) -> Result<()> {
         p.first_seen_at,
         p.last_seen_at
     ])?;
+    write.finish(RefConsumer::Plugin, p.plugin_id.clone())?;
     Ok(())
 }
 

@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod chats;
 pub mod identity;
 pub mod messages;
+pub mod managed;
 pub mod search;
 pub mod sync;
 
@@ -12,6 +13,7 @@ pub use accounts::*;
 pub use chats::*;
 pub use identity::*;
 pub use messages::*;
+pub use managed::*;
 pub use search::*;
 pub use sync::*;
 
