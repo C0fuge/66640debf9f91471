@@ -1,7 +1,7 @@
 # Build status
 
 Verified source snapshot: `dc808f3`.
-[Verify45794077036](https://github.com/C0fuge/66640debf9f91471/actions/runs/45575407031)
+[Verify45794077036](https://github.com/C0fuge/66640debf9f91471/actions/runs/45794077036)
 passed both jobs: Rust workspace267, no-default core113, two explicit fake
 integrations, isolated native-portal transport, Clippy, CLI conformance144/0/71,
 Linux desktop/CLI builds; UI61, PythonSDK48, fake8, MAX77 and Telegram110.
