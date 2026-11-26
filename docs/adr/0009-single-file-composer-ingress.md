@@ -141,3 +141,31 @@ Implement and verify complete library boundaries first: core admission, private 
 The initial core interfaces are `Outbox::enqueue_with_id(&AccountRow, &str, OutboxRequest, Option<EchoSender>) -> Result<OutboxItem>` and `Outbox::get_matching_admission(&AccountRow, &str, &OutboxRequest) -> Result<Option<OutboxItem>>`. The expected row contributes account ID, plugin ID and creation identity only; labels/settings are not intent identity. Canonical typed request parameters supply the rest. Use a fixed, non-disclosing `OutboxError::AdmissionConflict` for a foreign/different retained intent. Invalid client IDs remain InvalidRequest. A matching duplicate must not mutate an adopted echo or wake the worker. Ownership and duplicate lookup precede echo work inside the same immediate write transaction. New admission and notification remain distinguishable: a postcommit notification failure cannot be treated as proof of no insertion. The read-only helper never schedules or inserts. Retained-row idempotence does not authorize reinsertion after row deletion.
 
 The first helper batch leaves generic enqueue/caller behavior unchanged, does not widen app outbox projections yet, does not tighten Telegram path policy, and adds no file retry route. The four app operations, inventory/projection changes, explicit lifecycle removal coordination and FileStage recovery states are a following coherent integration batch against these reviewed interfaces. Filesystem helpers initially compile through isolated test registration; helper test bodies live outside Cargo's standalone tests autodiscovery. Use only synthetic temporary files and existing cloud verification.
+
+## Accepted removal interlock refinement
+
+Source review of `Accounts::add/remove` found that a post-delete notification
+cannot protect file writers: creation did not share removal's lifecycle lock,
+IDs can share one sanitized account directory, and cancellation of an awaiting
+future does not stop its blocking filesystem/SQLite work. The app integration
+must address these concrete races before enabling file ingress.
+
+Add the narrow `Accounts::storage_lease(&AccountRow)` async accessor returning
+`Result<(CancellationToken, OwnedRwLockReadGuard<()>)>` from existing Tokio
+primitives. Validate the exact persisted owner, acquire the storage-directory
+read lease, then recheck identity and closing/revocation under that lease. The
+chooser keeps only the revocation token; it reacquires a fresh lease and checks
+the original token before touching storage. Removal cancels the exact owner
+before waiting for the directory write lease, and holds it through teardown.
+Distinct owners sharing the same sanitized directory cannot bypass that drain;
+ingress rejects collisions, and removal must not recursively erase a root still
+owned by another persisted account.
+
+Serialize account creation and destructive removal through their actual
+completion, including secret rollback and account-ID reuse. Preserve lifecycle
+mutex identity for existing waiters. An owned operation retains gates when its
+caller drops the future; a detached blocking syscall may not outlive its gate.
+Wrap the existing multi-statement account deletion in one transaction with an
+exact owner recheck. Restore a fresh generation only after proven rollback and
+unchanged persisted ownership; ambiguous teardown remains closed. No DB schema,
+plugin wire, renderer removal command or generic hook framework is added.

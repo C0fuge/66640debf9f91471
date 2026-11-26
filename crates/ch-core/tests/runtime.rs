@@ -438,3 +438,176 @@ fn default_data_dir_follows_adr_0001() {
         assert!(d.ends_with(".local/share/contact-hub-ng"));
     }
 }
+
+async fn storage_fixture() -> (Env, Core) {
+    let env = Env::new();
+    env.misbehaving("storage-fixture", "good", json!({}));
+    let mut config = core_config(&env, &Arc::new(MemorySecretStore::new()));
+    config.autostart = false;
+    let core = Core::open(config).await.unwrap();
+    (env, core)
+}
+
+fn storage_account(id: &str) -> NewAccount {
+    NewAccount::new("storage-fixture").id(id).no_start()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn storage_lease_revocation_drains_actual_io_and_serializes_abandoned_remove_and_add() {
+    let (env, core) = storage_fixture().await;
+    let accounts = core.accounts();
+    let id = "same-id";
+    let row = accounts.add(storage_account(id)).await.unwrap();
+    let root = env.data_dir.join("accounts").join(id);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("marker"), b"old").unwrap();
+    let (choosing, chooser_guard) = accounts.storage_lease(&row).await.unwrap();
+    drop(chooser_guard);
+    let (writer, held) = accounts.storage_lease(&row).await.unwrap();
+    let mut events = core.subscribe();
+    {
+        let mut removal = Box::pin(accounts.remove(id));
+        // Poll the real API until its owned task reaches the reader drain.
+        tokio::select! {
+            biased;
+            result=&mut removal => panic!("remove returned with active reader: {result:?}"),
+            _=tokio::time::timeout(secs(5.0),writer.cancelled()) => assert!(writer.is_cancelled()),
+        }
+        assert!(choosing.is_cancelled());
+        assert!(root.join("marker").is_file());
+        assert!(accounts.get(id).await.unwrap().is_some());
+        assert!(accounts.storage_lease(&row).await.is_err());
+        let mut addition = Box::pin(accounts.add(storage_account(id)));
+        tokio::select! {
+            biased;
+            result=&mut addition => panic!("replacement overtook pending teardown: {result:?}"),
+            _=std::future::ready(())=>{}
+        }
+        // Both API futures disappear; their tasks must still own the gates.
+    }
+    drop(held);
+    wait_change(&mut events, secs(5.0), |event| {
+        matches!(event,CoreChange::Account(AccountChange::Added{account_id,..}) if account_id==id)
+            .then_some(())
+    })
+    .await;
+    let replacement = accounts.get(id).await.unwrap().unwrap();
+    let (fresh, guard) = accounts.storage_lease(&replacement).await.unwrap();
+    assert!(!fresh.is_cancelled());
+    assert!(choosing.is_cancelled());
+    assert!(
+        !root.exists(),
+        "replacement inherited the removed directory"
+    );
+    drop(guard);
+    let mut foreign = replacement.clone();
+    foreign.account_id = "absent".into();
+    assert!(accounts.storage_lease(&foreign).await.is_err());
+    foreign = replacement.clone();
+    foreign.plugin_id = "foreign".into();
+    assert!(accounts.storage_lease(&foreign).await.is_err());
+    foreign = replacement;
+    foreign.created_at -= 1;
+    assert!(accounts.storage_lease(&foreign).await.is_err());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn colliding_storage_names_share_the_drain_and_preserve_the_other_owner() {
+    let (env, core) = storage_fixture().await;
+    let accounts = core.accounts();
+    let a = accounts.add(storage_account("one/two")).await.unwrap();
+    let (old, held) = accounts.storage_lease(&a).await.unwrap();
+    // Both persisted IDs exist before either has created a file. They use the
+    // same HostConfig component, including after a restart with historical rows.
+    let b = accounts.add(storage_account("one_two")).await.unwrap();
+    assert!(old.is_cancelled());
+    assert!(accounts.storage_lease(&a).await.is_err());
+    assert!(accounts.storage_lease(&b).await.is_err());
+    let root = env.data_dir.join("accounts/one_two");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("marker"), b"retained").unwrap();
+    let mut remove = Box::pin(accounts.remove(&b.account_id));
+    tokio::select! {
+        result=&mut remove=>panic!("directory alias bypassed the drain: {result:?}"),
+        _=tokio::time::sleep(Duration::from_millis(30))=>{}
+    }
+    assert!(accounts.get(&b.account_id).await.unwrap().is_some());
+    drop(held);
+    tokio::time::timeout(secs(5.0), remove)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(root.join("marker").is_file());
+    let (fresh, guard) = accounts.storage_lease(&a).await.unwrap();
+    assert!(!fresh.is_cancelled());
+    drop(guard);
+    accounts.remove(&a.account_id).await.unwrap();
+    assert!(!root.exists());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_account_delete_rolls_back_related_rows_and_rotates_revocation() {
+    let (env, core) = storage_fixture().await;
+    let accounts = core.accounts();
+    let row = accounts.add(storage_account("rollback")).await.unwrap();
+    let root = env.data_dir.join("accounts/rollback");
+    std::fs::create_dir_all(&root).unwrap();
+    let (old, guard) = accounts.storage_lease(&row).await.unwrap();
+    drop(guard);
+    let db = core.open_db().unwrap();
+    db.conn().execute_batch("INSERT INTO media_file(path,account_id,kind,created_at,last_access_at)
+            VALUES ('synthetic','rollback','other',1,1);
+        CREATE TRIGGER refuse_remove BEFORE DELETE ON account BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
+    assert!(accounts.remove(&row.account_id).await.is_err());
+    assert!(old.is_cancelled());
+    assert!(root.exists());
+    assert_eq!(
+        count(
+            &core,
+            "SELECT COUNT(*) FROM media_file WHERE account_id=?1",
+            &row.account_id
+        ),
+        1
+    );
+    let (fresh, guard) = accounts.storage_lease(&row).await.unwrap();
+    assert!(!fresh.is_cancelled());
+    drop(guard);
+    db.conn()
+        .execute_batch("DROP TRIGGER refuse_remove")
+        .unwrap();
+    accounts.remove(&row.account_id).await.unwrap();
+    assert!(fresh.is_cancelled());
+    assert!(!root.exists());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_creation_never_adopts_or_erases_an_unowned_namespace() {
+    let (env, core) = storage_fixture().await;
+    let accounts = core.accounts();
+    let roots = env.data_dir.join("accounts");
+    std::fs::create_dir_all(roots.join("orphan/uploads")).unwrap();
+    std::fs::write(roots.join("orphan/uploads/marker"), b"orphan").unwrap();
+    std::fs::write(roots.join("ordinary-file"), b"file").unwrap();
+    std::os::unix::fs::symlink("missing", roots.join("dangling")).unwrap();
+    for id in ["orphan", "ordinary-file", "dangling", ""] {
+        assert!(matches!(
+            accounts.add(storage_account(id)).await,
+            Err(RuntimeError::AccountExists(_))
+        ));
+        assert!(accounts.get(id).await.unwrap().is_none());
+    }
+    let automatic = roots.join("storage-fixture-1");
+    std::fs::create_dir(&automatic).unwrap();
+    assert!(matches!(
+        accounts
+            .add(NewAccount::new("storage-fixture").no_start())
+            .await,
+        Err(RuntimeError::AccountExists(_))
+    ));
+    assert!(automatic.is_dir());
+    assert!(roots.join("orphan/uploads/marker").is_file());
+    core.shutdown().await;
+}

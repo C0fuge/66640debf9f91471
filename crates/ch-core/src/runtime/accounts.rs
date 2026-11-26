@@ -2,7 +2,9 @@
 //! and starting accounts on the host.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+
+mod storage;
 
 use ch_db::types::{AccountRow, PluginRow};
 use ch_db::{Db, now_millis};
@@ -111,7 +113,9 @@ struct Inner {
     bus: ChangeBus,
     defaults: RwLock<SpecDefaults>,
     /// One lifecycle operation at a time per account (start/stop pairs must not interleave).
-    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    membership: tokio::sync::Mutex<()>,
+    storage: storage::Gates,
 }
 
 /// The accounts service. Cheap to clone. Owns its own database connection.
@@ -134,6 +138,8 @@ impl Accounts {
             bus,
             defaults: RwLock::new(SpecDefaults::default()),
             locks: Mutex::new(HashMap::new()),
+            membership: Default::default(),
+            storage: Default::default(),
         }))
     }
 
@@ -152,14 +158,14 @@ impl Accounts {
     }
 
     fn lock_for(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        Arc::clone(
-            self.0
-                .locks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(account_id.to_owned())
-                .or_default(),
-        )
+        let mut locks = self.0.locks.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(lock) = locks.get(account_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(account_id.into(), Arc::downgrade(&lock));
+        lock
     }
 
     // ---- reads ------------------------------------------------------------------------------
@@ -290,6 +296,11 @@ impl Accounts {
     /// fails the error is returned but the account stays persisted and wanted: it starts on
     /// the next launch or [`Accounts::set_enabled`].
     pub async fn add(&self, new: NewAccount) -> Result<AccountRow> {
+        let me = self.clone();
+        tokio::spawn(async move { me.add_owned(new).await }).await?
+    }
+    async fn add_owned(&self, new: NewAccount) -> Result<AccountRow> {
+        let membership = self.0.membership.lock().await;
         let (snap, schema) = self.plugin(&new.plugin_id)?;
         let split = split_settings(
             &new.plugin_id,
@@ -302,6 +313,7 @@ impl Accounts {
         let wanted_id = new.account_id.clone();
         let prow = plugin_row(&snap, now_millis());
         let plain = split.plain.clone();
+        let inner = self.0.clone();
         let row = self
             .db(move |db| {
                 let tx = db.transaction()?;
@@ -314,25 +326,34 @@ impl Accounts {
                     }
                     None => generate_id(&tx, &plugin_id)?,
                 };
+                let root = storage::directory(inner.host.config(), &id);
+                storage::require_absent(inner.host.config(), &id, &root)?;
                 if let Some(p) = &prow {
                     ch_db::upsert_plugin(&tx, p)?;
                 }
                 let row = ch_db::create_account(&tx, &id, &plugin_id, label.as_deref(), &plain)?;
                 tx.commit().map_err(ch_db::Error::from)?;
+                // An existing gate for this newly inserted ID's directory may
+                // belong to a different ID with the same sanitized spelling.
+                inner.storage.revoke_existing(&root);
                 Ok(row)
             })
             .await?;
+        let lock = self.lock_for(&row.account_id);
+        let _lifecycle = lock.lock().await;
         let ns = settings_secret_namespace(&row.plugin_id);
         for (k, v) in &split.set {
             if let Err(e) = self.0.secrets.set(&ns, &row.account_id, k, v).await {
                 // Do not leave a half-configured account behind.
-                let id = row.account_id.clone();
-                let _ = self
-                    .db(move |db| Ok(ch_db::delete_account(db.conn(), &id)?))
-                    .await;
+                let root = storage::directory(self.0.host.config(), &row.account_id);
+                let gate = self.0.storage.get(&root);
+                gate.token.cancel();
+                let _storage = gate.drain.write().await;
+                self.delete_owned_row(&row, &root, &gate).await?;
                 for k in split.set.keys() {
                     let _ = self.0.secrets.delete(&ns, &row.account_id, k).await;
                 }
+                self.0.storage.retire(&root, &gate);
                 return Err(e.into());
             }
         }
@@ -343,8 +364,10 @@ impl Accounts {
                 account_id: row.account_id.clone(),
                 plugin_id: row.plugin_id.clone(),
             }));
+        drop(membership);
         if new.start {
-            self.start(&row.account_id).await?;
+            // The held lifecycle guard still pins this exact added row.
+            self.start_row(&row).await?;
         }
         Ok(row)
     }
@@ -352,13 +375,21 @@ impl Accounts {
     /// Stop the account, delete it with everything it owns (DB rows cascade; secret settings,
     /// runtime secrets and `accounts/<id>/` on disk). Persons and categories survive.
     pub async fn remove(&self, account_id: &str) -> Result<()> {
+        let me = self.clone();
+        let id = account_id.to_owned();
+        tokio::spawn(async move { me.remove_owned(&id).await }).await?
+    }
+    async fn remove_owned(&self, account_id: &str) -> Result<()> {
+        let _membership = self.0.membership.lock().await;
         let lock = self.lock_for(account_id);
         let _g = lock.lock().await;
         let row = self.row(account_id).await?;
+        let root = storage::directory(self.0.host.config(), account_id);
+        let gate = self.0.storage.get(&root);
+        gate.token.cancel();
+        let _storage = gate.drain.write().await;
         self.stop_on_host(&row).await;
-        let id = account_id.to_owned();
-        self.db(move |db| Ok(ch_db::delete_account(db.conn(), &id)?))
-            .await?;
+        let sole = self.delete_owned_row(&row, &root, &gate).await?;
         for ns in [
             row.plugin_id.clone(),
             settings_secret_namespace(&row.plugin_id),
@@ -374,18 +405,22 @@ impl Accounts {
                 Err(e) => warn!(account = account_id, "listing secrets: {e}"),
             }
         }
-        if let Some(dir) = self.0.host.config().state_dir(account_id).parent() {
-            match tokio::fs::remove_dir_all(dir).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => warn!(account = account_id, "removing {}: {e}", dir.display()),
+        let settled = if sole {
+            match tokio::fs::remove_dir_all(&root).await {
+                Ok(()) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(_) => {
+                    warn!(account = account_id, "account directory cleanup incomplete");
+                    false
+                }
             }
+        } else {
+            // A shared or noncanonical root must survive this owner's removal.
+            true
+        };
+        if settled {
+            self.0.storage.retire(&root, &gate);
         }
-        self.0
-            .locks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(account_id);
         info!(account = account_id, plugin = %row.plugin_id, "account removed");
         self.0
             .bus
