@@ -165,6 +165,20 @@ pub fn account_path_filter(config: &HostConfig) -> PathFilter {
     Arc::new(move |account_id: &str, path: &str| path_allowed(&config, account_id, Path::new(path)))
 }
 
+// Core's real composition shares this same negative reader gate with copy,
+// verifier, catalog, selected-input and cache workers. Canonicalization is real
+// filesystem work too, including rejection probes and root symlink resolution.
+// No descriptor escapes and a true path-filter result grants no read/cleanup.
+#[cfg(target_os="linux")]
+pub(super) fn account_path_filter_counted(config:&HostConfig,
+    catalog:Arc<crate::managed_stage::catalog::PrivateByteCatalog>) -> PathFilter {
+    let config=config.clone();let mutations=catalog.mutations();
+    Arc::new(move|account,path| {
+        let Ok(_readers)=mutations.read_scope() else {return false;};
+        path_allowed(&config,account,Path::new(path))
+    })
+}
+
 fn path_allowed(config: &HostConfig, account_id: &str, p: &Path) -> bool {
     if !p.is_absolute() || p.components().any(|c| matches!(c, Component::ParentDir)) {
         return false;
@@ -210,5 +224,30 @@ mod tests {
         let link = cache.join("evil");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         assert!(!f("a#1", link.to_str().unwrap()));
+    }
+
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn actual_core_path_probe_uses_its_real_reader_gate_and_refuses_after_close() {
+        use crate::{host::MemorySecretStore,runtime::{Core,CoreConfig}};
+        let temp=tempfile::tempdir().unwrap();
+        let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new()));config.autostart=false;
+        let core=Core::open(config).await.unwrap();
+        let filter=core.ingest().with_ingest(|ing|ing.options().path_filter.clone().unwrap()).await.unwrap();
+        let catalog=core.managed_sources().catalog();
+        let root=core.host().config().cache_dir("owner");std::fs::create_dir_all(&root).unwrap();
+        let path=root.join("cached.bin");std::fs::write(&path,b"isolated cache").unwrap();
+        assert!(filter("owner",path.to_str().unwrap()));
+        assert!(filter("owner",root.join("missing.bin").to_str().unwrap()),"existing lexical missing-file policy");
+        let outside=temp.path().join("outside.bin");std::fs::write(&outside,b"external").unwrap();
+        let link=root.join("outside-link");std::os::unix::fs::symlink(&outside,&link).unwrap();
+        assert!(!filter("owner",link.to_str().unwrap()));
+        let exclusive=catalog.exclude_readers_for_test().unwrap();
+        assert!(!filter("owner",path.to_str().unwrap()));
+        assert!(!filter("owner",root.join("missing.bin").to_str().unwrap()));
+        drop(exclusive);assert!(filter("owner",path.to_str().unwrap()));
+        core.shutdown().await;
+        assert!(!filter("owner",path.to_str().unwrap()));
+        assert!(!filter("owner",root.join("missing.bin").to_str().unwrap()));
     }
 }

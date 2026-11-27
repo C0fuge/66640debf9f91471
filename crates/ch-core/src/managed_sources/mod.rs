@@ -33,8 +33,7 @@ pub(crate) struct ManagedSources {
 }
 
 impl ManagedSources {
-    pub(crate) fn new(proofs: ManagedProofWriter, config: &HostConfig) -> Arc<Self> {
-        let catalog=PrivateByteCatalog::for_core(config);
+    pub(crate) fn new(proofs: ManagedProofWriter, catalog:Arc<PrivateByteCatalog>) -> Arc<Self> {
         Arc::new(Self { core_nonce:crate::host::managed_nonce(),owners: OwnerBarriers::new(catalog.clone()),catalog, proofs,
             admissions: OwnedJobs::new(), lookups: OwnedJobs::new(), owner_jobs:OwnedJobs::new(),
             directory_jobs:OwnedJobs::new(),copy_jobs:OwnedJobs::new(),closed: CancellationToken::new() })

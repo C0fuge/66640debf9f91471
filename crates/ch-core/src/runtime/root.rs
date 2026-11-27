@@ -14,7 +14,9 @@ use super::error::Result;
 #[cfg(not(target_os="linux"))]
 use super::error::RuntimeError;
 use super::managed_proof::ManagedProofWriter;
-use super::sink::{IngestSink, account_path_filter};
+use super::sink::IngestSink;
+#[cfg(not(target_os="linux"))]
+use super::sink::account_path_filter;
 use crate::host::{HostConfig, HostHandle, SecretStore};
 use crate::ingest::{Ingest, IngestOptions};
 
@@ -183,6 +185,11 @@ impl Core {
 
         let bus = ChangeBus::new(config.bus_capacity);
         let mut opts = config.ingest;
+        #[cfg(target_os="linux")]
+        let catalog=crate::managed_stage::catalog::PrivateByteCatalog::for_core(&host_config);
+        #[cfg(target_os="linux")]
+        {opts.path_filter=Some(super::sink::account_path_filter_counted(&host_config,catalog.clone()));}
+        #[cfg(not(target_os="linux"))]
         opts.path_filter = Some(account_path_filter(&host_config));
         #[cfg(target_os = "linux")]
         let logical_owners = super::LogicalOwners::new();
@@ -192,7 +199,7 @@ impl Core {
         let sink = Arc::new(IngestSink::new(Ingest::new(ingest_db, opts), bus.clone()));
         let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(), proof_db);
         #[cfg(target_os = "linux")]
-        let managed_sources = crate::managed_sources::ManagedSources::new(managed_proofs.clone(), &host_config);
+        let managed_sources = crate::managed_sources::ManagedSources::new(managed_proofs.clone(),catalog);
         #[cfg(target_os = "linux")]
         managed_sources.restore_negative(sink.shared_ingest(),&host_config).await?;
         #[cfg(target_os = "linux")]
