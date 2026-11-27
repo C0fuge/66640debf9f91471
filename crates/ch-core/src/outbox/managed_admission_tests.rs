@@ -370,6 +370,22 @@ async fn actual_native_managed_file_has_durable_exposure_before_read_and_atomic_
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_managed_admission_wakes_the_already_idle_account_worker() {
+    let f=Fixture::with_mode(true,Some("success")).await;
+    let (send,entered)=oneshot::channel();let send=Mutex::new(Some(send));
+    *f.outbox.inner.managed_checkpoint.lock().unwrap()=Some(Arc::new(move|phase| {
+        if phase=="worker-idle" && let Some(send)=send.lock().unwrap().take() {let _=send.send(());}
+    }));
+    f.outbox.start().unwrap();entered.await.unwrap();
+    // The worker completed its initial empty pass. No restart, status event,
+    // second enqueue or manual start may be required to notice this new source.
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    wait_native_state(&f,item.id,OutboxState::Sent).await;wait_attempt_state(&f,"positive").await;
+    assert_eq!(f.count("managed_dispatch"),1);assert_eq!(f.count("message"),1);
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn actual_native_wrong_destination_and_malformed_success_never_certify_source_closure() {
     for mode in ["wrong-topic","malformed"] {
         let f=Fixture::with_mode(true,Some(mode)).await;
@@ -439,10 +455,10 @@ async fn actual_native_reply_certifies_already_sent_exact_ids_without_changing_r
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn actual_native_replacement_between_exposure_and_queue_cannot_use_the_old_permit() {
     let f=Fixture::with_mode(true,Some("success")).await;
-    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
     let (release,hook,entered)=pause("native-before-frame");
     *f.outbox.inner.managed_checkpoint.lock().unwrap()=Some(hook);
-    f.outbox.start().unwrap();entered.await.unwrap();
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    entered.await.unwrap();
     let db=f.core.open_db().unwrap();
     let old_nonce:String=db.conn().query_row("SELECT nonce FROM managed_producer",[],|r|r.get(0)).unwrap();
     f.assert_no_wire();

@@ -1,4 +1,4 @@
-//! Shared deny-only owner metadata. Closing never proves reader closure or grants IO.
+//! Shared owner lifetime and input metadata. Closing never proves reader closure.
 use super::{Error, StageIdentity};
 use crate::runtime::AccountStorageObservation;
 use crate::managed_stage::{AccountRootAnchor, AccountRootIdentity,catalog::{PrivateByteCatalog,OwnerCatalogCheck}};

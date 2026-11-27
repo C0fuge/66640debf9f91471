@@ -1,5 +1,6 @@
-//! WIP local admission ownership only. No reader, dispatch, settlement or release grants.
+//! Core-owned managed-source metadata and bounded local work.
 //! Entries retain observations/metadata, never stage FDs, flocks or account read guards.
+//! Recovered records only deny; they cannot select a native dispatch or authorize release.
 
 use std::sync::Arc;
 

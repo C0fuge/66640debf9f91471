@@ -284,6 +284,7 @@ impl Outbox {
                 return Err(ManagedAdmissionError::Unavailable);
             }
         };
+        let schedule=written.source.is_some();
         if let Some((id, identity)) = written.source {
             if reservation.publish(id, identity.clone()).is_err() {
                 reservation.quarantine(Some(identity));
@@ -302,8 +303,12 @@ impl Outbox {
         drop(reservation);
         if let Some(applied) = written.applied { self.inner.publish(OutboxChange::Ingested(applied)); }
         self.inner.publish(OutboxChange::Item(written.item.clone()));
-        // Intentionally no managed scheduling. Even manual start is fail-closed
-        // at the shared generic managed-row guard, without relying on this omission.
+        // Scheduling starts only after durable admission, gate publication and
+        // actual local byte/flock settlement. A missing gate/native promise still
+        // parks the row; a committed receipt survives a scheduling failure.
+        if schedule && Self::refresh_worker(&self.inner,&written.item.account_id).is_err() {
+            tracing::warn!("managed admission committed; worker refresh incomplete");
+        }
         Ok(written.item)
     }
 

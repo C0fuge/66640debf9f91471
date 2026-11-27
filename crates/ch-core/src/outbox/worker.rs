@@ -37,6 +37,11 @@ pub(super) async fn run(
                 Some(inner.now().saturating_add(5_000))
             }
         };
+        #[cfg(test)]
+        {
+            let checkpoint=inner.managed_checkpoint.lock().unwrap().clone();
+            if let Some(checkpoint)=checkpoint {checkpoint("worker-idle");}
+        }
         let wait = async {
             if let Some(at) = due {
                 tokio::time::sleep(Duration::from_millis(
