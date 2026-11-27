@@ -36,7 +36,7 @@ impl App {
         .await
     }
     pub(crate) async fn inventory(&self) -> Result<Value> {
-        let accounts = self.core.accounts().list().await?;
+        let accounts = self.core.accounts().inventory().await?;
         let stored = self.read(|db| Ok(ch_db::list_plugins(db.conn())?)).await?;
         let mut plugins = BTreeMap::new();
         for p in self.core.host().plugins() {
@@ -54,14 +54,13 @@ impl App {
             );
         }
         let mut rows = Vec::with_capacity(accounts.len());
-        for a in accounts {
+        for (a, info) in accounts {
             plugins.entry(a.plugin_id.clone()).or_insert_with(||{
                 let old=stored.iter().find(|p|p.plugin_id==a.plugin_id);
                 json!({"pluginId":a.plugin_id,"name":old.map_or(&a.plugin_id,|p|&p.name),
                     "brandColor":old.and_then(|p|p.brand_color.as_ref()),"phase":"unavailable","capabilities":null,
                     "authMethods":[],"settingsSchema":null})
             });
-            let info = self.core.host().account(&a.plugin_id, &a.account_id);
             let phase = match info.as_ref().map(|i| &i.phase) {
                 Some(AccountPhase::Starting) => "starting",
                 Some(AccountPhase::Running) => "running",

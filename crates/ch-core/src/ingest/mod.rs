@@ -283,9 +283,27 @@ impl Ingest {
 
     /// Apply one plugin → core event for `plugin_id` inside a transaction.
     pub fn apply(&self, plugin_id: &str, event: Event) -> Result<Applied> {
+        self.apply_with_owner(plugin_id, event, None)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_owned(&self, plugin_id: &str, event: Event,
+        owners: &crate::runtime::LogicalOwners, origin: &crate::runtime::LogicalOwnerObservation) -> Result<Applied> {
+        self.apply_with_owner(plugin_id, event, Some((owners, origin)))
+    }
+
+    fn apply_with_owner(&self, plugin_id: &str, event: Event,
+        owner: Option<(&crate::runtime::LogicalOwners, &crate::runtime::LogicalOwnerObservation)>) -> Result<Applied> {
         let account_id = event_account(&event).to_owned();
         let name = event.name();
         let tx = self.db.transaction()?;
+        if let Some((owners, origin)) = owner {
+            if origin.account_id() != account_id || origin.plugin_id() != plugin_id || !owners.validate(&tx, origin)? {
+                // Old queued native input is an acknowledged no-op, never a
+                // lookup by ID that could adopt the replacement incarnation.
+                return Ok(Applied::new(&account_id, name));
+            }
+        }
         self.check_account(&tx, plugin_id, &account_id)?;
         let mut out = Applied::new(&account_id, name);
         let now = now_millis();
@@ -387,6 +405,12 @@ impl Ingest {
             Event::MediaReady(e) => self.on_media_ready(&tx, &account_id, &e, now, &mut out)?,
             Event::TransferProgress(e) => out.push(Change::TransferProgress(e)),
             Event::AuthStep(e) => out.push(Change::AuthStep(e.step)),
+        }
+        if let Some((owners, origin)) = owner {
+            if !owners.validate(&tx, origin)? {
+                tx.rollback()?;
+                return Ok(Applied::new(&account_id, name));
+            }
         }
         tx.commit()?;
         Ok(out)

@@ -26,7 +26,7 @@ impl HostStorageView {
     }
     // Called only on the actual counted directory metadata worker. No read
     // lease is acquired, so a removal writer can never strand this capture.
-    pub(crate) fn capture(&self, plugin: &str, account: &str) -> Result<AccountStorageObservation> {
+    pub(crate) fn capture(&self, plugin: &str, account: &str) -> Result<(AccountStorageObservation, super::LogicalOwnerObservation)> {
         let inner = self.0.upgrade().ok_or_else(|| unknown(account))?;
         let db = inner.db.lock().unwrap_or_else(PoisonError::into_inner);
         let observed = observation_at(&inner, &db, account)?;
@@ -34,7 +34,8 @@ impl HostStorageView {
             || !exclusive(db.conn(), inner.host.config(), &observed.owner, &observed.root)?
             || !inner.storage.current(&observed.root, &observed.gate)
         { return Err(unknown(account)); }
-        Ok(observed)
+        let logical = inner.logical_owners.capture(&observed.owner).ok_or_else(|| unknown(account))?;
+        Ok((observed, logical))
     }
     pub(crate) async fn reacquire(&self, observed: &AccountStorageObservation, stopped: &CancellationToken)
         -> Result<AccountStorageBinding> {
@@ -467,24 +468,42 @@ impl Accounts {
         // Reserve the actual deleting writer before the LAST negative-source
         // check. Preflight alone cannot protect against a concurrent raw writer.
         if managed_in_use(&tx,&row.account_id)? {
-            tx.rollback().map_err(ch_db::Error::from)?;
-            check_owner(db.conn(),row)?;
+            self.rollback_delete(tx, db, row)?;
             return Ok(Err(RuntimeError::SourceInUse));
         }
         if let Err(error)=veto() {
-            tx.rollback().map_err(ch_db::Error::from)?;
-            check_owner(db.conn(),row)?;
+            self.rollback_delete(tx, db, row)?;
             return Ok(Err(error));
         }
         match ch_db::delete_account(&tx,&row.account_id) {
-            Ok(true)=>{ tx.commit().map_err(ch_db::Error::from)?;Ok(Ok(sole)) }
+            Ok(true)=>{
+                #[cfg(all(test, target_os = "linux"))]
+                if let Some(hook) = self.0.delete_commit_checkpoint.lock().unwrap().take() { hook(&tx); }
+                if let Err(error) = tx.commit() {
+                    self.0.logical_owners.uncertain(&row.account_id);
+                    return Err(ch_db::Error::from(error).into());
+                }
+                self.0.logical_owners.deleted(&row.account_id);
+                Ok(Ok(sole))
+            }
             result=>{
                 let error=match result {Err(e)=>RuntimeError::Db(e),_=>unknown(&row.account_id)};
-                tx.rollback().map_err(ch_db::Error::from)?;
-                check_owner(db.conn(),row)?;
+                self.rollback_delete(tx, db, row)?;
                 Ok(Err(error))
             }
         }
+    }
+
+    fn rollback_delete(&self, tx: rusqlite::Transaction<'_>, db: &ch_db::Db, row: &AccountRow) -> Result<()> {
+        if let Err(error) = tx.rollback() {
+            self.0.logical_owners.uncertain(&row.account_id);
+            return Err(ch_db::Error::from(error).into());
+        }
+        if let Err(error) = check_owner(db.conn(),row) {
+            self.0.logical_owners.uncertain(&row.account_id);
+            return Err(error);
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -570,7 +589,7 @@ mod capture_tests {
         let view = core.accounts().host_storage_view().unwrap();
         assert!(view.belongs_to(core.host()));
         assert!(core.host().bind_storage(view.clone()).is_err()); // Already once-bound.
-        let foreign = crate::host::HostHandle::for_core(core.host().config().clone(), Arc::new(crate::host::NullSink),
+        let foreign = crate::host::HostHandle::for_core(core.host().config().clone(), core.ingest().clone(),
             Arc::new(MemorySecretStore::new()), core.stage_mutations(), core.managed_sources().directory_jobs(),
             core.managed_sources().lookups());
         assert!(!view.belongs_to(&foreign));

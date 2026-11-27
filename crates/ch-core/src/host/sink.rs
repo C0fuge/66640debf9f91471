@@ -24,6 +24,13 @@ pub trait EventSink: Send + Sync + 'static {
     async fn deliver(&self, plugin_id: &str, event: Event) -> Result<(), String>;
 }
 
+#[cfg(target_os = "linux")]
+#[async_trait]
+pub(crate) trait OwnedEventSink: Send + Sync + 'static {
+    async fn deliver_owned(&self, plugin_id: &str, origin: crate::runtime::LogicalOwnerObservation,
+        event: Event) -> Result<(), String>;
+}
+
 /// A sink that drops everything (tests, tools).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NullSink;

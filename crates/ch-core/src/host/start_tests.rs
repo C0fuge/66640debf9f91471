@@ -18,15 +18,21 @@ async fn fixture() -> (tempfile::TempDir, Core) {
 
 fn connection(registry: &Arc<Registry>) -> (Arc<Conn>, mpsc::Receiver<Out>) {
     let (writer, frames) = mpsc::channel(16);
-    (Arc::new(Conn { plugin_id: "fixture".into(), identity: Arc::new(()), registry: Arc::downgrade(registry), pending: Mutex::default(), writer,
+    (Arc::new(Conn { plugin_id: "fixture".into(), identity: Arc::new(()), registry: Arc::downgrade(registry), origins: None, pending: Mutex::default(), writer,
         ping_misses: AtomicU32::new(0), stalled: AtomicBool::new(false), initialized: AtomicBool::new(true) }), frames)
+}
+
+fn owned_connection(registry: &Arc<Registry>) -> (Arc<Conn>, mpsc::Receiver<Out>) {
+    let (mut conn, frames) = connection(registry);
+    Arc::get_mut(&mut conn).unwrap().origins = Some(super::super::origins::Origins::new());
+    (conn, frames)
 }
 
 fn supervisor(core: &Core, registry: Arc<Registry>) -> Supervisor {
     let (_send, rx) = mpsc::channel(1);
     Supervisor { plugin_id: "fixture".into(), info: core.host().plugin("fixture").unwrap().info,
         config: Arc::new(core.host().config().clone()), registry, sink: Arc::new(NullSink),
-        secrets: Arc::new(MemorySecretStore::new()), directories: None, rx, failures: 0, last_failure: String::new() }
+        secrets: Arc::new(MemorySecretStore::new()), directories: None, owned_sink: None, rx, failures: 0, last_failure: String::new() }
 }
 
 fn finish(kind: &str, core: &Core, registry: &Arc<Registry>, conn: &Arc<Conn>, id: i64) {
@@ -176,4 +182,147 @@ async fn dropped_or_timed_out_stop_waiter_preserves_queue_cancellation_and_actua
         registry.lock().get_mut("fixture").unwrap().cmd = None;
         core.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn original_status_and_queued_delivery_survive_stop_only_as_the_old_logical_origin() {
+    use crate::host::{OwnedEventSink, OwnedStateChange};
+    let (_temp, core) = fixture().await;
+    let registry = core.host().test_registry();
+    let scope = core.host().capture_start("fixture", "owner").await.unwrap();
+    let original = scope.origin().unwrap().clone();
+    assert!(registry.set_start("fixture", "owner", AccountSpec::default(), &scope));
+    let (conn, mut frames) = owned_connection(&registry);
+    let (id, response) = conn.request(PendingKind::AccountStart("owner".into(), scope), "account.start",
+        serde_json::json!({}), Duration::from_secs(1), None, &conn).unwrap();
+    assert!(matches!(frames.try_recv(), Ok(Out::Frame(_))));
+    resolve(&conn, &registry, RequestId::Number(id), Ok(serde_json::json!({})));
+    tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap().unwrap();
+    let mut changes = core.host().subscribe_owned();
+    let (send, mut events) = mpsc::channel(1);
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    handle_incoming(&conn, &registry, &secrets, &send, None, "status", Some(serde_json::json!({
+        "account_id":"owner","state":"connected","detail":"old-detail","reconnecting":false,
+        "me":{"id":"old-me","display_name":"Synthetic"}
+    }))).await;
+    let delivery = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
+    assert!(delivery.origin.as_ref().unwrap().same(&original));
+    let change = tokio::time::timeout(Duration::from_secs(5), changes.recv()).await.unwrap().unwrap();
+    let OwnedStateChange::Account(snapshot) = change else { panic!("expected original account snapshot"); };
+    assert!(snapshot.origin().same(&original));
+    assert_eq!(snapshot.info().me.as_ref().unwrap().id, "old-me");
+    assert_eq!(core.host().account_for_origin(&original).unwrap().info().detail.as_deref(), Some("old-detail"));
+    // Frozen Empty permits extension object fields. The exact real Pending ID
+    // still has to be resolved before the producer interval can be reused.
+    let (stop, response) = conn.request(PendingKind::AccountStop("owner".into()), "account.stop",
+        serde_json::json!({"account_id":"owner"}), Duration::from_secs(1), None, &conn).unwrap();
+    assert!(conn.origins.as_ref().unwrap().freeze("owner").is_some());
+    resolve(&conn, &registry, RequestId::Number(stop), Ok(serde_json::json!({"future":true})));
+    tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap().unwrap();
+    assert!(conn.origins.as_ref().unwrap().freeze("owner").is_none());
+    let created = core.accounts().get("owner").await.unwrap().unwrap().created_at;
+    core.accounts().remove("owner").await.unwrap();
+    core.open_db().unwrap().conn().execute_batch(&format!("CREATE TRIGGER equal_birth_owner AFTER INSERT ON account
+        WHEN NEW.account_id='owner' BEGIN UPDATE account SET created_at={created} WHERE account_id=NEW.account_id; END;")).unwrap();
+    core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+    core.open_db().unwrap().conn().execute_batch("DROP TRIGGER equal_birth_owner").unwrap();
+    assert!(original.is_revoked());
+    assert!(core.host().accounts_owned().is_empty());
+    assert!(core.host().accounts().is_empty());
+    assert!(core.host().plugin("fixture").unwrap().accounts.is_empty());
+    assert!(core.host().plugins().iter().all(|plugin| plugin.accounts.is_empty()));
+    assert!(core.host().account("fixture", "owner").is_none());
+    assert!(core.host().account_for_origin(&original).is_none());
+    let new_scope = core.host().capture_start("fixture", "owner").await.unwrap();
+    let new_origin = new_scope.origin().unwrap().clone();
+    assert!(!new_origin.same(&original));
+    assert!(registry.set_start("fixture", "owner", AccountSpec::default(), &new_scope));
+    let (start, response) = conn.request(PendingKind::AccountStart("owner".into(), new_scope), "account.start",
+        serde_json::json!({}), Duration::from_secs(1), None, &conn).unwrap();
+    resolve(&conn, &registry, RequestId::Number(start), Ok(serde_json::json!({})));
+    tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap().unwrap();
+    assert!(conn.origins.as_ref().unwrap().freeze("owner").unwrap().same(&new_origin));
+    assert!(delivery.origin.as_ref().unwrap().same(&original)); // Never relabel at dequeue.
+    core.ingest().deliver_owned("fixture", delivery.origin.unwrap(), delivery.event).await.unwrap();
+    let current = core.accounts().get("owner").await.unwrap().unwrap();
+    assert!(current.me_user_id.is_none()); assert!(current.state_detail.is_none());
+    let handles: i64 = core.open_db().unwrap().conn().query_row("SELECT COUNT(*) FROM platform_handle WHERE account_id='owner'", [], |row| row.get(0)).unwrap();
+    assert_eq!(handles, 0);
+    assert!(core.host().account_for_origin(&new_origin).unwrap().info().me.is_none());
+    assert!(snapshot.origin().is_revoked());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn unknown_account_native_stop_ends_the_same_connection_origin_interval() {
+    let (_temp, core) = fixture().await;
+    let registry = core.host().test_registry();
+    let scope = core.host().capture_start("fixture", "owner").await.unwrap();
+    assert!(registry.set_start("fixture", "owner", AccountSpec::default(), &scope));
+    let (conn, _frames) = owned_connection(&registry);
+    let (start, response) = conn.request(PendingKind::AccountStart("owner".into(), scope.clone()), "account.start",
+        serde_json::json!({}), Duration::from_secs(1), None, &conn).unwrap();
+    resolve(&conn, &registry, RequestId::Number(start), Ok(serde_json::json!({})));
+    tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap().unwrap();
+    let (stop, response) = conn.request(PendingKind::AccountStop("owner".into()), "account.stop",
+        serde_json::json!({"account_id":"owner"}), Duration::from_secs(1), None, &conn).unwrap();
+    resolve(&conn, &registry, RequestId::Number(stop), Err(ErrorObject::new(ErrorCode::UnknownAccount, "already stopped")));
+    assert!(tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap().is_err());
+    assert!(conn.origins.as_ref().unwrap().freeze("owner").is_none());
+    let next = scope.replay();
+    assert!(registry.set_start("fixture", "owner", AccountSpec::default(), &next));
+    let (start, response) = conn.request(PendingKind::AccountStart("owner".into(), next), "account.start",
+        serde_json::json!({}), Duration::from_secs(1), None, &conn).unwrap();
+    resolve(&conn, &registry, RequestId::Number(start), Ok(serde_json::json!({})));
+    tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap().unwrap();
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_origin_interval_is_not_retagged_by_unknown_or_wrong_stop_completion() {
+    let (_temp, core) = fixture().await;
+    let (_other_temp, other) = fixture().await;
+    let scope = core.host().capture_start("fixture", "owner").await.unwrap();
+    let old = scope.origin().unwrap().clone();
+    let foreign_scope = other.host().capture_start("fixture", "owner").await.unwrap();
+    let foreign = foreign_scope.origin().unwrap().clone();
+    let origins = super::super::origins::Origins::new();
+    origins.start("owner", &old).unwrap().commit();
+    assert!(origins.start("owner", &foreign).is_none());
+    let identity = Arc::new(()); let stopping = LifecycleRequest::new(&identity, 1);
+    origins.stop("owner", stopping).unwrap().commit();
+    origins.stop_confirmed("owner", &LifecycleRequest::new(&Arc::new(()), 1));
+    assert!(origins.freeze("owner").unwrap().same(&old));
+    assert!(origins.start("owner", &foreign).is_none());
+    origins.stop_confirmed("owner", &LifecycleRequest::new(&identity, 2));
+    assert!(origins.freeze("owner").unwrap().same(&old));
+    // No failed/unknown/native-local phase path ends this interval. Only resolve
+    // of the exact stop above can do that, exercised by the actual Pending test.
+    core.shutdown().await; other.shutdown().await;
+}
+
+#[tokio::test]
+async fn bound_status_without_this_connections_start_origin_cannot_adopt_another_peers_record() {
+    let (_temp, core) = fixture().await;
+    let registry = core.host().test_registry();
+    let scope = core.host().capture_start("fixture", "owner").await.unwrap();
+    assert!(registry.set_start("fixture", "owner", AccountSpec::default(), &scope));
+    let (started, _frames) = owned_connection(&registry);
+    let (id, response) = started.request(PendingKind::AccountStart("owner".into(), scope), "account.start",
+        serde_json::json!({}), Duration::from_secs(1), None, &started).unwrap();
+    resolve(&started, &registry, RequestId::Number(id), Ok(serde_json::json!({})));
+    tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap().unwrap();
+    let before = core.host().account("fixture", "owner").unwrap();
+    let (foreign, _foreign_frames) = owned_connection(&registry);
+    let mut changes = core.host().subscribe_owned();
+    let (send, mut deliveries) = mpsc::channel(1);
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    handle_incoming(&foreign, &registry, &secrets, &send, None, "status", Some(serde_json::json!({
+        "account_id":"owner","state":"connected","detail":"foreign-context","reconnecting":false,
+        "me":{"id":"foreign-me","display_name":"Synthetic"}
+    }))).await;
+    assert_eq!(core.host().account("fixture", "owner").unwrap(), before);
+    assert!(matches!(changes.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+    assert!(matches!(deliveries.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    core.shutdown().await;
 }

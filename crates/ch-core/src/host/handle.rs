@@ -32,6 +32,8 @@ const LIFECYCLE: &[&str] = &[
 struct Inner {
     #[cfg(target_os = "linux")]
     directories: Option<Arc<super::directories::AccountDirectories>>,
+    #[cfg(target_os = "linux")]
+    owned_sink: Option<Arc<dyn super::OwnedEventSink>>,
     config: Arc<HostConfig>,
     registry: Arc<Registry>,
     sink: Arc<dyn EventSink>,
@@ -70,6 +72,24 @@ impl FileAdmissionScope {
 }
 
 impl HostHandle {
+    fn visible(&self, record: &super::supervisor::AccountRecord) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.0.owned_sink.is_some() { return record.logical_origin().is_some_and(|origin| !origin.is_revoked()); }
+        let _ = record;
+        true
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn subscribe_owned(&self) -> broadcast::Receiver<super::OwnedStateChange> { self.0.registry.owned_changes.subscribe() }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn accounts_owned(&self) -> Vec<super::OwnedAccountSnapshot> {
+        self.0.registry.lock().values().flat_map(|entry| entry.accounts.values().filter_map(|record| record.owned_snapshot())).collect()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn account_for_origin(&self, origin: &crate::runtime::LogicalOwnerObservation) -> Option<super::OwnedAccountSnapshot> {
+        if origin.is_revoked() { return None; }
+        self.0.registry.lock().get(origin.plugin_id())?.accounts.get(origin.account_id())?
+            .owned_snapshot().filter(|snapshot| snapshot.origin().same(origin))
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn same_instance(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
 
@@ -134,6 +154,8 @@ impl HostHandle {
         let handle = HostHandle(Arc::new(Inner {
             #[cfg(target_os = "linux")]
             directories: None,
+            #[cfg(target_os = "linux")]
+            owned_sink: None,
             config: Arc::new(config),
             registry: Arc::new(Registry::new()),
             sink,
@@ -146,12 +168,13 @@ impl HostHandle {
     // Standalone public hosts stay unbound. Only the actual Core composition can
     // supply its own negative catalog hook and counted directory-work lane.
     #[cfg(target_os = "linux")]
-    pub(crate) fn for_core(config: HostConfig, sink: Arc<dyn EventSink>, secrets: Arc<dyn SecretStore>,
+    pub(crate) fn for_core(config: HostConfig, sink: Arc<crate::runtime::IngestSink>, secrets: Arc<dyn SecretStore>,
         mutations: crate::managed_stage::StageMutations, jobs: Arc<crate::managed_sources::OwnedJobs>,
         captures: Arc<crate::managed_sources::OwnedJobs>) -> Self {
-        let mut host = Self::new(config, sink, secrets);
-        Arc::get_mut(&mut host.0).expect("new Host is uniquely owned").directories =
-            Some(super::directories::AccountDirectories::new(mutations, jobs, captures));
+        let mut host = Self::new(config, sink.clone(), secrets);
+        let inner = Arc::get_mut(&mut host.0).expect("new Host is uniquely owned");
+        inner.directories = Some(super::directories::AccountDirectories::new(mutations, jobs, captures));
+        inner.owned_sink = Some(sink);
         host
     }
 
@@ -204,7 +227,7 @@ impl HostHandle {
                 }
             }
         }
-        let _ = self.0.registry.changes.send(StateChange::PluginsRescanned);
+        self.0.registry.publish_other(StateChange::PluginsRescanned);
     }
 
     /// Every discovered plugin with its state and accounts, sorted by id.
@@ -216,7 +239,7 @@ impl HostHandle {
             .map(|e| PluginSnapshot {
                 info: e.info.clone(),
                 state: e.state.clone(),
-                accounts: e.accounts.values().map(|r| r.info.clone()).collect(),
+                accounts: e.accounts.values().filter(|record| self.visible(record)).map(|r| r.info.clone()).collect(),
             })
             .collect()
     }
@@ -230,7 +253,7 @@ impl HostHandle {
             .map(|e| PluginSnapshot {
                 info: e.info.clone(),
                 state: e.state.clone(),
-                accounts: e.accounts.values().map(|r| r.info.clone()).collect(),
+                accounts: e.accounts.values().filter(|record| self.visible(record)).map(|r| r.info.clone()).collect(),
             })
     }
 
@@ -245,7 +268,7 @@ impl HostHandle {
             .registry
             .lock()
             .values()
-            .flat_map(|e| e.accounts.values().map(|r| r.info.clone()))
+            .flat_map(|e| e.accounts.values().filter(|record| self.visible(record)).map(|r| r.info.clone()))
             .collect()
     }
 
@@ -257,7 +280,7 @@ impl HostHandle {
             .get(plugin_id)?
             .accounts
             .get(account_id)
-            .map(|r| r.info.clone())
+            .filter(|record| self.visible(record)).map(|r| r.info.clone())
     }
 
     /// A revocable child token for this account's current successful start on
@@ -267,6 +290,7 @@ impl HostHandle {
         plugin_id: &str,
         account_id: &str,
     ) -> Option<CancellationToken> {
+        if self.account(plugin_id, account_id).is_none() { return None; }
         self.0.registry.running_account_token(plugin_id, account_id)
     }
 
@@ -606,6 +630,8 @@ impl HostHandle {
         let sup = Supervisor {
             #[cfg(target_os = "linux")]
             directories: self.0.directories.clone(),
+            #[cfg(target_os = "linux")]
+            owned_sink: self.0.owned_sink.clone(),
             plugin_id: plugin_id.to_owned(),
             info: e.info.clone(),
             config: Arc::clone(&self.0.config),

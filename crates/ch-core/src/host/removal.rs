@@ -30,7 +30,7 @@ impl Request {
     pub(super) fn new(connection: &Arc<()>, id: i64) -> Self {
         Self { connection: connection.clone(), id }
     }
-    fn same(&self, other: &Self) -> bool {
+    pub(super) fn same(&self, other: &Self) -> bool {
         self.id == other.id && Arc::ptr_eq(&self.connection, &other.connection)
     }
 }

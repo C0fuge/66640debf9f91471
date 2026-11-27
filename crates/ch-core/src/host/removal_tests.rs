@@ -96,10 +96,10 @@ async fn revoked_pending_start_refuses_then_exact_positive_ack_can_be_strictly_s
     assert!(f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Starting));
     fs::write(f._temp.path().join("release-start"), b"").unwrap();
     tokio::time::timeout(Duration::from_secs(5), caller).await.unwrap().unwrap().unwrap();
-    // The old scope still cannot adopt a Running event, but its actual positive
-    // lifecycle response is known, so one strict stop may settle that same peer.
+    // Storage rearm does not change the logical owner. The exact lifecycle ACK
+    // may now adopt its metadata without reviving the old filesystem lease.
     assert!(old.is_revoked());
-    assert!(f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Starting));
+    assert!(f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Running));
     tokio::time::timeout(Duration::from_secs(5), f.core.accounts().remove("owner")).await.unwrap().unwrap();
     assert_eq!(requests(&f, "account.stop"), 1);
     assert!(f.core.accounts().get("owner").await.unwrap().is_none());
@@ -151,9 +151,9 @@ async fn explicit_core_stop_recovers_accepted_revoked_start_without_discarding_u
     assert_eq!(requests(&f, "account.stop"), 0);
     fs::write(f._temp.path().join("release-start"), b"").unwrap();
     tokio::time::timeout(Duration::from_secs(5), starting).await.unwrap().unwrap().unwrap();
-    assert!(f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Starting));
-    // The exact peer's ACK is native Active evidence despite stale UI adoption.
-    // Explicit Core disable follows ordinary stop policy and sends one real RPC.
+    assert!(f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Running));
+    // Logical metadata can adopt this ACK independently of the old storage Gate.
+    // Explicit Core disable still sends one real RPC and grants no byte cleanup.
     tokio::time::timeout(Duration::from_secs(5), f.core.accounts().set_enabled("owner", false)).await.unwrap().unwrap();
     assert!(f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Stopped && !info.wanted));
     assert_eq!(requests(&f, "account.stop"), 1);

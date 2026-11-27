@@ -323,8 +323,10 @@ async fn equal_birth_recreated_owner_rejects_original_queued_scope_and_actual_re
         } else { None };
         let birth = old.owner.as_ref().unwrap().observed.owner().created_at;
         f.core.accounts().remove("owner").await.unwrap();
+        f.core.open_db().unwrap().conn().execute_batch(&format!("CREATE TRIGGER equal_birth_owner AFTER INSERT ON account
+            WHEN NEW.account_id='owner' BEGIN UPDATE account SET created_at={birth} WHERE account_id=NEW.account_id; END;")).unwrap();
         f.core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
-        f.core.open_db().unwrap().conn().execute("UPDATE account SET created_at=?1 WHERE account_id='owner'", [birth]).unwrap();
+        f.core.open_db().unwrap().conn().execute_batch("DROP TRIGGER equal_birth_owner").unwrap();
         assert!(!old.live());
         assert!(!f.core.host().config().state_dir("owner").parent().unwrap().exists());
         if let Some(saved) = saved {
@@ -332,8 +334,9 @@ async fn equal_birth_recreated_owner_rejects_original_queued_scope_and_actual_re
             // or a fresh by-ID observation. Restart must reject that old Gate.
             f.core.host().0.registry.lock().get_mut("fixture").unwrap().accounts.insert("owner".into(), saved);
             f.core.host().restart_plugin("fixture").await.unwrap();
-            until(|| f.core.host().account("fixture", "owner").is_some_and(|info|
-                info.phase == AccountPhase::Stopped && info.detail.as_deref() == Some("Account start was cancelled; start the account again"))).await;
+            until(|| f.core.host().0.registry.lock().get("fixture").unwrap().accounts.get("owner").is_some_and(|record|
+                record.info.phase == AccountPhase::Stopped && record.info.detail.as_deref() == Some("Account start was cancelled; start the account again"))).await;
+            assert!(f.core.host().account("fixture", "owner").is_none());
             assert_eq!(f.starts(), vec!["owner"]);
         } else {
             // Ordinary stop's legitimate placeholder is independent of strict

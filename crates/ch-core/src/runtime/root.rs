@@ -118,6 +118,8 @@ pub struct Core {
     sink: Arc<IngestSink>,
     managed_proofs: ManagedProofWriter,
     #[cfg(target_os = "linux")]
+    logical_owners: super::LogicalOwners,
+    #[cfg(target_os = "linux")]
     managed_sources: Arc<crate::managed_sources::ManagedSources>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -127,6 +129,15 @@ impl std::fmt::Debug for Core {
         f.debug_struct("Core")
             .field("db_path", &self.db_path)
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Core {
+    fn drop(&mut self) {
+        // Revocation only. Synchronous Drop cannot certify worker settlement;
+        // the App-owned shutdown still must await the actual drain above.
+        #[cfg(target_os = "linux")]
+        self.logical_owners.close();
     }
 }
 
@@ -163,6 +174,11 @@ impl Core {
         let bus = ChangeBus::new(config.bus_capacity);
         let mut opts = config.ingest;
         opts.path_filter = Some(account_path_filter(&host_config));
+        #[cfg(target_os = "linux")]
+        let logical_owners = super::LogicalOwners::new();
+        #[cfg(target_os = "linux")]
+        let sink = Arc::new(IngestSink::for_core(Ingest::new(ingest_db, opts), bus.clone(), logical_owners.clone()));
+        #[cfg(not(target_os = "linux"))]
         let sink = Arc::new(IngestSink::new(Ingest::new(ingest_db, opts), bus.clone()));
         let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(), proof_db);
         #[cfg(target_os = "linux")]
@@ -174,10 +190,13 @@ impl Core {
             managed_sources.stage_mutations(), managed_sources.directory_jobs(), managed_sources.lookups());
         #[cfg(not(target_os = "linux"))]
         let host = HostHandle::new(host_config, sink.clone(), Arc::clone(&config.secrets));
+        #[cfg(target_os = "linux")]
+        let host_rx = host.subscribe_owned();
+        #[cfg(not(target_os = "linux"))]
         let host_rx = host.subscribe();
         #[cfg(target_os = "linux")]
         let accounts = Accounts::for_core(accounts_db, host.clone(), config.secrets, bus.clone(),
-            managed_sources.stage_mutations(),managed_sources.owner_barriers(),managed_sources.owner_jobs());
+            managed_sources.stage_mutations(),managed_sources.owner_barriers(),managed_sources.owner_jobs(),logical_owners.clone());
         #[cfg(not(target_os = "linux"))]
         let accounts = Accounts::new(accounts_db, host.clone(), config.secrets, bus.clone());
         #[cfg(target_os = "linux")]
@@ -206,6 +225,8 @@ impl Core {
             sink,
             managed_proofs,
             #[cfg(target_os = "linux")]
+            logical_owners,
+            #[cfg(target_os = "linux")]
             managed_sources,
             tasks: Mutex::new(tasks),
         })
@@ -229,6 +250,13 @@ impl Core {
     /// Subscribe to every change from now on.
     pub fn subscribe(&self) -> broadcast::Receiver<CoreChange> {
         self.bus.subscribe()
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn stop_host_forwarding_for_test(&self) {
+        let task = self.tasks.lock().unwrap().first().map(JoinHandle::abort_handle);
+        if let Some(task) = task { task.abort(); }
+        tokio::task::yield_now().await;
     }
 
     /// The ingest sink: the main writer, for core-initiated effects.
@@ -284,6 +312,13 @@ impl Core {
         if let Err(e) = self.accounts.resync_from_host().await {
             warn!("persisting account state at shutdown: {e}");
         }
+        #[cfg(target_os = "linux")]
+        {
+            self.logical_owners.close();
+            if self.logical_owners.drain().await.is_err() {
+                warn!("draining native metadata workers failed");
+            }
+        }
         for t in &tasks {
             t.abort();
         }
@@ -308,17 +343,25 @@ impl Core {
 
 /// Persist host state changes, then republish them on the bus.
 async fn forward_host(
-    mut rx: broadcast::Receiver<crate::host::StateChange>,
+    #[cfg(target_os = "linux")] mut rx: broadcast::Receiver<crate::host::OwnedStateChange>,
+    #[cfg(not(target_os = "linux"))] mut rx: broadcast::Receiver<crate::host::StateChange>,
     accounts: Accounts,
     bus: ChangeBus,
 ) {
     loop {
         match rx.recv().await {
             Ok(change) => {
-                if let Err(e) = accounts.on_host_change(&change).await {
-                    warn!("persisting host state: {e}");
+                #[cfg(target_os = "linux")]
+                match accounts.on_owned_host_change(&change).await {
+                    Ok(Some(change)) => bus.publish(CoreChange::Host(change)),
+                    Ok(None) => {},
+                    Err(error) => warn!("persisting native host state: {error}"),
                 }
-                bus.publish(CoreChange::Host(change));
+                #[cfg(not(target_os = "linux"))]
+                {
+                    if let Err(e) = accounts.on_host_change(&change).await { warn!("persisting host state: {e}"); }
+                    bus.publish(CoreChange::Host(change));
+                }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 warn!("host state subscription lagged by {n}; resyncing");

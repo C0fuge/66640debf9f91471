@@ -39,6 +39,10 @@ use super::state::{AccountInfo, AccountPhase, AccountSpec, PluginInfo, PluginSta
 use super::transport::{Frame, FrameError, FrameReader, encode};
 use super::start_scope::StartScope;
 use super::removal::{Decision, Evidence, RemovalStop, Request as LifecycleRequest};
+#[cfg(target_os = "linux")]
+use super::{OwnedAccountSnapshot, OwnedStateChange, OwnedEventSink};
+#[cfg(target_os = "linux")]
+use crate::runtime::LogicalOwnerObservation;
 
 // ---------------------------------------------------------------------------------------
 // Host-wide registry (shared by the handle, the supervisors and their readers)
@@ -56,6 +60,13 @@ pub(crate) struct AccountRecord {
 }
 
 impl AccountRecord {
+    #[cfg(target_os = "linux")]
+    pub(super) fn logical_origin(&self) -> Option<&LogicalOwnerObservation> { self.start.as_ref()?.origin() }
+    #[cfg(target_os = "linux")]
+    pub(super) fn owned_snapshot(&self) -> Option<OwnedAccountSnapshot> {
+        let origin = self.logical_origin()?;
+        (!origin.is_revoked()).then(|| OwnedAccountSnapshot::new(self.info.clone(), origin.clone()))
+    }
     #[cfg(test)]
     pub(super) fn same_stopped_record(&self, other: &Self) -> bool {
         self.info == other.info && self.info.phase == AccountPhase::Stopped
@@ -87,6 +98,8 @@ pub(crate) struct PluginEntry {
 pub(crate) struct Registry {
     pub plugins: Mutex<BTreeMap<String, PluginEntry>>,
     pub changes: broadcast::Sender<StateChange>,
+    #[cfg(target_os = "linux")]
+    pub(super) owned_changes: broadcast::Sender<OwnedStateChange>,
 }
 
 impl Registry {
@@ -94,6 +107,8 @@ impl Registry {
         Self {
             plugins: Mutex::new(BTreeMap::new()),
             changes: broadcast::channel(1024).0,
+            #[cfg(target_os = "linux")]
+            owned_changes: broadcast::channel(1024).0,
         }
     }
 
@@ -101,6 +116,22 @@ impl Registry {
         self.plugins
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn publish_other(&self, change: StateChange) {
+        #[cfg(target_os = "linux")]
+        if !matches!(change, StateChange::Account(_)) {
+            let _ = self.owned_changes.send(OwnedStateChange::Other(Box::new(change.clone())));
+        }
+        let _ = self.changes.send(change);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn publish_account(&self, info: AccountInfo, origin: Option<LogicalOwnerObservation>) {
+        if let Some(origin) = origin.filter(|origin| !origin.is_revoked()) {
+            let _ = self.owned_changes.send(OwnedStateChange::Account(OwnedAccountSnapshot::new(info.clone(), origin)));
+        }
+        let _ = self.changes.send(StateChange::Account(info));
     }
 
     pub fn set_plugin_state(&self, plugin_id: &str, state: PluginState) {
@@ -119,7 +150,7 @@ impl Registry {
             }
             e.state = state.clone();
         }
-        let _ = self.changes.send(StateChange::Plugin {
+        self.publish_other(StateChange::Plugin {
             plugin_id: plugin_id.to_owned(),
             state,
         });
@@ -163,6 +194,8 @@ impl Registry {
         account_id: &str,
         f: impl FnOnce(&mut AccountRecord),
     ) -> Option<AccountInfo> {
+        #[cfg(target_os = "linux")]
+        let origin;
         let info = {
             let mut g = self.lock();
             let e = g.get_mut(plugin_id)?;
@@ -177,6 +210,8 @@ impl Registry {
                     removal: Evidence::default(),
                 });
             let before = rec.info.clone();
+            #[cfg(target_os = "linux")]
+            { origin = rec.logical_origin().cloned(); }
             f(rec);
             if !rec.info.wanted || rec.info.phase != AccountPhase::Running {
                 rec.revoke_run();
@@ -190,8 +225,38 @@ impl Registry {
             }
             rec.info.clone()
         };
+        #[cfg(target_os = "linux")]
+        self.publish_account(info.clone(), origin);
+        #[cfg(not(target_os = "linux"))]
         let _ = self.changes.send(StateChange::Account(info.clone()));
         Some(info)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn update_from_origin(&self, plugin: &str, account: &str, origin: &LogicalOwnerObservation,
+        change: impl FnOnce(&mut AccountRecord)) -> Option<AccountInfo> {
+        let info = {
+            let mut state = self.lock(); let entry = state.get_mut(plugin)?;
+            let running = entry.state.is_running(); let record = entry.accounts.get_mut(account)?;
+            if origin.is_revoked() || origin.plugin_id() != plugin || origin.account_id() != account
+                || !record.logical_origin().is_some_and(|current| current.same(origin)) { return None; }
+            change(record);
+            if !record.info.wanted || record.info.phase != AccountPhase::Running { record.revoke_run(); }
+            else if running && record.run.is_none() { record.run = Some(CancellationToken::new()); }
+            record.info.clone()
+        };
+        self.publish_account(info.clone(), Some(origin.clone()));
+        Some(info)
+    }
+
+    fn update_pending(&self, conn: &Conn, account: &str, pending: &PendingOwner,
+        change: impl FnOnce(&mut AccountRecord)) -> Option<AccountInfo> {
+        #[cfg(target_os = "linux")]
+        if conn.origins.is_some() {
+            return self.update_from_origin(&conn.plugin_id, account, pending.origin.as_ref()?, change);
+        }
+        let _ = pending;
+        self.update_account(&conn.plugin_id, account, change)
     }
 
     pub fn account_phase(&self, plugin_id: &str, account_id: &str) -> Option<AccountPhase> {
@@ -254,15 +319,26 @@ impl Registry {
             let mut state = self.lock(); let entry = state.get_mut(plugin)?;
             let running = entry.state.is_running(); let record = entry.accounts.get_mut(account)?;
             if !record.start.as_ref().is_some_and(|current| current.same(scope)) { return None; }
-            let live = scope.live();
-            if require_live && !live { return None; }
+            let live = scope.metadata_live();
+            if require_live && !scope.live() { return None; }
             change(record);
             if !record.info.wanted || record.info.phase != AccountPhase::Running { record.revoke_run(); }
             else if running && record.run.is_none() { record.run = Some(CancellationToken::new()); }
             (record.info.clone(), live)
         };
-        if publish && scope.live() { let _ = self.changes.send(StateChange::Account(info.clone())); }
+        if publish && scope.metadata_live() {
+            #[cfg(target_os = "linux")]
+            self.publish_account(info.clone(), scope.origin().cloned());
+            #[cfg(not(target_os = "linux"))]
+            let _ = self.changes.send(StateChange::Account(info.clone()));
+        }
         Some(info)
+    }
+
+    fn update_start_metadata(&self, plugin: &str, account: &str, scope: &StartScope,
+        change: impl FnOnce(&mut AccountRecord)) -> Option<AccountInfo> {
+        if !scope.metadata_live() { return None; }
+        self.update_start(plugin, account, scope, false, change)
     }
 
     fn current_start(&self, plugin: &str, account: &str, scope: &StartScope) -> bool {
@@ -373,7 +449,13 @@ enum PendingKind {
     Call,
 }
 
+#[derive(Default)]
+struct PendingOwner {
+    #[cfg(target_os = "linux")]
+    origin: Option<Arc<LogicalOwnerObservation>>,
+}
 struct Pending {
+    owner: PendingOwner,
     kind: PendingKind,
     method: &'static str,
     deadline: Instant,
@@ -393,6 +475,8 @@ enum Out {
 static NEXT_REQUEST_ID: AtomicI64 = AtomicI64::new(1);
 
 struct Conn {
+    #[cfg(target_os = "linux")]
+    origins: Option<super::origins::Origins>,
     plugin_id: String,
     identity: Arc<()>,
     registry: std::sync::Weak<Registry>,
@@ -480,6 +564,15 @@ impl Conn {
             PendingKind::AccountStop(account) | PendingKind::RemovalStop(account) => Some((account.clone(), false)),
             _ => None,
         };
+        #[cfg(target_os = "linux")]
+        let origin_reservation = if let Some(origins) = &self.origins {
+            match &kind {
+                PendingKind::AccountStart(account, scope) => Some(origins.start(account, scope.origin()?)?),
+                PendingKind::AccountStop(account) | PendingKind::RemovalStop(account) =>
+                    Some(origins.stop(account, LifecycleRequest::new(&self.identity, id))?),
+                _ => None,
+            }
+        } else { None };
         let registry = if let Some((account, start)) = &lifecycle {
             let registry = self.registry.upgrade()?;
             if !registry.begin_lifecycle(&self.plugin_id, account, LifecycleRequest::new(&self.identity, id), *start) { return None; }
@@ -488,6 +581,8 @@ impl Conn {
         self.pending().insert(
             id,
             Pending {
+                owner: PendingOwner { #[cfg(target_os = "linux")]
+                    origin: origin_reservation.as_ref().map(|reservation| Arc::new(reservation.origin().clone())) },
                 kind,
                 method,
                 deadline: Instant::now() + timeout,
@@ -503,6 +598,8 @@ impl Conn {
             }
             return None;
         }
+        #[cfg(target_os = "linux")]
+        if let Some(reservation) = origin_reservation { reservation.commit(); }
         if let Some(token) = cancel {
             let conn = Arc::clone(conn);
             tokio::spawn(async move {
@@ -527,14 +624,14 @@ impl Conn {
             fail_lifecycle(self, registry, id, &p.kind);
             match &p.kind {
                 PendingKind::AccountStart(acc, scope) => {
-                    registry.update_start(&self.plugin_id, acc, scope, false, |r| {
+                    registry.update_start_metadata(&self.plugin_id, acc, scope, |r| {
                         r.info.phase = AccountPhase::Stopped;
                         r.info.state = AccountState::Disconnected;
                         r.info.detail = Some(reason.to_owned());
                     });
                 }
                 PendingKind::AccountStop(acc) | PendingKind::RemovalStop(acc) => {
-                    registry.update_account(&self.plugin_id, acc, |r| {
+                    registry.update_pending(self, acc, &p.owner, |r| {
                         r.info.phase = AccountPhase::Stopped;
                         r.info.state = AccountState::Disconnected;
                         r.info.wanted = false;
@@ -551,9 +648,17 @@ impl Conn {
 
 /// One queued event on its way to the sink.
 struct Delivery {
+    #[cfg(target_os = "linux")]
+    origin: Option<LogicalOwnerObservation>,
     event: Event,
     /// Answer this id after delivery (the event was sent as a request).
     ack: Option<(RequestId, Arc<Conn>)>,
+}
+
+struct DeliveryTarget {
+    raw: Arc<dyn EventSink>,
+    #[cfg(target_os = "linux")]
+    owned: Option<Arc<dyn OwnedEventSink>>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -563,6 +668,8 @@ struct Delivery {
 pub(crate) struct Supervisor {
     #[cfg(target_os = "linux")]
     pub(super) directories: Option<Arc<super::directories::AccountDirectories>>,
+    #[cfg(target_os = "linux")]
+    pub(super) owned_sink: Option<Arc<dyn OwnedEventSink>>,
     pub plugin_id: String,
     pub info: PluginInfo,
     pub config: Arc<HostConfig>,
@@ -602,7 +709,7 @@ impl Supervisor {
         let (deliver_tx, deliver_rx) = mpsc::channel::<Delivery>(self.config.event_queue);
         let delivery = tokio::spawn(delivery_loop(
             self.plugin_id.clone(),
-            Arc::clone(&self.sink),
+            DeliveryTarget { raw: Arc::clone(&self.sink), #[cfg(target_os = "linux")] owned: self.owned_sink.clone() },
             deliver_rx,
         ));
         let shutdown_reply: Option<oneshot::Sender<()>> = loop {
@@ -828,6 +935,8 @@ impl Supervisor {
             self.config.stderr_lines_per_sec,
         ));
         let conn = Arc::new(Conn {
+            #[cfg(target_os = "linux")]
+            origins: self.owned_sink.as_ref().map(|_| super::origins::Origins::new()),
             plugin_id: self.plugin_id.clone(),
             identity: Arc::new(()),
             registry: Arc::downgrade(&self.registry),
@@ -1048,6 +1157,7 @@ impl Supervisor {
                             Err(e) => { let _ = reply.send(Err(HostError::Json(e))); }
                             Ok(frame) => {
                                 conn.pending().insert(id, Pending {
+                                    owner: PendingOwner::default(),
                                     kind: PendingKind::Call, method: name,
                                     deadline: Instant::now() + timeout, timeout,
                                     reply: tx, _done: Some(done_tx),
@@ -1128,7 +1238,7 @@ impl Supervisor {
                 PendingKind::AccountStart(acc, scope) => {
                     warn!(plugin = %self.plugin_id, account = %acc, "account.start timed out");
                     conn.send_cancel(id);
-                    self.registry.update_start(&self.plugin_id, &acc, &scope, false, |r| {
+                    self.registry.update_start_metadata(&self.plugin_id, &acc, &scope, |r| {
                         r.info.phase = AccountPhase::Stopped;
                         r.info.wanted = false;
                         r.info.state = AccountState::Error;
@@ -1139,7 +1249,7 @@ impl Supervisor {
                 PendingKind::AccountStop(acc) | PendingKind::RemovalStop(acc) => {
                     warn!(plugin = %self.plugin_id, account = %acc, "account.stop timed out; marking stopped");
                     conn.send_cancel(id);
-                    self.registry.update_account(&self.plugin_id, &acc, |r| {
+                    self.registry.update_pending(conn, &acc, &p.owner, |r| {
                         r.info.phase = AccountPhase::Stopped;
                         r.info.wanted = false;
                         r.info.state = AccountState::Disconnected;
@@ -1214,7 +1324,7 @@ impl Supervisor {
             Err(e) => {
                 error!(plugin = %self.plugin_id, account = %account_id, "secret store: {e}");
                 self.registry
-                    .update_start(&self.plugin_id, account_id, &scope, true, |r| {
+                    .update_start_metadata(&self.plugin_id, account_id, &scope, |r| {
                         r.info.wanted = false;
                         r.info.phase = AccountPhase::Stopped;
                         r.info.state = AccountState::Error;
@@ -1766,6 +1876,12 @@ fn resolve(
                 || result.as_ref().is_err_and(|error| error.code() == ErrorCode::UnknownAccount)),
         _ => {}
     }
+    #[cfg(target_os = "linux")]
+    if let (Some(origins), PendingKind::AccountStop(account) | PendingKind::RemovalStop(account)) = (&conn.origins, &p.kind)
+        && (result.as_ref().is_ok_and(Value::is_object)
+            || result.as_ref().is_err_and(|error| error.code() == ErrorCode::UnknownAccount)) {
+        origins.stop_confirmed(account, &LifecycleRequest::new(&conn.identity, n));
+    }
     match &p.kind {
         PendingKind::Ping => {
             conn.ping_misses.store(0, Ordering::Release);
@@ -1773,7 +1889,7 @@ fn resolve(
         PendingKind::AccountStart(acc, scope) => {
             let ok = result.is_ok();
             debug!(plugin = %conn.plugin_id, account = %acc, ok, "account.start answered");
-            registry.update_start(&conn.plugin_id, acc, scope, true, |r| {
+            registry.update_start_metadata(&conn.plugin_id, acc, scope, |r| {
                 if ok {
                     r.info.phase = AccountPhase::Running;
                 } else {
@@ -1785,7 +1901,7 @@ fn resolve(
             });
         }
         PendingKind::AccountStop(acc) | PendingKind::RemovalStop(acc) => {
-            registry.update_account(&conn.plugin_id, acc, |r| {
+            registry.update_pending(conn, acc, &p.owner, |r| {
                 r.info.phase = AccountPhase::Stopped;
                 r.info.wanted = false;
                 r.info.state = AccountState::Disconnected;
@@ -1940,17 +2056,33 @@ async fn handle_incoming(
                     // §4.6: each transfer.progress for a request resets its timeout.
                     p.deadline = Instant::now() + p.timeout;
                 }
+                #[cfg(target_os = "linux")]
+                let origin = if let Some(origins) = &conn.origins {
+                    let Some(origin) = origins.freeze(account_id) else {
+                        conn.respond(id, Err(ErrorObject::new(ErrorCode::UnknownAccount, "account event has no current owner context")));
+                        return;
+                    };
+                    Some(origin)
+                } else { None };
                 if let Event::Status(s) = &event {
-                    registry.update_account(pid, account_id, |r| {
+                    let change = |r: &mut AccountRecord| {
                         r.info.state = s.state.clone();
                         r.info.detail = s.detail.clone();
                         r.info.reconnecting = s.reconnecting;
                         if s.me.is_some() {
                             r.info.me = s.me.clone();
                         }
-                    });
+                    };
+                    #[cfg(target_os = "linux")]
+                    if conn.origins.is_some() {
+                        if let Some(origin) = &origin { registry.update_from_origin(pid, account_id, origin, change); }
+                    } else { registry.update_account(pid, account_id, change); }
+                    #[cfg(not(target_os = "linux"))]
+                    registry.update_account(pid, account_id, change);
                 }
                 let item = Delivery {
+                    #[cfg(target_os = "linux")]
+                    origin,
                     event,
                     ack: id.map(|id| (id, Arc::clone(conn))),
                 };
@@ -1977,12 +2109,20 @@ async fn handle_incoming(
 
 async fn delivery_loop(
     plugin_id: String,
-    sink: Arc<dyn EventSink>,
+    target: DeliveryTarget,
     mut rx: mpsc::Receiver<Delivery>,
 ) {
     while let Some(item) = rx.recv().await {
         let name = item.event.name();
-        let r = sink.deliver(&plugin_id, item.event).await;
+        #[cfg(target_os = "linux")]
+        let r = if let Some(sink) = &target.owned {
+            match item.origin {
+                Some(origin) => sink.deliver_owned(&plugin_id, origin, item.event).await,
+                None => Err("account event has no original owner context".into()),
+            }
+        } else { target.raw.deliver(&plugin_id, item.event).await };
+        #[cfg(not(target_os = "linux"))]
+        let r = target.raw.deliver(&plugin_id, item.event).await;
         if let Err(e) = &r {
             warn!(plugin = %plugin_id, event = name, "sink rejected event: {e}");
         }

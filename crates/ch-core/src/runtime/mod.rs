@@ -25,6 +25,7 @@
 //! [`Applied`]: crate::ingest::Applied
 
 mod accounts;
+pub(crate) use accounts::{LogicalOwnerObservation, LogicalOwners};
 #[cfg(target_os = "linux")]
 pub(crate) use accounts::HostStorageView;
 mod bus;

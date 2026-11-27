@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub(super) struct StartOwner {
     pub(super) issuer: crate::runtime::HostStorageView,
     pub(super) observed: crate::runtime::AccountStorageObservation,
+    pub(super) logical_origin: crate::runtime::LogicalOwnerObservation,
     pub(super) stopped: tokio_util::sync::CancellationToken,
 }
 
@@ -17,6 +18,15 @@ pub(super) struct StartScope {
     pub(super) owner: Option<Arc<StartOwner>>,
 }
 impl StartScope {
+    #[cfg(target_os = "linux")]
+    pub(super) fn origin(&self) -> Option<&crate::runtime::LogicalOwnerObservation> {
+        self.owner.as_ref().map(|owner| &owner.logical_origin)
+    }
+    pub(super) fn metadata_live(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(origin) = self.origin() { return !origin.is_revoked(); }
+        true
+    }
     pub(super) fn unbound() -> Self {
         Self { nonce: Arc::new(()), #[cfg(target_os = "linux")] owner: None }
     }
@@ -29,7 +39,7 @@ impl StartScope {
     pub(super) fn same_owner(&self, other: &Self) -> bool {
         #[cfg(target_os = "linux")]
         { match (&self.owner, &other.owner) {
-            (Some(a), Some(b)) => a.observed == b.observed,
+            (Some(a), Some(b)) => a.logical_origin.same(&b.logical_origin),
             (None, None) => true,
             _ => false,
         } }

@@ -24,6 +24,14 @@ mod start_scope;
 mod directories;
 pub mod settings;
 mod sink;
+#[cfg(target_os = "linux")]
+mod owned;
+#[cfg(target_os = "linux")]
+mod origins;
+#[cfg(target_os = "linux")]
+pub(crate) use owned::{OwnedAccountSnapshot, OwnedStateChange};
+#[cfg(target_os = "linux")]
+pub(crate) use sink::OwnedEventSink;
 mod state;
 mod supervisor;
 pub mod transport;

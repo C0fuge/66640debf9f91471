@@ -12,7 +12,9 @@ use super::error::Result;
 use crate::host::{EventSink, HostConfig};
 use crate::ingest::{Ingest, IngestError, IngestOptions, PathFilter};
 
-/// Applies every plugin event through one [`Ingest`] and publishes the result on the bus.
+/// Applies plugin events through one [`Ingest`] and publishes the result on the bus.
+/// The Linux Core Host uses a private original-owner envelope; raw native Status
+/// input is refused on that bound sink. Unbound test/native sinks retain `deliver`.
 ///
 /// `Db` is `!Sync`, so the `Ingest` lives behind a mutex and each `apply` runs on a blocking
 /// task. The host delivers a plugin's events one at a time and awaits each, so per-plugin order
@@ -25,6 +27,7 @@ use crate::ingest::{Ingest, IngestError, IngestOptions, PathFilter};
 pub struct IngestSink {
     ingest: Arc<Mutex<Ingest>>,
     bus: ChangeBus,
+    owners: Option<super::LogicalOwners>,
 }
 
 impl std::fmt::Debug for IngestSink {
@@ -39,7 +42,13 @@ impl IngestSink {
         Self {
             ingest: Arc::new(Mutex::new(ingest)),
             bus,
+            owners: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn for_core(ingest: Ingest, bus: ChangeBus, owners: super::LogicalOwners) -> Self {
+        Self { ingest: Arc::new(Mutex::new(ingest)), bus, owners: Some(owners) }
     }
 
     pub(crate) fn shared_ingest(&self) -> Arc<Mutex<Ingest>> {
@@ -78,15 +87,27 @@ impl IngestSink {
 #[async_trait]
 impl EventSink for IngestSink {
     async fn deliver(&self, plugin_id: &str, event: Event) -> std::result::Result<(), String> {
+        if self.owners.is_some() && matches!(&event, Event::Status(_)) {
+            return Err("native status provenance required".into());
+        }
         let pid = plugin_id.to_owned();
         let name = event.name();
         let r = self
             .with_ingest(move |i| i.apply(&pid, event))
             .await
             .map_err(|e| e.to_string())?;
+        self.publish_result(plugin_id, name, r, None)
+
+    }
+}
+
+
+impl IngestSink {
+    fn publish_result(&self, plugin_id: &str, name: &'static str,
+        r: crate::ingest::Result<crate::ingest::Applied>, origin: Option<&super::LogicalOwnerObservation>) -> std::result::Result<(), String> {
         match r {
             Ok(applied) => {
-                if !applied.is_noop() {
+                if !applied.is_noop() && origin.is_none_or(|owner| !owner.is_revoked()) {
                     self.bus.publish(CoreChange::Ingested {
                         plugin_id: plugin_id.to_owned(),
                         applied: Arc::new(applied),
@@ -107,6 +128,32 @@ impl EventSink for IngestSink {
                 Err(e.to_string())
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[async_trait]
+impl crate::host::OwnedEventSink for IngestSink {
+    async fn deliver_owned(&self, plugin_id: &str, origin: super::LogicalOwnerObservation,
+        event: Event) -> std::result::Result<(), String> {
+        let owners = self.owners.clone().ok_or("native owner issuer unavailable")?;
+        let pid = plugin_id.to_owned();
+        let name = event.name();
+        let checked = origin.clone();
+        let domain = owners.clone(); let ingest = self.ingest.clone();
+        #[cfg(test)]
+        let checkpoint = owners.take_checkpoint("event");
+        let r = match owners.run_metadata(&origin, move || {
+            #[cfg(test)]
+            let _completion = checkpoint.map(|checkpoint| checkpoint.enter());
+            let ingest = ingest.lock().unwrap_or_else(PoisonError::into_inner);
+            ingest.apply_owned(&pid, event, &domain, &checked)
+        }).await {
+            Ok(result) => result,
+            Err(crate::managed_sources::Error::Closed) => return Ok(()),
+            Err(_) => return Err("native metadata worker failed".into()),
+        };
+        self.publish_result(plugin_id, name, r, Some(&origin))
     }
 }
 

@@ -30,9 +30,9 @@ impl AccountDirectories {
         let plugin = plugin.to_owned(); let account = account.to_owned();
         let capture = issuer.clone();
         let stopped = self.jobs.stopped();
-        let observed = self.captures.run_wait_until(&stopped, move || capture.capture(&plugin, &account))
+        let (observed, logical_origin) = self.captures.run_wait_until(&stopped, move || capture.capture(&plugin, &account))
             .await.map_err(|_| HostError::ShuttingDown)?.map_err(|_| HostError::ShuttingDown)?;
-        let scope = StartScope::bound(StartOwner { issuer, observed, stopped: self.jobs.stopped() });
+        let scope = StartScope::bound(StartOwner { issuer, observed, logical_origin, stopped: self.jobs.stopped() });
         if !scope.live() { return Err(HostError::ShuttingDown); }
         Ok(scope)
     }
