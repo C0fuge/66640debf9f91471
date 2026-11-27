@@ -54,6 +54,18 @@ pub(crate) struct AccountRecord {
 }
 
 impl AccountRecord {
+    #[cfg(test)]
+    pub(super) fn same_stopped_record(&self, other: &Self) -> bool {
+        self.info == other.info && self.info.phase == AccountPhase::Stopped
+            && self.run.is_none() && other.run.is_none()
+            && self.spec.settings == other.spec.settings && self.spec.ghost == other.spec.ghost
+            && serde_json::to_value(&self.spec.auto_download).unwrap() == serde_json::to_value(&other.spec.auto_download).unwrap()
+            && match (&self.start, &other.start) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.same(b),
+                _ => false,
+            }
+    }
     fn revoke_run(&mut self) {
         if let Some(run) = self.run.take() {
             run.cancel();

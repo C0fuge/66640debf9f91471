@@ -331,11 +331,34 @@ async fn equal_birth_recreated_owner_rejects_original_queued_scope_and_actual_re
             assert_eq!(f.starts(), vec!["owner"]);
         } else {
             let command = f.core.host().ensure_supervisor("fixture").unwrap();
-            let (send, recv) = oneshot::channel();
-            command.send(Command::StartAccount { account_id: "owner".into(), spec: AccountSpec::default(), scope: old, reply: send }).await.unwrap();
-            assert!(matches!(tokio::time::timeout(Duration::from_secs(5), recv).await.unwrap().unwrap(), Err(HostError::ShuttingDown)));
-            assert!(f.starts().is_empty());
-            assert!(f.core.host().account("fixture", "owner").is_none());
+            // Core.remove's ordinary no-supervisor stop legitimately created a
+            // Stopped placeholder. The stale start must preserve every field,
+            // not mistake its pre-existing presence for stale resurrection.
+            for missing in [false, true] {
+                if missing { f.core.host().0.registry.lock().get_mut("fixture").unwrap().accounts.remove("owner"); }
+                let before = f.core.host().0.registry.lock().get("fixture").unwrap().accounts.get("owner").cloned();
+                assert_eq!(before.is_none(), missing);
+                let mut changes = f.core.host().0.registry.changes.subscribe();
+                let (send, recv) = oneshot::channel();
+                command.send(Command::StartAccount { account_id: "owner".into(), spec: AccountSpec::default(), scope: old.clone(), reply: send }).await.unwrap();
+                assert!(matches!(tokio::time::timeout(Duration::from_secs(5), recv).await.unwrap().unwrap(), Err(HostError::ShuttingDown)));
+                let after = f.core.host().0.registry.lock().get("fixture").unwrap().accounts.get("owner").cloned();
+                match (before, after) {
+                    (Some(before), Some(after)) => assert!(before.same_stopped_record(&after)),
+                    (None, None) => {},
+                    _ => panic!("stale start changed registry membership"),
+                }
+                loop {
+                    match changes.try_recv() {
+                        Ok(StateChange::Account(_)) => panic!("stale start broadcast account metadata"),
+                        Ok(_) => {}, // Initial handshake/plugin-state changes are independent.
+                        Err(broadcast::error::TryRecvError::Empty) => break,
+                        Err(error) => panic!("registry observer: {error}"),
+                    }
+                }
+                assert!(f.starts().is_empty());
+                assert!(!f.core.host().config().state_dir("owner").parent().unwrap().exists());
+            }
         }
         assert!(!f.core.host().config().state_dir("owner").parent().unwrap().exists());
         f.core.accounts().start("owner").await.unwrap();
