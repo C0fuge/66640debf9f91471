@@ -162,7 +162,12 @@ async fn core_hook_keeps_v1_copy_quota_and_recovered_discard_and_vetoes_closed_w
     let another = "22223344556677889900aabbccddeeff";
     assert!(matches!(f.store.stage(&f.owner, another, f.scope(), 2, f.open(), MAX_BYTES, |_| Ok(())), Err(Error::Cancelled)));
     assert!(!f.owner.uploads.join(another).exists());
-    assert_eq!(f.store.inventory().total.slots, 1);
+    // Closed reader admission makes this scan incomplete, not an empty quota.
+    assert!(!f.store.inventory().complete);
+    let retained = f.reload().inventory(); // Independent test-only disk inspection.
+    assert!(retained.complete);
+    assert_eq!(retained.total.slots, 1);
+    assert_eq!(retained.total.bytes, f.open().len());
 }
 
 #[tokio::test]
@@ -225,9 +230,14 @@ async fn local_claim_and_consumed_publishers_keep_the_cores_permanent_writer_vet
             core.shutdown().await;
             assert!(matches!(claim.consume_for_test(), Err(Error::Cancelled)));
         }
-        let recovered = f.store.recover(&f.owner, ID).unwrap();
+        assert!(matches!(f.store.recover(&f.owner, ID), Err(Error::Cancelled)));
+        assert!(!f.store.inventory().complete);
+        // Inspect retained test data independently; this cannot reopen the
+        // closed Core's reader admission or authorize a phase mutation.
+        let inspection = f.reload();
+        let recovered = inspection.recover(&f.owner, ID).unwrap();
         assert!(recovered.manifest().phase == if consuming { Phase::Claimed(intent()) } else { Phase::Ready });
-        let inventory = f.store.inventory();
+        let inventory = inspection.inventory();
         assert!(inventory.complete);
         assert_eq!(inventory.total.slots, 1);
         assert_eq!(inventory.total.bytes, f.open().len());
