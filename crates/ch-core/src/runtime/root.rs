@@ -190,7 +190,7 @@ impl Core {
         #[cfg(target_os="linux")]
         {opts.path_filter=Some(super::sink::account_path_filter_counted(&host_config,catalog.clone()));}
         #[cfg(not(target_os="linux"))]
-        opts.path_filter = Some(account_path_filter(&host_config));
+        {opts.path_filter = Some(account_path_filter(&host_config));}
         #[cfg(target_os = "linux")]
         let logical_owners = super::LogicalOwners::new();
         #[cfg(target_os = "linux")]

@@ -230,7 +230,11 @@ impl PrivateByteCatalog {
         let mut complete = scanned.complete;
         for inode in scanned.inodes {
             if state.inodes.contains(&inode) { continue; }
-            if state.inodes.len() == MAX_INODES { complete = false; continue; }
+            if state.inodes.len() == MAX_INODES {
+                // This negative cannot be retained. A later smaller scan must
+                // never erase uncertainty about its possible outside aliases.
+                state.poisoned=true;complete=false;continue;
+            }
             state.inodes.insert(inode);
         }
         // A supported copy may expose a temporary empty stage while this scan
@@ -262,7 +266,10 @@ impl PrivateByteCatalog {
                 }
             } else if state.stages.len() < MAX_STAGES {
                 state.stages.insert(key, candidate);
-            } else { complete = false; }
+            } else {
+                // Lost owner/stage history is not repaired by later absence.
+                state.poisoned=true;complete=false;
+            }
         }
         // Absence NEVER deletes old inode negatives or unproved legacy candidates.
         state.complete = complete;

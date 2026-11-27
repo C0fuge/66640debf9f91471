@@ -304,3 +304,57 @@ async fn dropped_caller_does_not_settle_the_actual_owned_mutation() {
     assert!(!f.catalog.view().complete(), "token drop cannot publish complete");
     f.catalog.refresh().unwrap();
 }
+
+#[test]
+fn actual_inode_history_overflow_cannot_be_repaired_by_a_later_smaller_scan() {
+    let f=Fixture::new();
+    let bytes=f.stage("owner",FIRST,CLIENT1,Phase::Ready);
+    let extra=bytes.with_file_name("unknown.bin");
+    let retained=f._temp.path().join("retained");fs::create_dir(&retained).unwrap();
+    let ordinary=f._temp.path().join("ordinary");fs::write(&ordinary,b"outside").unwrap();
+    f.catalog.refresh().unwrap();
+    // Keep every observed inode alive outside the namespace, preventing inode
+    // reuse. Each actual bounded scan opens metadata for the unexpected file;
+    // invalid layout retains its negative evidence without granting any IO.
+    for n in 0..MAX_INODES-2 {
+        fs::write(&extra,b"negative").unwrap();assert!(f.catalog.refresh().is_err());
+        fs::rename(&extra,retained.join(n.to_string())).unwrap();
+    }
+    assert_eq!(f.catalog.view().inode_count(),MAX_INODES);
+    f.catalog.refresh().unwrap();
+    assert!(f.catalog.external_inputs(vec![ordinary.to_str().unwrap().into()]).is_ok(),
+        "exactly at capacity, known negatives and unrelated input remain usable");
+    fs::write(&extra,b"unretained negative").unwrap();assert!(f.catalog.refresh().is_err());
+    let outside=retained.join("overflow");fs::rename(&extra,&outside).unwrap();
+    assert!(!f.catalog.view().complete());
+    assert!(f.catalog.refresh().is_err(),"a clean current layout cannot recover unretained history");
+    for path in [&ordinary,&outside] {
+        assert!(f.catalog.external_inputs(vec![path.to_str().unwrap().into()]).is_err());
+    }
+    assert_eq!(f.catalog.view().inode_count(),MAX_INODES);
+    assert!(bytes.exists()); // No cleanup, absence or quota settlement is claimed.
+}
+
+#[test]
+fn actual_stage_history_overflow_keeps_unknown_owner_veto_after_its_directory_moves() {
+    let f=Fixture::new();
+    let retained=f._temp.path().join("retained");fs::create_dir(&retained).unwrap();
+    let ordinary=f._temp.path().join("ordinary");fs::write(&ordinary,b"outside").unwrap();
+    for n in 0..MAX_STAGES {
+        let stage=format!("{n:032x}");let client=format!("{:032x}",n+1000);
+        let bytes=f.stage("owner",&stage,&client,Phase::Ready);
+        f.catalog.refresh().unwrap();
+        fs::rename(bytes.parent().unwrap(),retained.join(n.to_string())).unwrap();
+    }
+    assert_eq!(f.catalog.legacy_candidates().len(),MAX_STAGES);
+    f.catalog.refresh().unwrap();
+    assert!(f.catalog.external_inputs(vec![ordinary.to_str().unwrap().into()]).is_ok());
+    let unknown=f.stage("unrecorded",FIRST,CLIENT1,Phase::Ready);
+    assert!(f.catalog.refresh().is_err());
+    fs::rename(unknown.parent().unwrap(),retained.join("overflow")).unwrap();
+    assert!(f.catalog.refresh().is_err(),"missing current directory cannot settle lost owner history");
+    assert!(f.catalog.check_owner(b"unrecorded").is_err());
+    assert!(f.catalog.external_inputs(vec![ordinary.to_str().unwrap().into()]).is_err());
+    assert_eq!(f.catalog.legacy_candidates().len(),MAX_STAGES);
+    assert!(f.catalog.view().inode_count()<MAX_INODES,"this is stage capacity, not inode capacity");
+}
