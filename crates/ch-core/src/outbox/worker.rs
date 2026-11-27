@@ -284,7 +284,7 @@ fn owned_attempt(g: &Ingest, row: &OutboxRow, plugin: &str) -> Result<Option<Out
 
 // Core-bound metadata persistence belongs to the service once admitted. The
 // actual blocking callback holds the queue only for finite local DB work.
-async fn metadata_work<T,F>(inner:Arc<Inner>,work:F)->Result<T>
+pub(super) async fn metadata_work<T,F>(inner:Arc<Inner>,work:F)->Result<T>
 where T:Send+'static,F:FnOnce(&Arc<Inner>)->Result<T>+Send+'static {
     #[cfg(target_os="linux")]
     if let Some(metadata)=&inner.metadata {
@@ -646,7 +646,17 @@ mod result_queue_tests {
             ch_db::set_outbox_state(conn,id,outbox_state::SENDING,None,None,None).unwrap();
             ch_db::get_outbox(conn,id).unwrap().unwrap()
         };
+        let applied={
+            let ingest=outbox.inner.ingest();
+            let event=ch_protocol::Event::from_params("messages.upsert",json!({"account_id":"a","messages":[{
+                "id":"existing","chat_id":"chat","direction":"in","sent_at":"2026-01-01T00:00:00Z","text":"synthetic stored event"
+            }]})).unwrap().unwrap();
+            ingest.apply("fixture",event).unwrap()
+        };
         let queue=core.ingest().reference_queue();let guard=queue.exclusive_for_test().await;
+        // This is the real result of the committed ordinary ingest above, not a
+        // caller-provided completion/reader/filesystem certificate.
+        core.bus().publish(crate::runtime::CoreChange::Ingested {plugin_id:"fixture".into(),applied:Arc::new(applied)});
         let scheduler={let inner=outbox.inner.clone();tokio::spawn(async move {
             let mut tasks=JoinSet::new();tasks.spawn(std::future::pending::<()>());
             pass_owned(inner,"a".into(),"fixture".into(),tasks).await
@@ -658,7 +668,7 @@ mod result_queue_tests {
             }})),CancellationToken::new()).await
         })};
         tokio::time::timeout(Duration::from_secs(2),async {
-            while queue.waiting_for_test()<2 {tokio::task::yield_now().await;}
+            while queue.waiting_for_test()<3 {tokio::task::yield_now().await;}
         }).await.unwrap();
         assert!(outbox.inner.ingest.try_lock().is_ok(),"queued result never holds ingest mutex");
         assert_eq!(outbox.get(row.id).unwrap().state,OutboxState::Sending);

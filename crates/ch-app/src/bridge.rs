@@ -346,7 +346,7 @@ impl App {
             _ => return Err(Failure::Missing),
         };
         let outbox = self.outbox.clone();
-        blocking(move || {
+        self.core.ingest().with_metadata(move || {
             let _guard = guard;
             let item = fetch()?;
             if item.kind != kind { return Err(Failure::Missing); }
@@ -356,7 +356,7 @@ impl App {
                 outbox.cancel(item.id)?
             }))
         })
-        .await
+        .await?
     }
 }
 

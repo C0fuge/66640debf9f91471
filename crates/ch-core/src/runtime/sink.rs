@@ -86,24 +86,32 @@ impl IngestSink {
         F: FnOnce(&mut Ingest) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let ingest = Arc::clone(&self.ingest);
+        let ingest=Arc::clone(&self.ingest);
+        self.with_metadata(move|| {
+            let mut g=ingest.lock().unwrap_or_else(PoisonError::into_inner);f(&mut g)
+        }).await
+    }
+
+    /// Run finite synchronous service metadata work without holding the ingest
+    /// mutex. The callback may take that mutex itself (for example via Outbox).
+    /// Linux uses the same actual bounded worker owner, queue and closed admission
+    /// as with_ingest. Move original service/owner lifetimes into the callback.
+    /// This is scheduling only: its return value grants no file, Source, reader
+    /// closure or cleanup authority. Do not use it as a filesystem proof provider.
+    pub async fn with_metadata<R,F>(&self,work:F)->Result<R>
+    where R:Send+'static,F:FnOnce()->R+Send+'static {
         let references=self.references.clone();
         #[cfg(target_os="linux")]
         {
             self.jobs.run_wait_until(&self.jobs.stopped(),move|| {
-                let _references=references.read();
-                let mut g=ingest.lock().unwrap_or_else(PoisonError::into_inner);
-                f(&mut g)
+                let _references=references.read();work()
             }).await.map_err(|_|super::error::RuntimeError::Task("ingest work unavailable".into()))
         }
         #[cfg(not(target_os="linux"))]
         {
-        Ok(tokio::task::spawn_blocking(move || {
-            let _references=references.read();
-            let mut g = ingest.lock().unwrap_or_else(PoisonError::into_inner);
-            f(&mut g)
-        })
-        .await?)
+            Ok(tokio::task::spawn_blocking(move|| {
+                let _references=references.read();work()
+            }).await?)
         }
     }
 
@@ -376,21 +384,29 @@ mod tests {
             }).await
         });
         let c=core.clone();let accounts=tokio::spawn(async move {c.accounts().list().await});
+        let c=core.clone();let service=tokio::spawn(async move {
+            let shared=c.ingest().shared_ingest();
+            c.ingest().with_metadata(move|| {
+                let ingest=shared.lock().unwrap();
+                ingest.db().conn().execute("INSERT INTO settings(key,value_json,updated_at) VALUES('queue-service','true',0)",[])
+            }).await
+        });
         // Observe actual worker entry into the real lock wait, not a supplied
         // result/closure flag. All jobs are admitted before their callers drop.
         tokio::time::timeout(Duration::from_secs(5),async {
-            while queue.waiting_for_test()<3 {tokio::time::sleep(Duration::from_millis(5)).await;}
+            while queue.waiting_for_test()<4 {tokio::time::sleep(Duration::from_millis(5)).await;}
         }).await.unwrap();
         let db=core.open_db().unwrap();
-        let count=||db.conn().query_row("SELECT count(*) FROM settings WHERE key IN ('queue-normal','queue-full')",[],|r|r.get::<_,i64>(0)).unwrap();
-        assert_eq!(count(),0);assert!(!normal.is_finished());assert!(!full.is_finished());assert!(!accounts.is_finished());
-        normal.abort();full.abort();accounts.abort();
-        assert!(normal.await.unwrap_err().is_cancelled());assert!(full.await.unwrap_err().is_cancelled());assert!(accounts.await.unwrap_err().is_cancelled());
+        let count=||db.conn().query_row("SELECT count(*) FROM settings WHERE key IN ('queue-normal','queue-full','queue-service')",[],|r|r.get::<_,i64>(0)).unwrap();
+        assert_eq!(count(),0);assert!(!normal.is_finished());assert!(!full.is_finished());assert!(!accounts.is_finished());assert!(!service.is_finished());
+        normal.abort();full.abort();accounts.abort();service.abort();
+        assert!(normal.await.unwrap_err().is_cancelled());assert!(full.await.unwrap_err().is_cancelled());assert!(accounts.await.unwrap_err().is_cancelled());assert!(service.await.unwrap_err().is_cancelled());
         assert_eq!(count(),0);drop(exclusive);
         tokio::time::timeout(Duration::from_secs(5),async {
-            while count()!=2 {tokio::time::sleep(Duration::from_millis(5)).await;}
+            while count()!=3 {tokio::time::sleep(Duration::from_millis(5)).await;}
         }).await.unwrap();
         core.shutdown().await;
-        assert_eq!(count(),2);assert_eq!(queue.waiting_for_test(),0);
+        assert_eq!(count(),3);assert_eq!(queue.waiting_for_test(),0);
+        assert!(core.ingest().with_metadata(||()).await.is_err(),"closed generic metadata admission stays closed");
     }
 }

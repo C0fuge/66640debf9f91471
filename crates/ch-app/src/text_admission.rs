@@ -96,7 +96,8 @@ impl Service {
             text, entities, ..Default::default() };
         let lifetime=TextAdmissionLifetime { owner_revoked, app_closed:self.stop.clone() };
         let service=self.clone();
-        let writer=tokio::task::spawn_blocking(move|| {
+        let sink=self.core.ingest().clone();
+        let writer=tokio::spawn(async move {sink.with_metadata(move|| {
             let (_life,_lease)=(life,guard);
             #[cfg(test)] service.at("before-writer");
             let receipt=service.outbox.enqueue_text_checked(&target,params,&lifetime,None).map_err(|error|match error {
@@ -104,7 +105,7 @@ impl Service {
             })?;
             #[cfg(test)] service.at("committed");
             Ok(projection::outbox(receipt))
-        });
+        }).await.map_err(Failure::from)?});
         #[cfg(test)] self.at("spawned");
         writer.await.map_err(|_|Failure::OutcomeUnknown)?
     }

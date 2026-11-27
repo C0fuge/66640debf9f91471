@@ -728,6 +728,18 @@ impl Outbox {
                     event = events.recv() => event,
                 };
                 let Some(inner) = weak.upgrade() else { break };
+                // Only finite local work follows this event. The actual Core
+                // queue is acquired in an owned blocking callback, not on this
+                // async event-reader thread and never across recv/network waits.
+                match &event {
+                    Ok(crate::runtime::CoreChange::Ingested {..})
+                    | Ok(crate::runtime::CoreChange::Account(crate::runtime::AccountChange::Added {..}
+                        | crate::runtime::AccountChange::Removed {..}))
+                    | Err(broadcast::error::RecvError::Lagged(_))=>{},
+                    Err(broadcast::error::RecvError::Closed)=>break,
+                    _=>continue,
+                }
+                if let Err(error)=worker::metadata_work(inner,move|inner| {
                 match event {
                     Ok(crate::runtime::CoreChange::Ingested { plugin_id, applied }) => {
                         for change in &applied.changes {
@@ -753,7 +765,7 @@ impl Outbox {
                         crate::runtime::AccountChange::Added { account_id, .. }
                         | crate::runtime::AccountChange::Removed { account_id, .. },
                     )) => {
-                        if let Err(e) = Self::refresh_worker(&inner, &account_id) {
+                        if let Err(e) = Self::refresh_worker(inner, &account_id) {
                             tracing::warn!(error=%e,"outbox account refresh failed");
                         }
                     }
@@ -762,9 +774,11 @@ impl Outbox {
                             tracing::warn!(error=%e,"outbox echo catch-up failed");
                         }
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => {},
                     _ => {}
                 }
+                    Ok(())
+                }).await {tracing::warn!(error=%error,"outbox event metadata work stopped");}
             }
         });
         outbox
