@@ -196,7 +196,7 @@ impl Core {
         let host_rx = host.subscribe();
         #[cfg(target_os = "linux")]
         let accounts = Accounts::for_core(accounts_db, host.clone(), config.secrets, bus.clone(),
-            managed_sources.stage_mutations(),managed_sources.owner_barriers(),managed_sources.owner_jobs(),logical_owners.clone());
+            &managed_sources, logical_owners.clone());
         #[cfg(not(target_os = "linux"))]
         let accounts = Accounts::new(accounts_db, host.clone(), config.secrets, bus.clone());
         #[cfg(target_os = "linux")]

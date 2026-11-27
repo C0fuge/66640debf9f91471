@@ -180,13 +180,13 @@ impl Accounts {
     // Standalone public Accounts construction never manufactures a Core hook.
     #[cfg(target_os = "linux")]
     pub(crate) fn for_core(db: Db, host: HostHandle, secrets: Arc<dyn SecretStore>, bus: ChangeBus,
-        mutations: crate::managed_stage::StageMutations, owners:crate::managed_sources::OwnerBarriers,
-        jobs:Arc<crate::managed_sources::OwnedJobs>, logical_owners: LogicalOwners) -> Self {
+        sources: &crate::managed_sources::ManagedSources, logical_owners: LogicalOwners) -> Self {
         let mut accounts = Self::new(db, host, secrets, bus);
-        Arc::get_mut(&mut accounts.0).expect("new Accounts is uniquely owned").stage_mutations = Some(mutations);
-        Arc::get_mut(&mut accounts.0).expect("new Accounts is uniquely owned").owner_barriers = Some(owners);
-        Arc::get_mut(&mut accounts.0).expect("new Accounts is uniquely owned").owner_jobs = Some(jobs);
-        Arc::get_mut(&mut accounts.0).expect("new Accounts is uniquely owned").logical_owners = logical_owners;
+        let inner = Arc::get_mut(&mut accounts.0).expect("new Accounts is uniquely owned");
+        inner.stage_mutations = Some(sources.stage_mutations());
+        inner.owner_barriers = Some(sources.owner_barriers());
+        inner.owner_jobs = Some(sources.owner_jobs());
+        inner.logical_owners = logical_owners;
         accounts
     }
 

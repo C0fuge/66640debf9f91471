@@ -290,7 +290,7 @@ impl HostHandle {
         plugin_id: &str,
         account_id: &str,
     ) -> Option<CancellationToken> {
-        if self.account(plugin_id, account_id).is_none() { return None; }
+        self.account(plugin_id, account_id)?;
         self.0.registry.running_account_token(plugin_id, account_id)
     }
 

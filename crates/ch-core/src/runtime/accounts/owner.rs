@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct LogicalOwnerObservation {
     issuer: Arc<()>,
     epoch: Arc<CancellationToken>,
-    owner: AccountRow,
+    owner: Arc<AccountRow>,
 }
 impl fmt::Debug for LogicalOwnerObservation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -66,7 +66,7 @@ impl LogicalOwners {
     }
 
     fn issue(&self, row: &AccountRow) -> LogicalOwnerObservation {
-        LogicalOwnerObservation { issuer: self.0.issuer.clone(), epoch: Arc::new(CancellationToken::new()), owner: row.clone() }
+        LogicalOwnerObservation { issuer: self.0.issuer.clone(), epoch: Arc::new(CancellationToken::new()), owner: Arc::new(row.clone()) }
     }
 
     // The row was read on the actual Accounts connection, under its mutex.

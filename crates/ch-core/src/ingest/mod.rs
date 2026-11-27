@@ -297,12 +297,11 @@ impl Ingest {
         let account_id = event_account(&event).to_owned();
         let name = event.name();
         let tx = self.db.transaction()?;
-        if let Some((owners, origin)) = owner {
-            if origin.account_id() != account_id || origin.plugin_id() != plugin_id || !owners.validate(&tx, origin)? {
-                // Old queued native input is an acknowledged no-op, never a
-                // lookup by ID that could adopt the replacement incarnation.
-                return Ok(Applied::new(&account_id, name));
-            }
+        if let Some((owners, origin)) = owner
+            && (origin.account_id() != account_id || origin.plugin_id() != plugin_id || !owners.validate(&tx, origin)?) {
+            // Old queued native input is an acknowledged no-op, never a
+            // lookup by ID that could adopt the replacement incarnation.
+            return Ok(Applied::new(&account_id, name));
         }
         self.check_account(&tx, plugin_id, &account_id)?;
         let mut out = Applied::new(&account_id, name);
@@ -406,11 +405,10 @@ impl Ingest {
             Event::TransferProgress(e) => out.push(Change::TransferProgress(e)),
             Event::AuthStep(e) => out.push(Change::AuthStep(e.step)),
         }
-        if let Some((owners, origin)) = owner {
-            if !owners.validate(&tx, origin)? {
-                tx.rollback()?;
-                return Ok(Applied::new(&account_id, name));
-            }
+        if let Some((owners, origin)) = owner
+            && !owners.validate(&tx, origin)? {
+            tx.rollback()?;
+            return Ok(Applied::new(&account_id, name));
         }
         tx.commit()?;
         Ok(out)
