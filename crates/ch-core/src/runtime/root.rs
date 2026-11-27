@@ -10,7 +10,9 @@ use tracing::{info, warn};
 
 use super::accounts::Accounts;
 use super::bus::{ChangeBus, CoreChange};
-use super::error::{Result, RuntimeError};
+use super::error::Result;
+#[cfg(not(target_os="linux"))]
+use super::error::RuntimeError;
 use super::managed_proof::ManagedProofWriter;
 use super::sink::{IngestSink, account_path_filter};
 use crate::host::{HostConfig, HostHandle, SecretStore};

@@ -48,7 +48,7 @@ impl ManagedSources {
     // Before Host construction/discovery/autostart. The actual bounded metadata
     // worker installs only negative namespace barriers, never fresh storage Gates.
     pub(crate) async fn restore_negative(&self,ingest:Arc<std::sync::Mutex<crate::ingest::Ingest>>,
-        config:&HostConfig) -> crate::runtime::Result<()> {
+        config:&HostConfig) -> Result<(),crate::runtime::RuntimeError> {
         let config=config.clone();let barriers=self.owners.clone();
         self.lookups.run(move|| {
             let recovered={

@@ -1,11 +1,12 @@
 //! Bounded negative restoration only. No replay, source reader or closure grant.
-use crate::{host::HostConfig, runtime::{Result, RuntimeError}};
+use crate::{host::HostConfig, runtime::RuntimeError};
 use rusqlite::{Connection, params};
 use std::{collections::{HashMap, HashSet}, path::PathBuf};
 
 const SOURCES:usize=256;
 const ATTEMPTS:usize=1024;
 const PAGE:i64=64;
+type Result<T>=std::result::Result<T,RuntimeError>;
 
 pub(super) struct Recovered { pub(super) roots:HashMap<String,PathBuf> }
 fn unavailable() -> RuntimeError { RuntimeError::ManagedLifetimeRecoveryUnavailable }
