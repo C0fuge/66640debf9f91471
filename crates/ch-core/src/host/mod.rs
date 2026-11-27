@@ -18,6 +18,7 @@ mod config;
 pub mod discovery;
 mod error;
 mod handle;
+mod start_scope;
 #[cfg(target_os = "linux")]
 mod directories;
 pub mod settings;

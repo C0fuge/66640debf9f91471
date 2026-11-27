@@ -44,17 +44,20 @@ impl OwnedJobs {
     // Directory-only admission: one existing supervisor await, no queued
     // blocking closure until a slot is actually held. Ordinary admission keeps
     // its existing try-only Busy behavior above.
-    pub(crate) async fn run_wait<R,F>(&self,work:F) -> Result<R,Error>
+    pub(crate) fn stopped(&self) -> CancellationToken { self.closed.clone() }
+
+    pub(crate) async fn run_wait_until<R,F>(&self, revoked:&CancellationToken,work:F) -> Result<R,Error>
     where R:Send+'static,F:FnOnce()->R+Send+'static {
         if self.state.lock().unwrap_or_else(PoisonError::into_inner).closed { return Err(Error::Closed); }
         let slot=tokio::select! {
             biased;
             _=self.closed.cancelled()=>return Err(Error::Closed),
+            _=revoked.cancelled()=>return Err(Error::Closed),
             slot=Arc::clone(&self.slots).acquire_owned()=>slot.map_err(|_|Error::Closed)?,
         };
         let recv={
             let mut state=self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if state.closed { return Err(Error::Closed); }
+            if state.closed || revoked.is_cancelled() { return Err(Error::Closed); }
             self.spawn(&mut state,slot,move |_|work())
         };
         recv.await.map_err(|_|Error::Task)

@@ -37,14 +37,17 @@ use super::settings::fill_defaults;
 use super::sink::{EventSink, SecretStore};
 use super::state::{AccountInfo, AccountPhase, AccountSpec, PluginInfo, PluginState, StateChange};
 use super::transport::{Frame, FrameError, FrameReader, encode};
+use super::start_scope::StartScope;
 
 // ---------------------------------------------------------------------------------------
 // Host-wide registry (shared by the handle, the supervisors and their readers)
 // ---------------------------------------------------------------------------------------
 
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct AccountRecord {
     pub info: AccountInfo,
     pub spec: AccountSpec,
+    start: Option<StartScope>,
     // One interval of successful account.start on this process. Status events
     // and duplicate starts preserve it; callers only receive child tokens.
     run: Option<CancellationToken>,
@@ -155,6 +158,7 @@ impl Registry {
                     info: AccountInfo::new(plugin_id, account_id),
                     spec: AccountSpec::default(),
                     run: None,
+                    start: None,
                 });
             let before = rec.info.clone();
             f(rec);
@@ -195,12 +199,67 @@ impl Registry {
             .unwrap_or_default()
     }
 
-    fn account_spec(&self, plugin_id: &str, account_id: &str) -> Option<AccountSpec> {
-        self.lock()
-            .get(plugin_id)?
+    pub(super) fn account_start(&self, plugin_id: &str, account_id: &str) -> Option<(AccountSpec, StartScope)> {
+        let mut state = self.lock();
+        let record = state.get_mut(plugin_id)?
             .accounts
-            .get(account_id)
-            .map(|r| r.spec.clone())
+            .get_mut(account_id)?;
+        let scope = record.start.as_ref()?.replay();
+        record.start = Some(scope.clone());
+        Some((record.spec.clone(), scope))
+    }
+    fn account_scope(&self, plugin: &str, account: &str) -> Option<StartScope> {
+        self.lock().get(plugin)?.accounts.get(account)?.start.clone()
+    }
+
+    fn set_start(&self, plugin: &str, account: &str, spec: AccountSpec, scope: &StartScope) -> bool {
+        let mut state = self.lock(); let Some(entry) = state.get_mut(plugin) else { return false; };
+        // The original-owner veto is checked inside this reservation, BEFORE
+        // even creating a local record. No unscoped helper can resurrect it.
+        if !scope.live() { return false; }
+        let record = entry.accounts.entry(account.to_owned()).or_insert_with(|| AccountRecord {
+            info: AccountInfo::new(plugin, account), spec: AccountSpec::default(), run: None, start: None,
+        });
+        if record.info.phase == AccountPhase::Stopped
+            && !record.start.as_ref().is_some_and(|old| old.same_owner(scope)) {
+            record.info = AccountInfo::new(plugin, account);
+        }
+        record.start = Some(scope.clone()); record.spec = spec;
+        // Metadata-only reservation never broadcasts an event. All lifecycle
+        // adoption uses update_start's original-scope + nonce check instead.
+        true
+    }
+
+    // Stale failures may explain the old local wish, but must never publish an
+    // Account event that could be persisted onto a replacement DB owner.
+    fn update_start(&self, plugin: &str, account: &str, scope: &StartScope, require_live: bool,
+        change: impl FnOnce(&mut AccountRecord)) -> Option<AccountInfo> {
+        let (info, publish) = {
+            let mut state = self.lock(); let entry = state.get_mut(plugin)?;
+            let running = entry.state.is_running(); let record = entry.accounts.get_mut(account)?;
+            if !record.start.as_ref().is_some_and(|current| current.same(scope)) { return None; }
+            let live = scope.live();
+            if require_live && !live { return None; }
+            change(record);
+            if !record.info.wanted || record.info.phase != AccountPhase::Running { record.revoke_run(); }
+            else if running && record.run.is_none() { record.run = Some(CancellationToken::new()); }
+            (record.info.clone(), live)
+        };
+        if publish && scope.live() { let _ = self.changes.send(StateChange::Account(info.clone())); }
+        Some(info)
+    }
+
+    fn current_start(&self, plugin: &str, account: &str, scope: &StartScope) -> bool {
+        scope.live() && self.lock().get(plugin).and_then(|entry| entry.accounts.get(account))
+            .is_some_and(|record| record.start.as_ref().is_some_and(|current| current.same(scope)))
+    }
+
+    fn refuse_unexposed_start(&self, plugin: &str, account: &str, scope: &StartScope) {
+        self.update_start(plugin, account, scope, false, |record| {
+            record.info.phase = AccountPhase::Stopped;
+            record.info.state = AccountState::Error;
+            record.info.detail = Some("Account start was cancelled; start the account again".into());
+        });
     }
 }
 
@@ -212,6 +271,7 @@ pub(crate) enum Command {
     StartAccount {
         account_id: String,
         spec: AccountSpec,
+        scope: StartScope,
         reply: oneshot::Sender<Result<(), HostError>>,
     },
     StopAccount {
@@ -240,7 +300,7 @@ enum PendingKind {
     Initialize,
     Ping,
     Shutdown,
-    AccountStart(String),
+    AccountStart(String, StartScope),
     AccountStop(String),
     Call,
 }
@@ -382,8 +442,8 @@ impl Conn {
         let drained: Vec<(i64, Pending)> = self.pending().drain().collect();
         for (_, p) in drained {
             match &p.kind {
-                PendingKind::AccountStart(acc) => {
-                    registry.update_account(&self.plugin_id, acc, |r| {
+                PendingKind::AccountStart(acc, scope) => {
+                    registry.update_start(&self.plugin_id, acc, scope, false, |r| {
                         r.info.phase = AccountPhase::Stopped;
                         r.info.state = AccountState::Disconnected;
                         r.info.detail = Some(reason.to_owned());
@@ -431,7 +491,7 @@ pub(crate) struct Supervisor {
     pub last_failure: String,
 }
 
-type QueuedStart = (String, AccountSpec, oneshot::Sender<Result<(), HostError>>);
+type QueuedStart = (String, AccountSpec, StartScope, oneshot::Sender<Result<(), HostError>>);
 
 enum Outcome {
     /// `shutdown`/disable finished; the task ends and then answers the caller.
@@ -565,9 +625,9 @@ impl Supervisor {
                     match cmd {
                         Command::Shutdown { reply } => return Idle::Shutdown(reply),
                         Command::Restart { reply } => return Idle::Restart(reply),
-                        Command::StartAccount { account_id, spec, reply } => {
+                        Command::StartAccount { account_id, spec, scope, reply } => {
                             // Remember the wish; the account starts after the restart.
-                            let r = self.remember_start(&account_id, spec, delay.is_some());
+                            let r = self.remember_start(&account_id, spec, scope, delay.is_some());
                             let _ = reply.send(r);
                         }
                         Command::StopAccount { account_id, reply } => {
@@ -603,18 +663,20 @@ impl Supervisor {
         &self,
         account_id: &str,
         spec: AccountSpec,
+        scope: StartScope,
         will_restart: bool,
     ) -> Result<(), HostError> {
         if !will_restart {
             return Err(self.not_running());
         }
         self.check_single_account(account_id)?;
-        self.registry
-            .update_account(&self.plugin_id, account_id, |r| {
+        if !self.registry.set_start(&self.plugin_id, account_id, spec.clone(), &scope) { return Err(HostError::ShuttingDown); }
+        if self.registry
+            .update_start(&self.plugin_id, account_id, &scope, true, |r| {
                 r.spec = spec;
                 r.info.wanted = true;
                 r.info.detail = Some("waiting for the plugin to restart".to_owned());
-            });
+            }).is_none() { return Err(HostError::ShuttingDown); }
         Ok(())
     }
 
@@ -749,14 +811,14 @@ impl Supervisor {
                             let _ = reply.send(());
                             return Outcome::Restart;
                         }
-                        Some(Command::StartAccount { account_id, spec, reply }) => {
-                            queued_starts.push((account_id, spec, reply));
+                        Some(Command::StartAccount { account_id, spec, scope, reply }) => {
+                            queued_starts.push((account_id, spec, scope, reply));
                         }
                         Some(Command::StopAccount { account_id, reply }) => {
                             self.registry.update_account(&self.plugin_id, &account_id, |r| {
                                 r.info.wanted = false;
                             });
-                            queued_starts.retain(|(id, _, _)| id != &account_id);
+                            queued_starts.retain(|(id, _, _, _)| id != &account_id);
                             let _ = reply.send(Ok(()));
                         }
                         Some(Command::Call { reply, .. }) => {
@@ -786,7 +848,7 @@ impl Supervisor {
             Err(_) => return Outcome::Failed("initialize was not answered".into()),
         };
         if !ch_protocol::versions_compatible(&init.api_version, ch_protocol::API_VERSION) {
-            for (_, _, reply) in queued_starts {
+            for (_, _, _, reply) in queued_starts {
                 let _ = reply.send(Err(HostError::PluginNotRunning {
                     plugin_id: self.plugin_id.clone(),
                     state: PluginState::Incompatible {
@@ -818,14 +880,14 @@ impl Supervisor {
         for (id, wanted, phase) in self.registry.accounts_of(&self.plugin_id) {
             if wanted
                 && phase == AccountPhase::Stopped
-                && let Some(spec) = self.registry.account_spec(&self.plugin_id, &id)
+                && let Some((spec, scope)) = self.registry.account_start(&self.plugin_id, &id)
             {
                 info!(plugin = %self.plugin_id, account = %id, "resuming account");
-                self.begin_account_start(&conn, &id, spec, None).await;
+                self.begin_account_start(&conn, &id, spec, scope, None).await;
             }
         }
-        for (id, spec, reply) in queued_starts {
-            self.handle_start(&conn, id, spec, reply).await;
+        for (id, spec, scope, reply) in queued_starts {
+            self.handle_start(&conn, id, spec, scope, reply).await;
         }
 
         // ---- serve ----
@@ -859,8 +921,8 @@ impl Supervisor {
                         let _ = reply.send(());
                         break Outcome::Restart;
                     }
-                    Some(Command::StartAccount { account_id, spec, reply }) => {
-                        self.handle_start(&conn, account_id, spec, reply).await;
+                    Some(Command::StartAccount { account_id, spec, scope, reply }) => {
+                        self.handle_start(&conn, account_id, spec, scope, reply).await;
                     }
                     Some(Command::StopAccount { account_id, reply }) => {
                         self.handle_stop(&conn, account_id, reply);
@@ -963,10 +1025,10 @@ impl Supervisor {
                     fatal = Some("initialize timed out".into());
                 }
                 PendingKind::Shutdown => {}
-                PendingKind::AccountStart(acc) => {
+                PendingKind::AccountStart(acc, scope) => {
                     warn!(plugin = %self.plugin_id, account = %acc, "account.start timed out");
                     conn.send_cancel(id);
-                    self.registry.update_account(&self.plugin_id, &acc, |r| {
+                    self.registry.update_start(&self.plugin_id, &acc, &scope, false, |r| {
                         r.info.phase = AccountPhase::Stopped;
                         r.info.wanted = false;
                         r.info.state = AccountState::Error;
@@ -999,10 +1061,21 @@ impl Supervisor {
         conn: &Arc<Conn>,
         account_id: String,
         spec: AccountSpec,
+        scope: StartScope,
         reply: oneshot::Sender<Result<(), HostError>>,
     ) {
+        if !scope.live() { let _ = reply.send(Err(HostError::ShuttingDown)); return; }
         match self.registry.account_phase(&self.plugin_id, &account_id) {
-            Some(AccountPhase::Starting) | Some(AccountPhase::Running) => {
+            Some(AccountPhase::Starting) => {
+                let _ = reply.send(Err(HostError::AccountAlreadyStarted(account_id)));
+                return;
+            }
+            Some(AccountPhase::Running) => {
+                // Fresh explicit start can replace a revoked future wish after
+                // a definite refusal/rearm, without reviving saved requests.
+                if self.registry.account_scope(&self.plugin_id, &account_id).is_some_and(|old| !old.live()) {
+                    self.registry.set_start(&self.plugin_id, &account_id, spec, &scope);
+                }
                 let _ = reply.send(Err(HostError::AccountAlreadyStarted(account_id)));
                 return;
             }
@@ -1016,7 +1089,7 @@ impl Supervisor {
             let _ = reply.send(Err(e));
             return;
         }
-        self.begin_account_start(conn, &account_id, spec, Some(reply))
+        self.begin_account_start(conn, &account_id, spec, scope, Some(reply))
             .await;
     }
 
@@ -1026,14 +1099,22 @@ impl Supervisor {
         conn: &Arc<Conn>,
         account_id: &str,
         spec: AccountSpec,
+        scope: StartScope,
         reply: Option<oneshot::Sender<Result<(), HostError>>>,
     ) {
+        if !self.registry.set_start(&self.plugin_id, account_id, spec.clone(), &scope) {
+            // Replay keeps its frozen observation and explains refusal locally;
+            // it never falls back to a new by-ID capture.
+            self.registry.refuse_unexposed_start(&self.plugin_id, account_id, &scope);
+            if let Some(reply) = reply { let _ = reply.send(Err(HostError::ShuttingDown)); }
+            return;
+        }
         let secrets = match self.secrets.get_all(&self.plugin_id, account_id).await {
             Ok(s) => s,
             Err(e) => {
                 error!(plugin = %self.plugin_id, account = %account_id, "secret store: {e}");
                 self.registry
-                    .update_account(&self.plugin_id, account_id, |r| {
+                    .update_start(&self.plugin_id, account_id, &scope, true, |r| {
                         r.info.wanted = false;
                         r.info.phase = AccountPhase::Stopped;
                         r.info.state = AccountState::Error;
@@ -1055,9 +1136,9 @@ impl Supervisor {
         );
         let state_dir = self.config.state_dir(account_id);
         let cache_dir = self.config.cache_dir(account_id);
-        if let Err(error) = self.prepare_account_directories(account_id, [&state_dir, &cache_dir]).await {
+        if let Err(error) = self.prepare_account_directories(account_id, &scope, [&state_dir, &cache_dir]).await {
             warn!(plugin = %self.plugin_id, account = %account_id, "account directory preparation unavailable: {error}");
-            self.registry.update_account(&self.plugin_id, account_id, |record| {
+            self.registry.update_start(&self.plugin_id, account_id, &scope, false, |record| {
                 record.spec = spec;
                 // Preserve the start wish when Core closes while directory work
                 // is waiting; shutdown must not persist this account disabled.
@@ -1067,6 +1148,11 @@ impl Supervisor {
                 record.info.detail = Some("account directory preparation unavailable".into());
             });
             if let Some(reply) = reply { let _ = reply.send(Err(error)); }
+            return;
+        }
+        if !self.registry.current_start(&self.plugin_id, account_id, &scope) {
+            self.registry.refuse_unexposed_start(&self.plugin_id, account_id, &scope);
+            if let Some(reply) = reply { let _ = reply.send(Err(HostError::ShuttingDown)); }
             return;
         }
         // The counted local mkdir work and mutation token have settled before
@@ -1080,17 +1166,28 @@ impl Supervisor {
             ghost: spec.ghost,
             auto_download: spec.auto_download.clone(),
         };
-        self.registry
-            .update_account(&self.plugin_id, account_id, |r| {
+        if self.registry
+            .update_start(&self.plugin_id, account_id, &scope, true, |r| {
                 r.spec = spec;
                 r.info.wanted = true;
                 r.info.phase = AccountPhase::Starting;
                 r.info.state = AccountState::Disconnected;
                 r.info.detail = None;
                 r.info.reconnecting = false;
-            });
+            }).is_none() {
+            self.registry.refuse_unexposed_start(&self.plugin_id, account_id, &scope);
+            if let Some(reply) = reply { let _ = reply.send(Err(HostError::ShuttingDown)); }
+            return;
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(directories) = &self.directories { directories.checkpoint_at("before_frame"); }
+        if !self.registry.current_start(&self.plugin_id, account_id, &scope) {
+            self.registry.refuse_unexposed_start(&self.plugin_id, account_id, &scope);
+            if let Some(reply) = reply { let _ = reply.send(Err(HostError::ShuttingDown)); }
+            return;
+        }
         let sent = conn.request(
-            PendingKind::AccountStart(account_id.to_owned()),
+            PendingKind::AccountStart(account_id.to_owned(), scope.clone()),
             "account.start",
             serde_json::to_value(&params).expect("serialise"),
             self.config.request_timeout("account.start"),
@@ -1100,7 +1197,7 @@ impl Supervisor {
         match sent {
             None => {
                 self.registry
-                    .update_account(&self.plugin_id, account_id, |r| {
+                    .update_start(&self.plugin_id, account_id, &scope, false, |r| {
                         r.info.phase = AccountPhase::Stopped;
                     });
                 if let Some(r) = reply {
@@ -1125,12 +1222,12 @@ impl Supervisor {
         }
     }
 
-    async fn prepare_account_directories(&self, account_id: &str, paths: [&std::path::Path; 2]) -> Result<(), HostError> {
+    async fn prepare_account_directories(&self, account_id: &str, scope: &StartScope, paths: [&std::path::Path; 2]) -> Result<(), HostError> {
         #[cfg(not(target_os = "linux"))]
-        let _ = account_id;
+        let _ = (account_id, scope);
         #[cfg(target_os = "linux")]
         if let Some(directories) = &self.directories {
-            for (path, error) in directories.prepare(&self.config, account_id).await? {
+            for (path, error) in directories.prepare(&self.config, account_id, scope).await? {
                 warn!(plugin = %self.plugin_id, "cannot create {}: {error}", path.display());
             }
             return Ok(());
@@ -1211,6 +1308,10 @@ impl Supervisor {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "start_tests.rs"]
+mod start_tests;
 
 fn timeout_error(method: &str) -> ErrorObject {
     ErrorObject::new(ErrorCode::Timeout, format!("{method} timed out"))
@@ -1505,10 +1606,10 @@ fn resolve(
         PendingKind::Ping => {
             conn.ping_misses.store(0, Ordering::Release);
         }
-        PendingKind::AccountStart(acc) => {
+        PendingKind::AccountStart(acc, scope) => {
             let ok = result.is_ok();
             debug!(plugin = %conn.plugin_id, account = %acc, ok, "account.start answered");
-            registry.update_account(&conn.plugin_id, acc, |r| {
+            registry.update_start(&conn.plugin_id, acc, scope, true, |r| {
                 if ok {
                     r.info.phase = AccountPhase::Running;
                 } else {

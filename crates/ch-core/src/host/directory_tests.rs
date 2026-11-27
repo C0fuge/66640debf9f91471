@@ -36,6 +36,12 @@ impl Fixture {
             Err(error) => panic!("isolated recorder: {error}"),
         }
     }
+    async fn scope(&self, account: &str) -> crate::host::start_scope::StartScope {
+        if self.core.accounts().get(account).await.unwrap().is_none() {
+            self.core.accounts().add(NewAccount::new("fixture").id(account).no_start()).await.unwrap();
+        }
+        self.core.host().capture_start("fixture", account).await.unwrap()
+    }
     async fn close(self) { self.directories().checkpoint(None); self.core.shutdown().await; }
 }
 
@@ -86,13 +92,11 @@ async fn actual_explicit_start_and_handshake_replay_share_local_directory_tracki
         Err(HostError::ShuttingDown)));
     assert!(!config.state_dir("fresh").parent().unwrap().exists());
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    let refused = f.core.host().account("fixture", "fresh").unwrap();
-    assert_eq!(refused.phase, AccountPhase::Stopped); assert!(refused.wanted);
-    assert_eq!(refused.detail.as_deref(), Some("account directory preparation unavailable"));
+    assert!(f.core.host().account("fixture", "fresh").is_none()); // Closed before queue capture.
     assert!(f.core.host().running_account_token("fixture", "fresh").is_none());
     f.core.host().restart_plugin("fixture").await.unwrap();
     until(|| f.core.host().account("fixture", "owner").is_some_and(|info|
-        info.phase == AccountPhase::Stopped && info.detail.as_deref() == Some("account directory preparation unavailable"))).await;
+        info.phase == AccountPhase::Stopped && info.detail.as_deref() == Some("Account start was cancelled; start the account again"))).await;
     let replay = f.core.host().account("fixture", "owner").unwrap();
     assert!(replay.wanted);
     assert!(f.core.host().running_account_token("fixture", "owner").is_none());
@@ -106,6 +110,8 @@ async fn dropped_directory_waiter_and_cancelled_drain_retain_actual_blocking_wor
     let f = Fixture::new().await;
     let catalog = f.core.managed_sources().catalog();
     catalog.refresh().unwrap();
+    let pending = f.scope("pending").await;
+    let fresh = f.scope("fresh").await;
     let gate = Arc::new((Mutex::new(false), Condvar::new())); let release = Release(gate.clone());
     let (entered_tx, entered_rx) = oneshot::channel(); let entered = Mutex::new(Some(entered_tx));
     f.directories().checkpoint(Some(Arc::new(move |phase| {
@@ -115,14 +121,14 @@ async fn dropped_directory_waiter_and_cancelled_drain_retain_actual_blocking_wor
         while !*ready { ready = gate.1.wait(ready).unwrap(); }
     })));
     let directories = f.directories(); let config = f.core.host().config().clone();
-    let caller = tokio::spawn(async move { directories.prepare(&config, "pending").await });
+    let caller = tokio::spawn(async move { directories.prepare(&config, "pending", &pending).await });
     tokio::time::timeout(Duration::from_secs(5), entered_rx).await.unwrap().unwrap();
     caller.abort();
     assert!(tokio::time::timeout(Duration::from_secs(5), caller).await.unwrap().unwrap_err().is_cancelled());
     assert_eq!(catalog.view().writers(), 1);
     assert!(!f.core.host().config().state_dir("pending").parent().unwrap().exists());
     f.core.managed_sources().close();
-    assert!(matches!(f.directories().prepare(f.core.host().config(), "fresh").await, Err(HostError::ShuttingDown)));
+    assert!(matches!(f.directories().prepare(f.core.host().config(), "fresh", &fresh).await, Err(HostError::ShuttingDown)));
     let sources = f.core.managed_sources(); let mut drain = tokio::spawn(async move { sources.drain().await });
     assert!(tokio::time::timeout(Duration::from_millis(25), &mut drain).await.is_err());
     drain.abort();
@@ -131,8 +137,9 @@ async fn dropped_directory_waiter_and_cancelled_drain_retain_actual_blocking_wor
     assert!(tokio::time::timeout(Duration::from_millis(25), &mut retry).await.is_err());
     release.release();
     tokio::time::timeout(Duration::from_secs(5), retry).await.unwrap().unwrap().unwrap();
-    assert!(f.core.host().config().state_dir("pending").is_dir());
-    assert!(f.core.host().config().cache_dir("pending").is_dir());
+    // Source close cancelled the original scope while its real worker was
+    // paused before first mkdir; settlement releases handles without creating.
+    assert!(!f.core.host().config().state_dir("pending").parent().unwrap().exists());
     assert!(!f.core.host().config().state_dir("fresh").parent().unwrap().exists());
     assert_eq!(catalog.view().writers(), 0); assert!(!catalog.view().complete());
     f.close().await;
@@ -154,7 +161,8 @@ async fn saturated_directory_lane_waits_for_capacity_for_start_and_handshake_rep
         let mut occupants = Vec::new();
         for number in 0..4 {
             let directories = f.directories(); let config = f.core.host().config().clone();
-            occupants.push(tokio::spawn(async move { directories.prepare(&config, &format!("occupant-{number}")).await }));
+            let account = format!("occupant-{number}"); let scope = f.scope(&account).await;
+            occupants.push(tokio::spawn(async move { directories.prepare(&config, &account, &scope).await }));
         }
         until(|| entered.load(Ordering::SeqCst) == 4).await;
         let (waiting_tx, waiting_rx) = oneshot::channel(); let waiting = Mutex::new(Some(waiting_tx));
@@ -194,6 +202,7 @@ async fn saturated_directory_lane_waits_for_capacity_for_start_and_handshake_rep
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_cancels_slot_waiter_promptly_and_cancelled_waiter_never_creates_dirs() {
     let f = Fixture::new().await;
+    let scope = f.scope("never-created").await;
     let gate = Arc::new((Mutex::new(false), Condvar::new())); let release = Release(gate.clone());
     let entered = Arc::new(AtomicUsize::new(0)); let count = entered.clone();
     f.directories().checkpoint(Some(Arc::new(move |phase| {
@@ -205,7 +214,8 @@ async fn close_cancels_slot_waiter_promptly_and_cancelled_waiter_never_creates_d
     let mut occupants = Vec::new();
     for number in 0..4 {
         let directories = f.directories(); let config = f.core.host().config().clone();
-        occupants.push(tokio::spawn(async move { directories.prepare(&config, &format!("occupant-{number}")).await }));
+        let account = format!("occupant-{number}"); let scope = f.scope(&account).await;
+        occupants.push(tokio::spawn(async move { directories.prepare(&config, &account, &scope).await }));
     }
     until(|| entered.load(Ordering::SeqCst) == 4).await;
     for cancel_caller in [true, false] {
@@ -214,7 +224,8 @@ async fn close_cancels_slot_waiter_promptly_and_cancelled_waiter_never_creates_d
             if phase == "waiting" { let _ = waiting.lock().unwrap().take().unwrap().send(()); }
         })));
         let directories = f.directories(); let config = f.core.host().config().clone();
-        let mut waiter = tokio::spawn(async move { directories.prepare(&config, "never-created").await });
+        let scope = scope.clone();
+        let mut waiter = tokio::spawn(async move { directories.prepare(&config, "never-created", &scope).await });
         tokio::time::timeout(Duration::from_secs(5), waiting_rx).await.unwrap().unwrap();
         if cancel_caller {
             waiter.abort();
@@ -229,7 +240,11 @@ async fn close_cancels_slot_waiter_promptly_and_cancelled_waiter_never_creates_d
     }
     release.release();
     for occupant in occupants {
-        tokio::time::timeout(Duration::from_secs(5), occupant).await.unwrap().unwrap().unwrap();
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(5), occupant).await.unwrap().unwrap(),
+            Err(HostError::ShuttingDown)));
+    }
+    for number in 0..4 {
+        assert!(!f.core.host().config().state_dir(&format!("occupant-{number}")).parent().unwrap().exists());
     }
     assert!(!f.core.host().config().state_dir("never-created").parent().unwrap().exists());
     f.close().await;
@@ -261,5 +276,185 @@ async fn ordinary_directory_io_failure_keeps_existing_host_start_behavior() {
     assert!(config.state_dir("owner").is_dir());
     assert_eq!(fs::read(config.cache_dir("owner")).unwrap(), b"synthetic collision");
     assert_eq!(f.core.managed_sources().catalog().view().writers(), 0);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_capture_caller_loss_keeps_actual_accounts_db_worker_counted() {
+    let f = Fixture::new().await;
+    let gate = Arc::new((Mutex::new(false), Condvar::new())); let release = Release(gate.clone());
+    let (entered_tx, entered_rx) = oneshot::channel(); let entered = Mutex::new(Some(entered_tx));
+    f.core.accounts().host_capture_checkpoint(Arc::new(move || {
+        let _ = entered.lock().unwrap().take().unwrap().send(());
+        let mut ready = gate.0.lock().unwrap();
+        while !*ready { ready = gate.1.wait(ready).unwrap(); }
+    }));
+    let host = f.core.host().clone();
+    let caller = tokio::spawn(async move { host.start_account("fixture", "owner", AccountSpec::default()).await });
+    tokio::time::timeout(Duration::from_secs(5), entered_rx).await.unwrap().unwrap();
+    caller.abort();
+    assert!(tokio::time::timeout(Duration::from_secs(5), caller).await.unwrap().unwrap_err().is_cancelled());
+    f.core.managed_sources().close();
+    let sources = f.core.managed_sources(); let mut drain = tokio::spawn(async move { sources.drain().await });
+    assert!(tokio::time::timeout(Duration::from_millis(25), &mut drain).await.is_err());
+    release.release();
+    tokio::time::timeout(Duration::from_secs(5), drain).await.unwrap().unwrap().unwrap();
+    assert!(!f.core.host().config().state_dir("owner").parent().unwrap().exists());
+    assert!(f.starts().is_empty());
+    assert!(f.core.host().account("fixture", "owner").is_none());
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equal_birth_recreated_owner_rejects_original_queued_scope_and_actual_replay() {
+    for replay in [false, true] {
+        let f = Fixture::new().await;
+        let old = f.scope("owner").await;
+        let saved = if replay {
+            f.core.accounts().start("owner").await.unwrap();
+            until(|| f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Running)).await;
+            Some(f.core.host().0.registry.lock().get("fixture").unwrap().accounts["owner"].clone())
+        } else { None };
+        let birth = old.owner.as_ref().unwrap().observed.owner().created_at;
+        f.core.accounts().remove("owner").await.unwrap();
+        f.core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+        f.core.open_db().unwrap().conn().execute("UPDATE account SET created_at=?1 WHERE account_id='owner'", [birth]).unwrap();
+        assert!(!old.live());
+        assert!(!f.core.host().config().state_dir("owner").parent().unwrap().exists());
+        if let Some(saved) = saved {
+            // Restore only a real frozen in-memory wish, never a forged owner
+            // or a fresh by-ID observation. Restart must reject that old Gate.
+            f.core.host().0.registry.lock().get_mut("fixture").unwrap().accounts.insert("owner".into(), saved);
+            f.core.host().restart_plugin("fixture").await.unwrap();
+            until(|| f.core.host().account("fixture", "owner").is_some_and(|info|
+                info.phase == AccountPhase::Stopped && info.detail.as_deref() == Some("Account start was cancelled; start the account again"))).await;
+            assert_eq!(f.starts(), vec!["owner"]);
+        } else {
+            let command = f.core.host().ensure_supervisor("fixture").unwrap();
+            let (send, recv) = oneshot::channel();
+            command.send(Command::StartAccount { account_id: "owner".into(), spec: AccountSpec::default(), scope: old, reply: send }).await.unwrap();
+            assert!(matches!(tokio::time::timeout(Duration::from_secs(5), recv).await.unwrap().unwrap(), Err(HostError::ShuttingDown)));
+            assert!(f.starts().is_empty());
+            assert!(f.core.host().account("fixture", "owner").is_none());
+        }
+        assert!(!f.core.host().config().state_dir("owner").parent().unwrap().exists());
+        f.core.accounts().start("owner").await.unwrap();
+        until(|| f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Running)).await;
+        assert_eq!(f.starts().len(), if replay { 2 } else { 1 });
+        f.close().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_mkdir_read_lease_blocks_removal_until_its_revoked_worker_settles() {
+    let f = Fixture::new().await;
+    let scope = f.scope("owner").await;
+    let original = scope.owner.as_ref().unwrap().observed.clone();
+    let gate = Arc::new((Mutex::new(false), Condvar::new())); let release = Release(gate.clone());
+    let (entered_tx, entered_rx) = oneshot::channel(); let entered = Mutex::new(Some(entered_tx));
+    f.directories().checkpoint(Some(Arc::new(move |phase| {
+        if phase != "writing" { return; }
+        let _ = entered.lock().unwrap().take().unwrap().send(());
+        let mut ready = gate.0.lock().unwrap();
+        while !*ready { ready = gate.1.wait(ready).unwrap(); }
+    })));
+    let directories = f.directories(); let config = f.core.host().config().clone();
+    let mut writing = tokio::spawn(async move { directories.prepare(&config, "owner", &scope).await });
+    tokio::time::timeout(Duration::from_secs(5), entered_rx).await.unwrap().unwrap();
+    let accounts = f.core.accounts().clone();
+    let mut removal = tokio::spawn(async move { accounts.remove("owner").await });
+    tokio::time::timeout(Duration::from_secs(5), original.revocation().cancelled()).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(25), &mut removal).await.is_err());
+    assert!(tokio::time::timeout(Duration::from_millis(25), &mut writing).await.is_err());
+    release.release();
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(5), writing).await.unwrap().unwrap(), Err(HostError::ShuttingDown)));
+    tokio::time::timeout(Duration::from_secs(5), removal).await.unwrap().unwrap().unwrap();
+    assert!(f.core.accounts().get("owner").await.unwrap().is_none());
+    assert!(!f.core.host().config().state_dir("owner").parent().unwrap().exists());
+    assert!(f.starts().is_empty());
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revocation_cancels_directory_slot_wait_so_supervisor_can_stop_without_waiting_other_writers() {
+    let f = Fixture::new().await;
+    f.core.host().enable_plugin("fixture").await.unwrap();
+    let gate = Arc::new((Mutex::new(false), Condvar::new())); let release = Release(gate.clone());
+    let entered = Arc::new(AtomicUsize::new(0)); let count = entered.clone();
+    f.directories().checkpoint(Some(Arc::new(move |phase| {
+        if phase != "writing" { return; }
+        count.fetch_add(1, Ordering::SeqCst);
+        let mut ready = gate.0.lock().unwrap(); while !*ready { ready = gate.1.wait(ready).unwrap(); }
+    })));
+    let mut occupants = Vec::new();
+    for number in 0..4 {
+        let name = format!("held-{number}"); let scope = f.scope(&name).await;
+        let directories = f.directories(); let config = f.core.host().config().clone();
+        occupants.push(tokio::spawn(async move { directories.prepare(&config, &name, &scope).await }));
+    }
+    until(|| entered.load(Ordering::SeqCst) == 4).await;
+    let (waiting_tx, waiting_rx) = oneshot::channel(); let waiting = Mutex::new(Some(waiting_tx));
+    f.directories().checkpoint(Some(Arc::new(move |phase| {
+        if phase == "waiting" { let _ = waiting.lock().unwrap().take().unwrap().send(()); }
+    })));
+    let host = f.core.host().clone();
+    let start = tokio::spawn(async move { host.start_account("fixture", "owner", AccountSpec::default()).await });
+    tokio::time::timeout(Duration::from_secs(5), waiting_rx).await.unwrap().unwrap();
+    let accounts = f.core.accounts().clone();
+    let mut removal = tokio::spawn(async move { accounts.remove("owner").await });
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(5), start).await.unwrap().unwrap(), Err(HostError::ShuttingDown)));
+    // Other owners' live directory writers may conservatively prevent catalog
+    // completion, but the revoked start must no longer strand stop_on_host.
+    assert!(tokio::time::timeout(Duration::from_secs(5), &mut removal).await.unwrap().unwrap().is_err());
+    tokio::time::timeout(Duration::from_secs(5), f.core.host().stop_account("fixture", "owner")).await.unwrap().unwrap();
+    assert_eq!(f.core.managed_sources().catalog().view().writers(), 4);
+    assert!(f.starts().is_empty());
+    release.release();
+    for occupant in occupants { tokio::time::timeout(Duration::from_secs(5), occupant).await.unwrap().unwrap().unwrap(); }
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_after_starting_before_frame_returns_stopped_without_exposing_a_start() {
+    let f = Fixture::new().await;
+    let original = f.scope("owner").await.owner.as_ref().unwrap().observed.clone();
+    f.directories().checkpoint(Some(Arc::new(move |phase| {
+        if phase == "before_frame" { original.revocation().cancel(); }
+    })));
+    assert!(matches!(f.core.host().start_account("fixture", "owner", AccountSpec::default()).await,
+        Err(HostError::ShuttingDown)));
+    let record = f.core.host().account("fixture", "owner").unwrap();
+    assert_eq!(record.phase, AccountPhase::Stopped);
+    assert_eq!(record.detail.as_deref(), Some("Account start was cancelled; start the account again"));
+    assert!(record.wanted);
+    assert!(f.core.host().running_account_token("fixture", "owner").is_none());
+    assert!(f.starts().is_empty());
+    f.core.host().stop_account("fixture", "owner").await.unwrap(); // No stranded Starting/Busy.
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_removal_rearm_never_heals_future_replay_without_a_fresh_explicit_start() {
+    let f = Fixture::new().await;
+    f.core.accounts().start("owner").await.unwrap();
+    until(|| f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Running)).await;
+    let old = f.scope("owner").await.owner.as_ref().unwrap().observed.clone();
+    // This malformed/unproved DB metadata is negative removal evidence only.
+    // It cannot manufacture a stage claim, payload reader or release permission.
+    f.core.open_db().unwrap().conn().execute("INSERT INTO managed_source(stage_id,client_id,account_id,
+        plugin_id,account_created_at,chat_id,path,fingerprint_json,intent_json,created_at,updated_at)
+        VALUES('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','owner','fixture',
+        ?1,'chat',?2,'{}','{}',0,0)", rusqlite::params![old.owner().created_at,
+        f.core.host().config().state_dir("owner").join("unproved").to_str()]).unwrap();
+    assert!(matches!(f.core.accounts().remove("owner").await, Err(crate::runtime::RuntimeError::SourceInUse)));
+    assert!(old.is_revoked());
+    f.core.host().restart_plugin("fixture").await.unwrap();
+    until(|| f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Stopped
+        && info.detail.as_deref() == Some("Account start was cancelled; start the account again"))).await;
+    assert_eq!(f.starts(), vec!["owner"]);
+    f.core.accounts().start("owner").await.unwrap();
+    until(|| f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Running)).await;
+    assert_eq!(f.starts(), vec!["owner", "owner"]);
+    assert!(old.is_revoked());
     f.close().await;
 }

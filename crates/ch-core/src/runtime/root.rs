@@ -171,7 +171,7 @@ impl Core {
         managed_sources.initialize_catalog().await;
         #[cfg(target_os = "linux")]
         let host = HostHandle::for_core(host_config, sink.clone(), Arc::clone(&config.secrets),
-            managed_sources.stage_mutations(), managed_sources.directory_jobs());
+            managed_sources.stage_mutations(), managed_sources.directory_jobs(), managed_sources.lookups());
         #[cfg(not(target_os = "linux"))]
         let host = HostHandle::new(host_config, sink.clone(), Arc::clone(&config.secrets));
         let host_rx = host.subscribe();
@@ -180,6 +180,8 @@ impl Core {
             managed_sources.stage_mutations(),managed_sources.owner_barriers(),managed_sources.owner_jobs());
         #[cfg(not(target_os = "linux"))]
         let accounts = Accounts::new(accounts_db, host.clone(), config.secrets, bus.clone());
+        #[cfg(target_os = "linux")]
+        host.bind_storage(accounts.host_storage_view()?)?;
         accounts.sync_plugins().await?;
 
         let mut tasks = vec![tokio::spawn(forward_host(

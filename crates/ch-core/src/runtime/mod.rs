@@ -25,6 +25,8 @@
 //! [`Applied`]: crate::ingest::Applied
 
 mod accounts;
+#[cfg(target_os = "linux")]
+pub(crate) use accounts::HostStorageView;
 mod bus;
 mod error;
 mod managed_proof;

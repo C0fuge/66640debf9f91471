@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 mod storage;
 pub use storage::{AccountStorageBinding, AccountStorageObservation};
+#[cfg(target_os = "linux")]
+pub(crate) use storage::HostStorageView;
 
 use ch_db::types::{AccountRow, PluginRow};
 use ch_db::{Db, now_millis};

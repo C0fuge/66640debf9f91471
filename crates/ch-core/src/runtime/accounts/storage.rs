@@ -8,11 +8,60 @@ use std::path::{Path, PathBuf};
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 
+// Only Accounts can construct this actual-issuer view. A Host retains Weak, not
+// its Accounts->Host backreference, and upgrades only during bounded local work.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct HostStorageView(std::sync::Weak<super::Inner>);
+
+#[cfg(target_os = "linux")]
+impl HostStorageView {
+    pub(crate) fn same_issuer(&self, other: &Self) -> bool { std::sync::Weak::ptr_eq(&self.0, &other.0) }
+    pub(crate) fn belongs_to(&self, host: &crate::host::HostHandle) -> bool {
+        self.0.upgrade().is_some_and(|inner| inner.stage_mutations.is_some()
+            && inner.owner_jobs.is_some() && inner.host.same_instance(host))
+    }
+    pub(crate) fn current(&self, observed: &AccountStorageObservation) -> bool {
+        self.0.upgrade().is_some_and(|inner| Accounts(inner).owns_storage_observation(observed))
+    }
+    // Called only on the actual counted directory metadata worker. No read
+    // lease is acquired, so a removal writer can never strand this capture.
+    pub(crate) fn capture(&self, plugin: &str, account: &str) -> Result<AccountStorageObservation> {
+        let inner = self.0.upgrade().ok_or_else(|| unknown(account))?;
+        let db = inner.db.lock().unwrap_or_else(PoisonError::into_inner);
+        let observed = observation_at(&inner, &db, account)?;
+        if observed.owner.plugin_id != plugin || observed.is_revoked()
+            || !exclusive(db.conn(), inner.host.config(), &observed.owner, &observed.root)?
+            || !inner.storage.current(&observed.root, &observed.gate)
+        { return Err(unknown(account)); }
+        Ok(observed)
+    }
+    pub(crate) async fn reacquire(&self, observed: &AccountStorageObservation, stopped: &CancellationToken)
+        -> Result<AccountStorageBinding> {
+        let inner = self.0.upgrade().ok_or_else(|| unknown(&observed.owner.account_id))?;
+        Accounts(inner).binding_for_observation_until(observed, stopped).await
+    }
+}
+
+fn observation_at(inner: &super::Inner, db: &ch_db::Db, account: &str) -> Result<AccountStorageObservation> {
+    #[cfg(test)] {
+        let hook = inner.storage.2.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(hook) = hook { hook(); }
+    }
+    let owner = ch_db::get_account(db.conn(), account)?.ok_or_else(|| unknown(account))?;
+    let root = directory(inner.host.config(), account);
+    let gate = inner.storage.get(&root);
+    Ok(AccountStorageObservation { owner, root, gate })
+}
+
 #[derive(Default)]
 pub(super) struct Gates(Mutex<HashMap<PathBuf, Arc<Gate>>>,
     #[cfg(test)] Mutex<Option<Arc<CaptureHook>>>,
     // Separate one-shot hook inside an actual metadata worker. The ABA hook
     // above deliberately remains outside the DB mutex so removal can proceed.
+    #[cfg(test)] Mutex<Option<Arc<CaptureHook>>>,
+    // One-shot observation of the actual exact-Gate read wait, independent
+    // from the original capture/metadata callback barriers above.
     #[cfg(test)] Mutex<Option<Arc<CaptureHook>>>);
 #[cfg(test)]
 type CaptureHook = dyn Fn() + Send + Sync;
@@ -215,6 +264,15 @@ impl AccountStorageBinding {
 }
 
 impl Accounts {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn host_capture_checkpoint(&self, hook: Arc<CaptureHook>) {
+        *self.0.storage.2.lock().unwrap() = Some(hook);
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn host_storage_view(&self) -> Result<HostStorageView> {
+        if self.0.stage_mutations.is_none() || self.0.owner_jobs.is_none() { return Err(unknown("")); }
+        Ok(HostStorageView(Arc::downgrade(&self.0)))
+    }
     #[cfg(target_os = "linux")]
     pub(super) fn removal_observation(&self,row:&AccountRow,root:&Path,gate:&Arc<Gate>) -> Result<AccountStorageObservation> {
         if root!=directory(self.0.host.config(),&row.account_id)
@@ -242,13 +300,26 @@ impl Accounts {
     /// Acquire a bounded-use lease for exactly the originally observed Gate.
     /// No matching timestamp or replacement generation can substitute for it.
     pub async fn storage_binding_for_observation(&self, observed: &AccountStorageObservation) -> Result<AccountStorageBinding> {
+        self.binding_for_observation_until(observed, &CancellationToken::new()).await
+    }
+
+    async fn binding_for_observation_until(&self, observed: &AccountStorageObservation, stopped: &CancellationToken)
+        -> Result<AccountStorageBinding> {
+        if stopped.is_cancelled() { return Err(unknown(&observed.owner.account_id)); }
         if observed.is_revoked() || !self.0.storage.current(&observed.root, &observed.gate) {
             return Err(unknown(&observed.owner.account_id));
         }
         let guard = tokio::select! {
             biased;
+            _ = stopped.cancelled() => return Err(unknown(&observed.owner.account_id)),
             _ = observed.gate.token.cancelled() => return Err(unknown(&observed.owner.account_id)),
-            guard = observed.gate.drain.clone().read_owned() => Arc::new(guard),
+            guard = async {
+                #[cfg(test)] {
+                    let hook = self.0.storage.3.lock().unwrap_or_else(PoisonError::into_inner).take();
+                    if let Some(hook) = hook { hook(); }
+                }
+                observed.gate.drain.clone().read_owned().await
+            } => Arc::new(guard),
         };
         let owner = observed.owner.clone();
         let root = observed.root.clone();
@@ -262,7 +333,7 @@ impl Accounts {
             }
             Ok(())
         }).await?;
-        if observed.is_revoked() || !self.0.storage.current(&observed.root, &observed.gate) {
+        if stopped.is_cancelled() || observed.is_revoked() || !self.0.storage.current(&observed.root, &observed.gate) {
             return Err(unknown(&observed.owner.account_id));
         }
         Ok(AccountStorageBinding { owner:observed.owner.clone(), root:observed.root.clone(), gate:observed.gate.clone(), guard,
@@ -333,14 +404,8 @@ impl Accounts {
         let id = account_id.to_owned();
         let inner = self.0.clone();
         let (owner, root, gate) = self.db(move |db| {
-            #[cfg(test)] {
-                let hook = inner.storage.2.lock().unwrap_or_else(PoisonError::into_inner).take();
-                if let Some(hook) = hook { hook(); }
-            }
-            let owner = ch_db::get_account(db.conn(), &id)?.ok_or_else(|| unknown(&id))?;
-            let root = directory(inner.host.config(), &id);
-            let gate = inner.storage.get(&root);
-            Ok((owner, root, gate))
+            let observed = observation_at(&inner, db, &id)?;
+            Ok((observed.owner, observed.root, observed.gate))
         }).await?;
         #[cfg(test)] {
             let hook = self.0.storage.1.lock().unwrap_or_else(PoisonError::into_inner).clone();
@@ -451,6 +516,70 @@ mod capture_tests {
     use crate::{host::MemorySecretStore, runtime::{Core, CoreConfig, NewAccount}};
     use std::sync::Condvar;
     use tokio::sync::Notify;
+
+    #[cfg(target_os = "linux")]
+    async fn directory_core() -> (tempfile::TempDir, Core) {
+        let temp = tempfile::tempdir().unwrap(); let root = temp.path().join("data");
+        let plugin = root.join("plugins/fixture"); std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("peer.py"), include_bytes!("../../../tests/fixtures/account_directories.py")).unwrap();
+        std::fs::write(plugin.join("plugin.json"), serde_json::json!({"id":"fixture","name":"Fixture",
+            "version":"0.0.1","api_version":"1.2.0","entry":["python3","-I","./peer.py"],
+            "brand_color":"#123456","multi_account":true,"auth_methods":["none"]}).to_string()).unwrap();
+        let mut config = CoreConfig::new(&root, Arc::new(MemorySecretStore::new()));
+        config.autostart = false; config.host = HostConfig::fast(&root, 50);
+        for key in ["HOME", "CH_DATA_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
+            config.host.env.insert(key.into(), temp.path().join(key).to_string_lossy().into_owned());
+        }
+        config.host.env.insert("CH_TEST_ACCOUNT_STARTS".into(), temp.path().join("starts").to_string_lossy().into_owned());
+        let core = Core::open(config).await.unwrap();
+        core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+        (temp, core)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exact_host_read_wait_is_cancelled_before_the_removal_writer_is_released() {
+        for close_core in [false, true] {
+            let (_temp, core) = directory_core().await;
+            let root = directory(core.host().config(), "owner");
+            let gate = core.accounts().0.storage.get(&root);
+            let writer = gate.drain.write().await;
+            let (send, recv) = tokio::sync::oneshot::channel(); let send = Mutex::new(Some(send));
+            *core.accounts().0.storage.3.lock().unwrap() = Some(Arc::new(move || {
+                let _ = send.lock().unwrap().take().unwrap().send(());
+            }));
+            let host = core.host().clone();
+            let start = tokio::spawn(async move { host.start_account("fixture", "owner", crate::host::AccountSpec::default()).await });
+            tokio::time::timeout(std::time::Duration::from_secs(5), recv).await.unwrap().unwrap();
+            if close_core { core.managed_sources().close(); } else { gate.token.cancel(); }
+            // Host has to process this while the SAME original writer is still
+            // held, rather than wait for a guard/removal deadlock to disappear.
+            tokio::time::timeout(std::time::Duration::from_secs(5), core.host().stop_account("fixture", "owner")).await.unwrap().unwrap();
+            assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5), start).await.unwrap().unwrap(),
+                Err(crate::host::HostError::ShuttingDown)));
+            assert!(!root.exists());
+            assert_eq!(core.managed_sources().catalog().view().writers(), 0);
+            drop(writer); core.shutdown().await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn host_weak_view_cannot_bind_a_standalone_or_second_same_root_host() {
+        let (_temp, core) = directory_core().await;
+        let view = core.accounts().host_storage_view().unwrap();
+        assert!(view.belongs_to(core.host()));
+        assert!(core.host().bind_storage(view.clone()).is_err()); // Already once-bound.
+        let foreign = crate::host::HostHandle::for_core(core.host().config().clone(), Arc::new(crate::host::NullSink),
+            Arc::new(MemorySecretStore::new()), core.stage_mutations(), core.managed_sources().directory_jobs(),
+            core.managed_sources().lookups());
+        assert!(!view.belongs_to(&foreign));
+        assert!(foreign.bind_storage(view).is_err());
+        let standalone = Accounts::new(core.open_db().unwrap(), core.host().clone(), Arc::new(MemorySecretStore::new()),
+            crate::runtime::ChangeBus::new(8));
+        assert!(standalone.host_storage_view().is_err());
+        core.shutdown().await;
+    }
 
     #[tokio::test(flavor="multi_thread", worker_threads=3)]
     async fn dropped_history_capture_keeps_drain_pending_until_actual_metadata_worker_settles() {

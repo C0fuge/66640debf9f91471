@@ -18,6 +18,7 @@ use super::state::{
     AccountInfo, AccountSpec, PluginInfo, PluginSnapshot, PluginState, StateChange,
 };
 use super::supervisor::{Command, PluginEntry, Registry, Supervisor};
+use super::start_scope::StartScope;
 
 /// Lifecycle methods only the host sends (§4); `call` refuses them.
 const LIFECYCLE: &[&str] = &[
@@ -69,6 +70,23 @@ impl FileAdmissionScope {
 }
 
 impl HostHandle {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn same_instance(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bind_storage(&self, issuer: crate::runtime::HostStorageView) -> Result<(), HostError> {
+        self.0.directories.as_ref().ok_or(HostError::ShuttingDown)?.bind(self, issuer)
+    }
+
+    pub(super) async fn capture_start(&self, plugin: &str, account: &str) -> Result<StartScope, HostError> {
+        #[cfg(target_os = "linux")]
+        if let Some(directories) = &self.0.directories { return directories.capture(plugin, account).await; }
+        let _ = (plugin, account);
+        Ok(StartScope::unbound())
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn test_registry(&self) -> Arc<Registry> { self.0.registry.clone() }
     #[cfg(target_os = "linux")]
     pub(crate) fn file_admission_scope(
         &self, plugin: &str, account: &str, params: &Value, bytes: u64,
@@ -129,10 +147,11 @@ impl HostHandle {
     // supply its own negative catalog hook and counted directory-work lane.
     #[cfg(target_os = "linux")]
     pub(crate) fn for_core(config: HostConfig, sink: Arc<dyn EventSink>, secrets: Arc<dyn SecretStore>,
-        mutations: crate::managed_stage::StageMutations, jobs: Arc<crate::managed_sources::OwnedJobs>) -> Self {
+        mutations: crate::managed_stage::StageMutations, jobs: Arc<crate::managed_sources::OwnedJobs>,
+        captures: Arc<crate::managed_sources::OwnedJobs>) -> Self {
         let mut host = Self::new(config, sink, secrets);
         Arc::get_mut(&mut host.0).expect("new Host is uniquely owned").directories =
-            Some(super::directories::AccountDirectories::new(mutations, jobs));
+            Some(super::directories::AccountDirectories::new(mutations, jobs, captures));
         host
     }
 
@@ -324,11 +343,13 @@ impl HostHandle {
         account_id: &str,
         spec: AccountSpec,
     ) -> Result<(), HostError> {
+        let scope = self.capture_start(plugin_id, account_id).await?;
         let cmd = self.ensure_supervisor(plugin_id)?;
         let (tx, rx) = oneshot::channel();
         cmd.send(Command::StartAccount {
             account_id: account_id.to_owned(),
             spec,
+            scope,
             reply: tx,
         })
         .await
