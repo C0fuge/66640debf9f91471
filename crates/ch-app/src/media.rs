@@ -234,6 +234,27 @@ impl App {
 }
 
 struct Worker { core:Arc<Core>, db:Arc<Mutex<Db>>, closed:Arc<AtomicBool>,downloads:Arc<Semaphore>,provider:Option<Arc<dyn SaveDialog>> }
+
+// Retain negative accounting through every actual cache descriptor, including
+// the save chooser and an owned blocking copy after its async waiter is lost.
+// The scope is last so the file and its anchored directories close first. It
+// provides no pathname, historical-reader closure, or deletion permission.
+struct CacheRead {
+    file: CacheFile,
+    #[cfg(target_os="linux")]
+    _read_scope: ch_core::managed_stage::StageReadScope,
+}
+impl CacheRead {
+    fn open(core:&Core, root:&std::path::Path, path:&std::path::Path)
+        -> std::result::Result<Self,CacheFileError> {
+        #[cfg(target_os="linux")]
+        let read_scope=core.stage_mutations().read_scope().map_err(|_|CacheFileError::Cancelled)?;
+        #[cfg(not(target_os="linux"))]
+        let _=core;
+        let file=CacheFile::open(root,path)?;
+        Ok(Self {file,#[cfg(target_os="linux")] _read_scope:read_scope})
+    }
+}
 impl Worker {
     async fn check(&self,job:&Arc<Job>)->Result<Target> { let db=self.db.clone();let j=job.clone();let closed=self.closed.clone();crate::projection::blocking(move||{if closed.load(Ordering::Acquire){return Err(Failure::Unavailable);}MediaJobs::checked(&lock(&db),&j)}).await }
     async fn run(self,job:Arc<Job>) {
@@ -257,9 +278,10 @@ impl Worker {
             job.finish(if cancelled{State::Cancelled}else if definite{State::Failed}else{State::Unknown},if cancelled{None}else if definite{Some(JobError::new("unavailable","unavailable"))}else{Some(JobError::unknown())},true);return;}};
         let result=match serde_json::from_value::<MediaDownloadResult>(raw){Ok(r)=>r,Err(_)=>{job.finish(State::Unknown,Some(JobError::unknown()),true);return;}};
         let root=self.core.host().config().cache_dir(&s.thread.account_id);let path=PathBuf::from(&result.path);
-        let checked=tokio::task::spawn_blocking(move||CacheFile::open(&root,&path)).await;
+        let core=self.core.clone();
+        let checked=tokio::task::spawn_blocking(move||CacheRead::open(&core,&root,&path)).await;
         let file=match checked {Ok(Ok(f))=>f,Ok(Err(e))=>{job.finish(State::Failed,Some(cache_error(e)),true);return;},Err(_)=>{job.finish(State::Unknown,Some(JobError::unknown()),true);return;}};
-        let bytes=file.metadata().byte_len;
+        let bytes=file.file.metadata().byte_len;
         if job.snapshot().done_bytes.as_deref().and_then(|v|v.parse::<u64>().ok()).is_some_and(|done|done>bytes) {
             job.finish(State::Failed,Some(JobError::new("conflict","changed")),true);return;
         }
@@ -274,8 +296,9 @@ impl Worker {
         let Some(path)=target.media.path else {job.finish(State::Failed,Some(JobError::new("not_found","notCached")),true);return;};
         let name=suggested_name(target.media.filename.as_deref());
         let root=self.core.host().config().cache_dir(&target.owner.account_id);
-        let opened=tokio::task::spawn_blocking(move||CacheFile::open(&root,&PathBuf::from(path))).await;
-        let mut source=match opened {Ok(Ok(f))=>f,Ok(Err(e))=>{job.finish(State::Failed,Some(cache_error(e)),true);return;},Err(_)=>{job.finish(State::Failed,Some(JobError::new("internal","internal")),true);return;}};
+        let core=self.core.clone();
+        let opened=tokio::task::spawn_blocking(move||CacheRead::open(&core,&root,&PathBuf::from(path))).await;
+        let source=match opened {Ok(Ok(f))=>f,Ok(Err(e))=>{job.finish(State::Failed,Some(cache_error(e)),true);return;},Err(_)=>{job.finish(State::Failed,Some(JobError::new("internal","internal")),true);return;}};
         if job.cancel.is_cancelled() {job.finish(State::Cancelled,None,true);return;}
         let Some(provider)=self.provider else {job.finish(State::Failed,Some(JobError::new("unsupported","unavailable")),true);return;};
         if !job.set_state(State::Choosing){job.finish(State::Cancelled,None,true);return;}job.notify();
@@ -292,9 +315,19 @@ impl Worker {
         let destination=match answer {Ok(Some(p))=>p,Ok(None)=>{job.finish(State::Cancelled,None,true);return;},Err(_)=>{job.finish(State::Failed,Some(JobError::new("unavailable","unavailable")),true);return;}};
         if !job.set_state(State::Running){job.finish(State::Cancelled,None,true);return;}job.notify();
         let j=job.clone();let closed=self.closed;let weak=job.manager.clone();
+        #[cfg(target_os="linux")]
+        let mutations=self.core.stage_mutations();
         let copied=tokio::task::spawn_blocking(move||{
+            // Capture the entire wrapper, not just its file field: precise
+            // closure capture must not leave its scope in the async waiter.
+            let mut source=source;
+            // A native destination may be anywhere, including the configured
+            // accounts tree. Invalidate before the first destination probe and
+            // retain through actual destination handles closing in publish().
+            #[cfg(target_os="linux")]
+            let _mutation=mutations.begin().map_err(|_|SaveFileError::Unavailable)?;
             let cancel_job=j.clone();let progress_job=j.clone();let commit_job=j.clone();
-            save_file::publish(&mut source,&destination,MAX_CACHE_FILE_BYTES,
+            save_file::publish(&mut source.file,&destination,MAX_CACHE_FILE_BYTES,
                 move||cancel_job.cancel.is_cancelled()||closed.load(Ordering::Acquire),
                 move|done,total|{let mut s=lock(&progress_job.snapshot);s.done_bytes=Some(done.to_string());s.total_bytes=Some(total.to_string());let account=s.thread.account_id.clone();drop(s);if let Some(m)=progress_job.manager.upgrade(){lock(&m.ledger).progress_dirty.insert(account);}},
                 move||{let Some(manager)=weak.upgrade()else{return false;};commit_job.begin_commit(&manager)})
@@ -308,7 +341,7 @@ impl Worker {
         }
     }
 }
-fn cache_error(error:CacheFileError)->JobError { match error {CacheFileError::TooLarge=>JobError::new("conflict","tooLarge"),CacheFileError::Changed=>JobError::new("conflict","changed"),CacheFileError::Unsupported=>JobError::new("unsupported","unsafeCache"),_=>JobError::new("not_found","unsafeCache")} }
+fn cache_error(error:CacheFileError)->JobError { match error {CacheFileError::TooLarge=>JobError::new("conflict","tooLarge"),CacheFileError::Changed=>JobError::new("conflict","changed"),CacheFileError::Unsupported=>JobError::new("unsupported","unsafeCache"),CacheFileError::Cancelled=>JobError::new("unavailable","unavailable"),_=>JobError::new("not_found","unsafeCache")} }
 fn suggested_name(name:Option<&str>)->String {
     let clean:String=name.unwrap_or("").chars().filter(|c|!c.is_control()&&!matches!(*c,'/'|'\\'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')).take(100).collect();
     let clean=clean.trim_matches(|c:char|c=='.'||c.is_whitespace());if clean.is_empty(){"attachment".into()}else{clean.into()}

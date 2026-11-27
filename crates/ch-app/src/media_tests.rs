@@ -209,6 +209,62 @@ async fn cached_save_works_offline_without_download_and_never_overwrites() {
     assert_eq!(std::fs::metadata(&dest).unwrap().ino(),original.ino());app.shutdown().await;
 }
 
+#[cfg(target_os="linux")]
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_cache_descriptor_survives_waiter_loss_and_closed_core_rejects_new_opens() {
+    use std::{io::Write,os::unix::fs::MetadataExt};
+    struct PausedWriter {
+        entered:Option<tokio::sync::oneshot::Sender<()>>,
+        resume:std::sync::mpsc::Receiver<()>,
+        bytes:Vec<u8>,
+    }
+    impl Write for PausedWriter {
+        fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {
+            if let Some(entered)=self.entered.take() {
+                let _=entered.send(());
+                self.resume.recv().map_err(std::io::Error::other)?;
+            }
+            self.bytes.extend_from_slice(bytes);Ok(bytes.len())
+        }
+        fn flush(&mut self)->std::io::Result<()> {Ok(())}
+    }
+    let temp=tempfile::tempdir().unwrap();
+    let root=temp.path().join("cache");std::fs::create_dir(&root).unwrap();
+    let path=root.join("held.bin");std::fs::write(&path,b"isolated held cache bytes").unwrap();
+    let meta=std::fs::metadata(&path).unwrap();
+    let open_handles=||std::fs::read_dir("/proc/self/fd").unwrap().filter_map(|entry|
+        std::fs::metadata(entry.ok()?.path()).ok())
+        .filter(|m|m.dev()==meta.dev()&&m.ino()==meta.ino()).count();
+    let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new()));
+    config.autostart=false;
+    let core=Core::open(config).await.unwrap();
+    let source=CacheRead::open(&core,&root,&path).unwrap();
+    assert_eq!(open_handles(),1);
+    let (entered,ready)=tokio::sync::oneshot::channel();
+    let (resume,paused)=std::sync::mpsc::channel();
+    let (finished,done)=tokio::sync::oneshot::channel();
+    let caller=tokio::spawn(async move {
+        tokio::task::spawn_blocking(move|| {
+            let mut source=source;
+            let mut writer=PausedWriter {entered:Some(entered),resume:paused,bytes:vec![]};
+            let result=source.file.copy_to(&mut writer,MAX_CACHE_FILE_BYTES,||false);
+            drop(source);
+            let _=finished.send((result,writer.bytes));
+        }).await.unwrap();
+    });
+    tokio::time::timeout(Duration::from_secs(5),ready).await.unwrap().unwrap();
+    caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
+    core.shutdown().await;
+    assert_eq!(open_handles(),1);
+    assert!(matches!(CacheRead::open(&core,&root,&path),Err(CacheFileError::Cancelled)));
+    assert!(matches!(CacheRead::open(&core,&root,&root.join("missing")),Err(CacheFileError::Cancelled)));
+    resume.send(()).unwrap();
+    let (copied,bytes)=tokio::time::timeout(Duration::from_secs(5),done).await.unwrap().unwrap();
+    assert_eq!(copied.unwrap(),25);
+    assert_eq!(bytes,b"isolated held cache bytes");
+    assert_eq!(open_handles(),0);
+}
+
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn changed_attachment_and_disabled_account_cannot_publish_late_selection() {
     for disabled in [false,true] {
