@@ -407,6 +407,52 @@ async fn actual_native_late_success_after_timeout_and_storage_rearm_settles_with
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_native_reply_certifies_already_sent_exact_ids_without_changing_read_delivery() {
+    let f=Fixture::with_mode(true,Some("early")).await;
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    f.outbox.start().unwrap();
+    tokio::time::timeout(Duration::from_secs(5),async {
+        while !f.temp.path().join("wire").exists() {tokio::time::sleep(Duration::from_millis(10)).await;}
+    }).await.unwrap();
+    // Model an independent event/refetch adopting the same remote identity before
+    // the actual native RPC reply. This is deliberately not a source certificate.
+    let db=f.core.open_db().unwrap();
+    let tx=db.transaction().unwrap();
+    let row=ch_db::get_outbox(&tx,item.id).unwrap().unwrap();
+    let mut echo=ch_db::get_message_by_id(&tx,row.echo_message_id.unwrap()).unwrap().unwrap();
+    echo.message_id="remote-file".into();echo.delivery=Some("read".into());
+    ch_db::update_message(&tx,&echo).unwrap();
+    ch_db::set_outbox_sent(&tx,item.id,&["remote-file".into()]).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(db.conn().query_row("SELECT count(*) FROM managed_dispatch WHERE state='positive'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    let before=ch_db::get_message_by_id(db.conn(),echo.id).unwrap().unwrap();
+    std::fs::write(f.temp.path().join("wire.release"),b"release actual reader").unwrap();
+    wait_attempt_state(&f,"positive").await;
+    assert_eq!(ch_db::get_message_by_id(db.conn(),echo.id).unwrap().unwrap(),before,
+        "the late certificate is proof-only and cannot rewrite content, timestamps or read delivery");
+    assert_eq!(f.count("managed_dispatch"),1);assert_eq!(f.count("message"),1);
+    assert_eq!(f.outbox.get(item.id).unwrap().state,OutboxState::Sent);
+    assert_eq!(std::fs::read_to_string(f.temp.path().join("wire.closed")).unwrap(),"True");
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_native_process_exit_never_certifies_helper_scope_or_replays_a_source() {
+    let f=Fixture::with_mode(true,Some("exit-after-read")).await;
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    f.outbox.start().unwrap();wait_native_state(&f,item.id,OutboxState::Failed).await;
+    wait_attempt_state(&f,"unknown").await;
+    let db=f.core.open_db().unwrap();
+    assert_eq!(db.conn().query_row("SELECT count(*) FROM managed_producer WHERE state='drained'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(db.conn().query_row("SELECT count(*) FROM managed_dispatch WHERE state='positive'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(f.count("managed_dispatch"),1);
+    assert!(f.stage().join("bytes").exists());
+    assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+    assert!(matches!(f.outbox.retry(item.id),Err(OutboxError::ManagedUnavailable)));
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn exact_legacy_receipt_precedes_spent_changed_bytes_and_missing_run() {
     let f=Fixture::new(false).await;
     let mut claim=f.claim().await;

@@ -175,8 +175,9 @@ impl ManagedProofWriter {
     }
 
     // Only a ticket reserved BEFORE exposure may enter after ordinary close.
-    // At most four metadata-only callbacks wait for DB slots without occupying
-    // blocking threads. The actual worker owns the ticket through COMMIT.
+    // Four attempts reserve at most eight timeout/final metadata callbacks, which
+    // wait for DB slots without occupying blocking threads. The actual worker
+    // owns its ticket and work slot through COMMIT.
     #[cfg(target_os="linux")]
     pub(crate) fn submit_native<R,E,F>(&self,ticket:NativeProofTicket,f:F)
         ->Result<SubmittedProof<R,E>,ManagedProofError>

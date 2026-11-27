@@ -1,4 +1,4 @@
-"""Synthetic real-host local-admission peer. Never reads an upload source."""
+"""Synthetic real-host peer; source reads require an explicit isolated test mode."""
 import json
 import os
 from pathlib import Path
@@ -28,12 +28,14 @@ def managed_file(frame):
         content = stream.read()
         wire.write_text(json.dumps({"request": frame, "exposure": exposure, "pid": os.getpid(),
                                     "sha256": hashlib.sha256(content).hexdigest()}))
+        if _source_mode == "exit-after-read":
+            os._exit(17)
         if _source_mode in ("late", "early", "never"):
             while not wire.with_suffix(".release").exists():
                 time.sleep(0.01)
     wire.with_suffix(".closed").write_text(str(stream.closed))
     message = {"id": "remote-file", "chat_id": params["chat_id"], "topic_id": params.get("topic_id"),
-               "direction": "out", "sent_at": 1700000000, "text": params.get("caption"),
+               "direction": "out", "sent_at": "2023-11-14T22:13:20.000Z", "text": params.get("caption"),
                "media": {"kind": params.get("kind", "document"), "bytes": len(content),
                          "filename": params.get("filename")}}
     if _source_mode == "wrong-topic":

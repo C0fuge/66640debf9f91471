@@ -120,9 +120,9 @@ fn pass(
         if !lanes.insert(row.chat_id.clone()) || active.contains_key(&row.client_id) {
             continue;
         }
-        // Managed dispatch is not implemented yet. Neither a missing in-memory
-        // gate nor a plain Outbox::new transport may turn a durable owned row
-        // into an ordinary send/reconciliation. Keep its lane parked, unchanged.
+        // Only the actual live Core source and native producer can dispatch a
+        // managed row. Missing live provenance or a plain Outbox::new transport
+        // keeps the lane parked; generic send/reconciliation remains barred.
         if super::managed_row(conn, &row)? {
             #[cfg(target_os="linux")]
             if row.state==outbox_state::QUEUED && online && count<inner.policy.max_parallel_per_account.max(1)
