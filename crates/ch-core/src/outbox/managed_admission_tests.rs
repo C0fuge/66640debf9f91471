@@ -1539,7 +1539,7 @@ async fn ready_discard_precheck_vetoes_dirty_null_source_extension_and_inode_ind
     // assert an actual alias or manufacture a positive closure/cleanup proof.
     let fingerprint=&proof.manifest().fingerprint;
     db.conn().execute("UPDATE managed_ref SET resolved_dev=?1,resolved_ino=?2 WHERE path=?3",
-        rusqlite::params![fingerprint.dev,fingerprint.ino,outside.to_str()]).unwrap();
+        rusqlite::params![i64::try_from(fingerprint.dev).unwrap(),i64::try_from(fingerprint.ino).unwrap(),outside.to_str()]).unwrap();
     assert!(matches!(f.core.stage_publisher().check_unadmitted_ready(&proof).await,
         Err(crate::managed_stage::Error::Busy)));
     db.conn().execute("UPDATE message SET media_json=NULL WHERE id=?1",[row]).unwrap();
