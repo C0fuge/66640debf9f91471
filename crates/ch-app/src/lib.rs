@@ -26,7 +26,7 @@ use ch_core::{
     history::{History, HistoryConfig},
     host::MemorySecretStore,
     outbox::{Outbox, OutboxPolicy},
-    runtime::{Core, CoreConfig, NewAccount, default_data_dir},
+    runtime::{Core, CoreConfig, DataDirectoryLock, NewAccount, default_data_dir},
     search::Search,
     secrets::KeyringSecretStore,
 };
@@ -61,7 +61,7 @@ pub struct App {
     changes: broadcast::Sender<Invalidation>,
     stop: CancellationToken,
     tasks: tokio::sync::Mutex<AppTasks>,
-    _lock: Arc<std::fs::File>,
+    _lock: Arc<DataDirectoryLock>,
     _demo: Option<Arc<TempDir>>,
 }
 
@@ -148,15 +148,7 @@ impl App {
     }
 
     async fn open(mut config: CoreConfig, demo: Option<TempDir>) -> Startup<Self> {
-        std::fs::create_dir_all(&config.data_dir)?;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(config.data_dir.join("app.lock"))?;
-        file.try_lock()
-            .map_err(|_| io::Error::other("cannot lock the application data directory"))?;
+        let directory_lock=DataDirectoryLock::acquire(&config.data_dir)?;
         config.autostart = false;
         let core = Arc::new(Core::open(config).await?);
         let c = core.clone();
@@ -183,7 +175,7 @@ impl App {
             changes.clone(),
             stop.clone(),
         ));
-        let directory = (Arc::new(file), demo.map(Arc::new));
+        let directory = (Arc::new(directory_lock), demo.map(Arc::new));
         let text_admissions = text_admission::Service::new(core.clone(), db.clone(), outbox.clone(), changes.clone(), directory.clone());
         let app = Self {
             core,

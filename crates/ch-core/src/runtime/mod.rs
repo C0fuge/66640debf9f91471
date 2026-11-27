@@ -30,6 +30,8 @@ pub(crate) use accounts::{LogicalOwnerObservation, LogicalOwners};
 pub(crate) use accounts::HostStorageView;
 mod bus;
 mod error;
+mod directory_lock;
+pub use directory_lock::DataDirectoryLock;
 mod managed_proof;
 mod root;
 mod sink;
