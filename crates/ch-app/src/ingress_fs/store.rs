@@ -312,6 +312,7 @@ pub(crate) struct LiveClaim {
 }
 enum ClaimHandles {
     Core(Box<ch_core::managed_stage::LiveStageClaim>),
+    #[cfg(test)]
     Local { held: File, _lease: File, used: bool },
 }
 
@@ -420,6 +421,7 @@ impl Stage {
         self.check_bytes(&f)?;
         Ok(f)
     }
+    #[cfg(test)]
     fn publish(
         &self,
         old: Option<&File>,
@@ -586,8 +588,11 @@ impl Verified {
                 stage.manifest = claim.manifest().clone();
                 Ok(LiveClaim { stage, handles: ClaimHandles::Core(Box::new(claim)) })
             }
+            #[cfg(not(test))]
+            Verification::Local { .. } => Err(Error::Integrity),
+            #[cfg(test)]
             Verification::Local { held, _lease } => {
-                // Legacy helper/discard code cannot construct Core claim authority.
+                // Local helper claims exist only in isolated filesystem tests.
                 intent.check()?;
                 let previous = stage.current()?;
                 let mut next = stage.manifest.clone();
@@ -606,8 +611,11 @@ impl LiveClaim {
     /// Transfer the actual unspent claim. No extra filesystem or posting check may
     /// hide the Core's lookup-first handling of an existing exact receipt.
     pub fn into_core(self)->Result<ch_core::managed_stage::LiveStageClaim> {
-        let ClaimHandles::Core(claim)=self.handles else {return Err(Error::Integrity);};
-        Ok(*claim)
+        match self.handles {
+            ClaimHandles::Core(claim)=>Ok(*claim),
+            #[cfg(test)]
+            ClaimHandles::Local {..}=>Err(Error::Integrity),
+        }
     }
 
     /// Callable once on the unique task that completed the actual durable transition.
