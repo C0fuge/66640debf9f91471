@@ -64,8 +64,9 @@ impl IngestSink {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn for_core(ingest: Ingest, bus: ChangeBus, owners: super::LogicalOwners) -> Self {
-        let mut sink=Self::new(ingest,bus);sink.owners=Some(owners);sink
+    pub(super) fn for_core(ingest: Ingest, bus: ChangeBus, owners: super::LogicalOwners,
+        references:super::reference_queue::ReferenceQueue) -> Self {
+        let mut sink=Self::new(ingest,bus);sink.owners=Some(owners);sink.references=references;sink
     }
 
     pub(crate) fn shared_ingest(&self) -> Arc<Mutex<Ingest>> {
@@ -206,11 +207,10 @@ impl crate::host::OwnedEventSink for IngestSink {
         let pid = plugin_id.to_owned();
         let name = event.name();
         let checked = origin.clone();
-        let domain = owners.clone(); let ingest = self.ingest.clone();let references=self.references.clone();
+        let domain = owners.clone(); let ingest = self.ingest.clone();
         #[cfg(test)]
         let checkpoint = owners.take_checkpoint("event");
         let r = match owners.run_metadata(&origin, move || {
-            let _references=references.read();
             #[cfg(test)]
             let _completion = checkpoint.map(|checkpoint| checkpoint.enter());
             let ingest = ingest.lock().unwrap_or_else(PoisonError::into_inner);
@@ -358,7 +358,7 @@ mod tests {
 
     #[cfg(target_os="linux")]
     #[tokio::test(flavor="multi_thread",worker_threads=2)]
-    async fn real_normal_and_full_metadata_jobs_share_the_queue_and_survive_waiter_loss() {
+    async fn real_ingest_full_and_account_metadata_jobs_share_queue_and_survive_waiter_loss() {
         use crate::{host::MemorySecretStore,runtime::{Core,CoreConfig}};
         use std::time::Duration;
         let temp=tempfile::tempdir().unwrap();
@@ -375,15 +375,17 @@ mod tests {
                 Ok(())
             }).await
         });
+        let c=core.clone();let accounts=tokio::spawn(async move {c.accounts().list().await});
         // Observe actual worker entry into the real lock wait, not a supplied
-        // result/closure flag. Both jobs are admitted before their callers drop.
+        // result/closure flag. All jobs are admitted before their callers drop.
         tokio::time::timeout(Duration::from_secs(5),async {
-            while queue.waiting_for_test()<2 {tokio::time::sleep(Duration::from_millis(5)).await;}
+            while queue.waiting_for_test()<3 {tokio::time::sleep(Duration::from_millis(5)).await;}
         }).await.unwrap();
         let db=core.open_db().unwrap();
         let count=||db.conn().query_row("SELECT count(*) FROM settings WHERE key IN ('queue-normal','queue-full')",[],|r|r.get::<_,i64>(0)).unwrap();
-        assert_eq!(count(),0);assert!(!normal.is_finished());assert!(!full.is_finished());
-        normal.abort();full.abort();assert!(normal.await.unwrap_err().is_cancelled());assert!(full.await.unwrap_err().is_cancelled());
+        assert_eq!(count(),0);assert!(!normal.is_finished());assert!(!full.is_finished());assert!(!accounts.is_finished());
+        normal.abort();full.abort();accounts.abort();
+        assert!(normal.await.unwrap_err().is_cancelled());assert!(full.await.unwrap_err().is_cancelled());assert!(accounts.await.unwrap_err().is_cancelled());
         assert_eq!(count(),0);drop(exclusive);
         tokio::time::timeout(Duration::from_secs(5),async {
             while count()!=2 {tokio::time::sleep(Duration::from_millis(5)).await;}

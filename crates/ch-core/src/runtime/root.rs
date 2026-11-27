@@ -192,9 +192,11 @@ impl Core {
         #[cfg(not(target_os="linux"))]
         {opts.path_filter = Some(account_path_filter(&host_config));}
         #[cfg(target_os = "linux")]
-        let logical_owners = super::LogicalOwners::new();
+        let references=super::reference_queue::ReferenceQueue::new();
         #[cfg(target_os = "linux")]
-        let sink = Arc::new(IngestSink::for_core(Ingest::new(ingest_db, opts), bus.clone(), logical_owners.clone()));
+        let logical_owners = super::LogicalOwners::for_core(references.clone());
+        #[cfg(target_os = "linux")]
+        let sink = Arc::new(IngestSink::for_core(Ingest::new(ingest_db, opts),bus.clone(),logical_owners.clone(),references));
         #[cfg(not(target_os = "linux"))]
         let sink = Arc::new(IngestSink::new(Ingest::new(ingest_db, opts), bus.clone()));
         let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(),proof_db,sink.reference_queue());

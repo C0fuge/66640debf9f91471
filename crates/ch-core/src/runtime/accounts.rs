@@ -197,11 +197,20 @@ impl Accounts {
         R: Send + 'static,
     {
         let db = Arc::clone(&self.0.db);
+        #[cfg(target_os="linux")]
+        {
+            self.0.logical_owners.run_unowned_metadata(move|| {
+                let g=db.lock().unwrap_or_else(PoisonError::into_inner);f(&g)
+            }).await.map_err(|_|RuntimeError::Task("account metadata work unavailable".into()))?
+        }
+        #[cfg(not(target_os="linux"))]
+        {
         tokio::task::spawn_blocking(move || {
             let g = db.lock().unwrap_or_else(PoisonError::into_inner);
             f(&g)
         })
         .await?
+        }
     }
 
     fn lock_for(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {

@@ -33,6 +33,8 @@ struct Inner {
     state: Mutex<State>,
     #[cfg(target_os = "linux")]
     jobs: Arc<crate::managed_sources::OwnedJobs>,
+    #[cfg(target_os="linux")]
+    references:crate::runtime::reference_queue::ReferenceQueue,
     #[cfg(all(test, target_os = "linux"))]
     checkpoint: Mutex<Option<MetadataCheckpointSlot>>,
 }
@@ -62,7 +64,15 @@ impl LogicalOwners {
     pub(crate) fn new() -> Self {
         Self(Arc::new(Inner { issuer: Arc::new(()), state: Mutex::default(),
             #[cfg(target_os = "linux")] jobs: crate::managed_sources::OwnedJobs::new(),
+            #[cfg(target_os="linux")] references:crate::runtime::reference_queue::ReferenceQueue::new(),
             #[cfg(all(test, target_os = "linux"))] checkpoint: Mutex::default() }))
+    }
+
+    #[cfg(target_os="linux")]
+    pub(in crate::runtime) fn for_core(references:crate::runtime::reference_queue::ReferenceQueue)->Self {
+        let mut owners=Self::new();
+        Arc::get_mut(&mut owners.0).expect("new owner domain is uniquely owned").references=references;
+        owners
     }
 
     fn issue(&self, row: &AccountRow) -> LogicalOwnerObservation {
@@ -120,7 +130,23 @@ impl LogicalOwners {
         -> Result<R, crate::managed_sources::Error>
     where R: Send + 'static, F: FnOnce() -> R + Send + 'static {
         if !self.current(origin) { return Err(crate::managed_sources::Error::Closed); }
-        self.0.jobs.run_wait_until(&origin.epoch, work).await
+        let references=self.0.references.clone();let domain=self.clone();let original=origin.clone();
+        self.0.jobs.run_wait_until(&origin.epoch,move|| {
+            let _references=references.read();
+            if !domain.current(&original) {return Err(crate::managed_sources::Error::Closed);}
+            Ok(work())
+        }).await?
+    }
+
+    #[cfg(target_os="linux")]
+    pub(super) async fn run_unowned_metadata<R,F>(&self,work:F)->Result<R,crate::managed_sources::Error>
+    where R:Send+'static,F:FnOnce()->R+Send+'static {
+        let references=self.0.references.clone();let stopped=self.0.jobs.stopped();let admission=stopped.clone();
+        self.0.jobs.run_wait_until(&admission,move|| {
+            let _references=references.read();
+            if stopped.is_cancelled() {return Err(crate::managed_sources::Error::Closed);}
+            Ok(work())
+        }).await?
     }
 
     #[cfg(target_os = "linux")]

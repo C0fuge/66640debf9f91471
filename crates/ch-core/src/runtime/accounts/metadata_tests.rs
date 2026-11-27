@@ -80,6 +80,24 @@ impl Fixture {
     }
 }
 
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_native_status_waits_for_metadata_queue_then_persists_and_acknowledges() {
+    let f=Fixture::new().await;
+    let queue=f.core.ingest().reference_queue();let exclusive=queue.exclusive_for_test().await;
+    f.pulse("queued", "queued-state");
+    tokio::time::timeout(Duration::from_secs(5),async {
+        while queue.waiting_for_test()==0 {tokio::time::sleep(Duration::from_millis(5)).await;}
+    }).await.unwrap();
+    let row=ch_db::get_account(f.core.open_db().unwrap().conn(),"owner").unwrap().unwrap();
+    assert_eq!(row.me_user_id.as_deref(),Some("old"));
+    assert!(!f.temp.path().join("ack-pulse-queued").exists());
+    drop(exclusive);f.wait_me("queued").await;
+    let row=f.core.accounts().get("owner").await.unwrap().unwrap();
+    assert_eq!(row.state_detail.as_deref(),Some("queued-state"));
+    assert!(f.temp.path().join("ack-pulse-queued").exists());
+    f.core.shutdown().await;
+}
+
 fn fixed_birth(core: &Core, birth: i64) {
     core.open_db().unwrap().conn().execute_batch(&format!("CREATE TRIGGER metadata_fixed_birth AFTER INSERT ON account
         WHEN NEW.account_id='owner' BEGIN UPDATE account SET created_at={birth} WHERE account_id='owner'; END;")).unwrap();
