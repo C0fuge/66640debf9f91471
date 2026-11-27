@@ -79,7 +79,7 @@ async fn old_start_success_error_process_end_and_timeout_cannot_adopt_newer_reco
         let mut changes = registry.changes.subscribe();
         finish(kind, &core, &registry, &conn, id);
         let _ = tokio::time::timeout(Duration::from_secs(5), result).await.unwrap().unwrap();
-        assert!(registry.lock().get("fixture").unwrap().accounts.get("owner").is_none());
+        assert!(!registry.lock().get("fixture").unwrap().accounts.contains_key("owner"));
         assert!(matches!(changes.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
         core.shutdown().await;
     }
