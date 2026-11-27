@@ -1,7 +1,7 @@
 //! Bounded negative restoration only. No replay, source reader or closure grant.
 use crate::{host::HostConfig, runtime::RuntimeError};
 use rusqlite::{Connection, params};
-use std::{collections::{HashMap, HashSet}, path::PathBuf};
+use std::{collections::{HashMap, HashSet}, path::{Path,PathBuf}};
 
 const SOURCES:usize=256;
 const ATTEMPTS:usize=1024;
@@ -40,7 +40,7 @@ pub(super) fn load(conn:&Connection,config:&HostConfig) -> Result<Recovered> {
             metadata+=stage.len()+account.len()+path.len();
             if metadata>1_048_576 { return Err(unavailable()); }
             if !crate::managed_stage::manifest::hex(&stage,32)
-                || PathBuf::from(path)!=config.upload_dir(&account).join(&stage).join("bytes")
+                || Path::new(&path)!=config.upload_dir(&account).join(&stage).join("bytes").as_path()
             { return Err(unavailable()); }
             let root=config.state_dir(&account).parent().ok_or_else(unavailable)?.to_owned();
             if roots.insert(stage,root).is_some() { return Err(unavailable()); }
