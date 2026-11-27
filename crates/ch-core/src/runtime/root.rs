@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use super::accounts::Accounts;
 use super::bus::{ChangeBus, CoreChange};
-use super::error::Result;
+use super::error::{Result, RuntimeError};
 use super::managed_proof::ManagedProofWriter;
 use super::sink::{IngestSink, account_path_filter};
 use crate::host::{HostConfig, HostHandle, SecretStore};
@@ -18,6 +18,23 @@ use crate::ingest::{Ingest, IngestOptions};
 
 /// The database file inside the data directory.
 pub const DB_FILE: &str = "hub.db";
+
+// Temporary fail-closed composition boundary, not restoration. No production
+// writer creates these records yet. A future coherent restore + Host guard must
+// replace this check together; no setting can bypass historical source protection.
+fn require_unmanaged_startup(db: &Db) -> Result<()> {
+    let protected: bool = db.conn().query_row(
+        "SELECT EXISTS(SELECT 1 FROM managed_source LIMIT 1)
+             OR EXISTS(SELECT 1 FROM managed_dispatch LIMIT 1)
+             OR EXISTS(SELECT 1 FROM managed_retirement LIMIT 1)",
+        [],
+        |row| row.get(0),
+    ).map_err(ch_db::Error::from)?;
+    if protected {
+        return Err(RuntimeError::ManagedLifetimeRecoveryUnavailable);
+    }
+    Ok(())
+}
 
 /// The data directory per ADR 0001: `CH_DATA_DIR`, else `$XDG_DATA_HOME/contact-hub-ng`, else
 /// `$HOME/.local/share/contact-hub-ng`. `None` when none of those is set.
@@ -122,11 +139,21 @@ impl Core {
 
         let p = db_path.clone();
         let (ingest_db, accounts_db, proof_db) =
-            tokio::task::spawn_blocking(move || -> ch_db::Result<(Db, Db, Db)> {
+            tokio::task::spawn_blocking(move || -> Result<(Db, Db, Option<Db>)> {
                 // The first open migrates; the second finds the schema current.
                 let a = Db::open(&p)?;
+                // Before constructing Host/Accounts or spawning any background task.
+                require_unmanaged_startup(&a)?;
                 let b = Db::open(&p)?;
-                let c = Db::open_full_sync(&p)?;
+                // Ordinary storage historically tolerates unavailable WAL. Do not
+                // turn the dormant proof seam into a new startup requirement.
+                let c = match Db::open_full_sync(&p) {
+                    Ok(db) => Some(db),
+                    Err(_) => {
+                        warn!("managed proof durability unavailable; durable transactions disabled");
+                        None
+                    }
+                };
                 Ok((a, b, c))
             })
             .await??;

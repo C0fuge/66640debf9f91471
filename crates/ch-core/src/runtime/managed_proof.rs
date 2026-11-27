@@ -14,6 +14,9 @@ const JOB_LIMIT: u32 = 4;
 /// callers must reconcile existing durable identity rather than replay an effect.
 #[derive(Debug, thiserror::Error)]
 pub enum ManagedProofError {
+    /// This Core could not establish the dedicated WAL/FULL connection.
+    #[error("managed proof durability is unavailable")]
+    DurabilityUnavailable,
     /// Shutdown has closed admission.
     #[error("managed proof writer is closed")]
     Closed,
@@ -71,7 +74,7 @@ struct State {
 
 struct Inner {
     ingest: Arc<Mutex<Ingest>>,
-    db: Mutex<Db>,
+    db: Mutex<Option<Db>>,
     slots: Arc<Semaphore>,
     state: Mutex<State>,
 }
@@ -81,13 +84,15 @@ struct Inner {
 /// Only Core constructs it using its configured database. Normal ingest remains
 /// NORMAL; this separate WAL/FULL connection is serialized by the same ingest
 /// mutex. Dropping an awaiting caller does not cancel an admitted blocking job.
+/// If the dedicated connection is unavailable, ordinary Core operation continues
+/// but every proof transaction refuses without a callback or NORMAL fallback.
 #[derive(Clone)]
 pub struct ManagedProofWriter {
     inner: Arc<Inner>,
 }
 
 impl ManagedProofWriter {
-    pub(super) fn new(ingest: Arc<Mutex<Ingest>>, db: Db) -> Self {
+    pub(super) fn new(ingest: Arc<Mutex<Ingest>>, db: Option<Db>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 ingest,
@@ -163,7 +168,8 @@ impl Inner {
         if !ingest.db().conn().is_autocommit() {
             return Err(ManagedProofError::ActiveTransaction);
         }
-        let db = self.db.lock().unwrap_or_else(PoisonError::into_inner);
+        let connection = self.db.lock().unwrap_or_else(PoisonError::into_inner);
+        let db = connection.as_ref().ok_or(ManagedProofError::DurabilityUnavailable)?;
         if !db.conn().is_autocommit() {
             return Err(ManagedProofError::ActiveTransaction);
         }

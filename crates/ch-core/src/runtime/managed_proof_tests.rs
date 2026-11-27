@@ -29,7 +29,7 @@ fn writer() -> (tempfile::TempDir, ManagedProofWriter) {
     let normal = Db::open(&path).unwrap();
     seed(&normal);
     let ingest = Arc::new(Mutex::new(Ingest::new(normal, IngestOptions::default())));
-    let proof = ManagedProofWriter::new(ingest, Db::open_full_sync(path).unwrap());
+    let proof = ManagedProofWriter::new(ingest, Some(Db::open_full_sync(path).unwrap()));
     (tmp, proof)
 }
 
@@ -143,12 +143,37 @@ async fn active_normal_transaction_and_changed_durability_refuse_before_callback
         assert!(matches!(result, Err(ManagedProofError::ActiveTransaction)));
         writer.inner.ingest.lock().unwrap().db().conn().execute_batch("ROLLBACK").unwrap();
     }
-    writer.inner.db.lock().unwrap().conn().pragma_update(None, "synchronous", "NORMAL").unwrap();
+    writer.inner.db.lock().unwrap().as_ref().unwrap().conn().pragma_update(None, "synchronous", "NORMAL").unwrap();
     let result = writer.with_transaction(|_| -> Result<(), ()> { panic!("must not run") }).await;
     assert!(matches!(result, Err(ManagedProofError::Database(_))));
     writer.drain().await.unwrap();
     assert!(Db::open_full_sync(":memory:").is_err());
     assert!(Db::open_full_sync("").is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unavailable_full_connection_does_not_disable_ordinary_ingest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let normal = Db::open(tmp.path().join("hub.db")).unwrap();
+    seed(&normal);
+    let ingest = Arc::new(Mutex::new(Ingest::new(normal, IngestOptions::default())));
+    // Only the private Core constructor can select the factory's unavailable
+    // result. There is no public injection, fallback connection, or lazy reopen.
+    let writer = ManagedProofWriter::new(Arc::clone(&ingest), None);
+    assert!(matches!(writer.with_transaction(|_| -> Result<(), ()> {
+        panic!("unavailable writer must never run callback")
+    }).await, Err(ManagedProofError::DurabilityUnavailable)));
+    {
+        let ingest = ingest.lock().unwrap();
+        let (_, echo) = ingest.apply_local_echo("owner", &LocalEcho {
+            chat_id: "chat".into(), client_id: CLIENT.into(), text: Some("ordinary".into()),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(ch_db::get_message_by_id(ingest.db().conn(), echo).unwrap().unwrap().text.as_deref(), Some("ordinary"));
+        assert_eq!(count(ingest.db().conn(), "managed_source"), 0);
+        assert_eq!(ingest.db().conn().query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+    writer.drain().await.unwrap();
 }
 
 struct Release(Arc<(Mutex<bool>, Condvar)>);
