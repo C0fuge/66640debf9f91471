@@ -93,6 +93,8 @@ impl Fixture {
     }
     fn assert_no_admission(&self) {
         for table in ["managed_source", "outbox", "message", "managed_ref"] { assert_eq!(self.count(table),0,"{table}"); }
+        assert_eq!(self.core.open_db().unwrap().conn().query_row(
+            "SELECT count(*) FROM managed_stage_publication WHERE source_id IS NOT NULL",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     }
     fn assert_no_wire(&self) { assert!(!self.temp.path().join("wire").exists()); }
     fn legacy_receipt(&self, claim: &LiveStageClaim) -> OutboxItem {
@@ -292,6 +294,9 @@ async fn actual_claim_commits_source_echo_outbox_refs_and_parked_worker() {
     assert_eq!(f.count("message"),1);
     assert_eq!(f.count("managed_ref"),2);
     let db=f.core.open_db().unwrap();
+    let linked:i64=db.conn().query_row("SELECT source_id FROM managed_stage_publication WHERE stage_id=?1",
+        [STAGE],|r|r.get(0)).unwrap();
+    assert_eq!(Some(linked),ch_db::managed_source_id(db.conn(),STAGE).unwrap().map(|id|id.as_i64()));
     let refs=ch_db::managed_references(db.conn(),ch_db::managed_source_id(db.conn(),STAGE).unwrap().unwrap()).unwrap();
     assert_eq!(refs.entries.len(),2);
     assert!(refs.entries.iter().all(|r|r.account_id.as_deref()==Some("owner")));
@@ -1267,5 +1272,29 @@ async fn cancellation_after_actual_birth_retains_bytes_and_reports_unknown_inste
     assert!(matches!(result,Err(crate::managed_stage::Error::Unknown)));
     assert_eq!(f.count("managed_stage_publication"),1);
     assert!(f.stage().join("bytes").exists());assert!(!f.stage().join("manifest.json").exists());
+    f.assert_no_admission();f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn full_publication_budget_refuses_before_reading_input_or_allocating_a_stage() {
+    let f=Fixture::empty().await;
+    let db=f.core.open_db().unwrap();
+    // Synthetic unresolved negative history consumes the safety budget. These
+    // rows grant no copy/read authority and would independently refuse restore.
+    for id in 1..=256 {
+        let id=format!("{id:032x}");
+        db.conn().execute("INSERT INTO managed_stage_publication(stage_id,nonce,client_id,
+            account_id,plugin_id,account_created_at,path,identity_json,created_at)
+            SELECT ?1,?1,?1,account_id,plugin_id,created_at,?2,'{}',0 FROM account WHERE account_id='owner'",
+            rusqlite::params![id,format!("/synthetic/unresolved/{id}/bytes")]).unwrap();
+    }
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let scope=Scope {account:"owner".into(),plugin:"fixture".into(),account_created:binding.owner().created_at,
+        chat:"chat".into(),topic:None};
+    let result=f.core.stage_publisher().copy(binding,crate::managed_stage::CopyDescription {
+        stage_id:STAGE.into(),scope,created:1,name:"capacity.bin".into(),size:15,limit:1024,
+    },memory_copy(b"synthetic bytes"),|_|panic!("full budget must refuse before copy checkpoint")).await;
+    assert!(matches!(result,Err(crate::managed_stage::Error::Busy)));
+    assert!(!f.stage().exists());assert_eq!(f.count("managed_stage_publication"),256);
     f.assert_no_admission();f.assert_no_wire();f.close().await;
 }

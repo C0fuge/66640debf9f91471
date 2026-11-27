@@ -224,8 +224,10 @@ fn racing_empty_copy_directory_never_becomes_sticky_unproved_legacy_evidence() {
     assert_eq!(f.catalog.legacy_candidates().len(), 1);
     f.catalog.refresh().unwrap();
     let candidates = f.catalog.legacy_candidates();
-    assert_eq!(candidates.len(), 1);
-    assert!(candidates[0].kind() == StageKind::Consumed);
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().any(|c|c.kind()==StageKind::Consumed));
+    assert!(candidates.iter().any(|c|c.kind()==StageKind::Ready),
+        "the later stable Ready is independently unproved, unlike the transient empty directory");
     assert!(known(&f.catalog, &f.data.join("accounts/owner/uploads").join(SECOND).join("bytes")));
 }
 

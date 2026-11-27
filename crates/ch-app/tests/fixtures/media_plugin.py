@@ -67,11 +67,11 @@ def handle(frame):
         write({"id": key, "result": {}})
     elif method in ("ping", "account.stop", "shutdown"):
         write({"id": key, "result": {}})
-    elif method == "x-media_fixture.release":
+    elif method == "messages.fetch_recent" and params.get("chat_id") == "fixture-release":
         for request in list(pending.values()):
             pending.pop(request["id"], None)
             finish(request)
-        write({"id": key, "result": {}})
+        write({"id": key, "result": {"messages": []}})
     elif method == "media.download":
         record({"method": method, "params": params, "id": key})
         if mode in ("hold", "ignore-cancel", "completion-wins", "progress-hold", "event-hold"):

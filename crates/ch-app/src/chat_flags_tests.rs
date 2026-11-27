@@ -1,7 +1,6 @@
 //! Actual App requests against the Python SDK in isolated temporary storage.
 use super::*;
 use ch_core::{host::MemorySecretStore, runtime::{CoreConfig, NewAccount}};
-use ch_protocol::Empty;
 use std::path::Path;
 
 async fn fixture(mode: &str) -> (App, Thread) {
@@ -66,8 +65,9 @@ async fn wait_calls(app: &App, method: &str, count: usize) {
         while calls(app, method) < count { tokio::time::sleep(Duration::from_millis(5)).await; }
     }).await.unwrap();
 }
-async fn release(app: &App) {
-    let _: Empty = app.core.host().call("flags_fixture", "x-flags_fixture.release", &json!({})).await.unwrap();
+async fn release(app: &App, thread:&Thread) {
+    let _: Value = app.core.host().call("flags_fixture", "messages.fetch_recent",
+        &json!({"account_id":thread.account_id,"chat_id":"fixture-release","limit":1})).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -247,7 +247,7 @@ async fn late_read_cannot_restore_removed_rows_or_a_replaced_account_run() {
                 Ok(())
             }).await.unwrap();
         }
-        release(&app).await;
+        release(&app,&thread).await;
         assert_eq!(pending.await.unwrap()["ok"], false);
         assert!(app.chat_flags.state().proofs.is_empty());
         if replace { assert_eq!(stored(&app, &thread).await.pinned, Some(true)); }
@@ -275,7 +275,7 @@ async fn dropped_callers_keep_four_task_slots_and_thread_locks_until_settlement(
     for task in tasks { task.abort(); let _ = task.await; }
     assert_eq!(app.chat_flags.slots.available_permits(), 0);
     assert_eq!(refresh(&app, &base).await["error"]["code"], "conflict");
-    release(&app).await;
+    release(&app,&base).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while app.chat_flags.slots.available_permits() != 4 { tokio::time::sleep(Duration::from_millis(5)).await; }
     }).await.unwrap();

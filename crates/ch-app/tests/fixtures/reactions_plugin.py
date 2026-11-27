@@ -74,15 +74,15 @@ def handle(frame):
         if method == "shutdown":
             raise SystemExit(0)
         return
-    if method == "x-reaction_fixture.missing":
+    if method == "messages.fetch_recent" and p.get("chat_id") == "fixture-missing":
         get_missing = True
-        write({"id": key, "result": {}})
+        write({"id": key, "result": {"messages": []}})
         return
-    if method == "x-reaction_fixture.release":
+    if method == "messages.fetch_recent" and p.get("chat_id") == "fixture-release":
         for item in list(pending):
             pending.remove(item)
             complete(item)
-        write({"id": key, "result": {}})
+        write({"id": key, "result": {"messages": []}})
         return
     trace(frame)
     if method == "messages.get":

@@ -35,16 +35,13 @@ class ChatFlags(Plugin):
 
     @method("messages.fetch_recent")
     async def history(self, account, params):
+        if params.chat_id == "fixture-release":
+            self.release.set()
         return {"messages": []}
 
     @method("messages.send")
     async def send(self, account, params):
         raise NotSupported("This fixture only exercises chat preferences")
-
-    @method("x-flags_fixture.release")
-    async def release_work(self, account, params):
-        self.release.set()
-        return {}
 
     @method("chats.get")
     async def get(self, account, params: T.ChatsGetParams):

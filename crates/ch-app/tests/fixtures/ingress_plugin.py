@@ -42,7 +42,8 @@ for line in sys.stdin:
             sys.exit(0)
         write({"id": key, "result": {"message": {"id": f"fixture-{sequence}", "chat_id": p["chat_id"],
                "topic_id": p.get("topic_id"), "direction": "out", "sent_at": "2026-01-01T00:00:00.000Z",
-               "text": p.get("caption", "")}}})
+               "text": p.get("caption", ""), "media": {"kind": p["kind"],
+               "filename": p.get("filename"), "bytes": len(content)}}}})
     elif method in ("ping", "shutdown", "account.stop"):
         write({"id": key, "result": {}})
     elif key is not None:

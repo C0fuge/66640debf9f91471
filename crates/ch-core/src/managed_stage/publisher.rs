@@ -28,6 +28,7 @@ impl StagePublisher {
         let issuer=self.issuer.clone();let stopped=self.jobs.stopped();let journal=self.clone();
         self.jobs.run(move|| {
             if stopped.is_cancelled() || !issuer.current(&binding.observation()) {return Err(Error::TargetChanged);}
+            journal.preflight(&binding,&description.stage_id)?;
             super::copy::copy_ready_stage(&binding,description,&mut input,|count| {
                 if stopped.is_cancelled() {return Err(Error::Cancelled);}
                 checkpoint(count)
@@ -38,6 +39,33 @@ impl StagePublisher {
             crate::managed_sources::Error::Conflict=>Error::TargetChanged,
             crate::managed_sources::Error::Task=>Error::Unknown,
         })?
+    }
+
+    // Bounded negative check before allocating/copying any output bytes. The
+    // final birth writer repeats capacity/history checks after actual byte sync;
+    // an absent row here never grants provenance or reserves an inode.
+    fn preflight(&self,binding:&AccountStorageBinding,stage:&str)->Result<()> {
+        if !super::manifest::hex(stage,32) {return Err(Error::Integrity);}
+        self.protection.check(binding)?;
+        let stage=stage.to_owned();let observed=binding.observation();let issuer=self.issuer.clone();
+        let path=binding.uploads().join(&stage).join("bytes");let stopped=self.jobs.stopped();
+        let result=tokio::runtime::Handle::current().block_on(self.proofs.with_transaction(move|scope| {
+            let tx=scope.transaction();issuer.check_in(tx,&observed).map_err(|_|Error::TargetChanged)?;
+            if stopped.is_cancelled() {return Err(Error::Cancelled);}
+            let (count,bytes):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(bytes),0) FROM
+                (SELECT length(CAST(identity_json AS BLOB)) AS bytes FROM managed_stage_publication LIMIT 257)",
+                [],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|Error::Storage)?;
+            if count>=256 || bytes>=1_048_576 {return Err(Error::Busy);}
+            let previous:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_stage_publication WHERE stage_id=?1 OR path=?2)
+                OR EXISTS(SELECT 1 FROM managed_source WHERE stage_id=?1 OR path=?2)",
+                rusqlite::params![stage,path.to_str()],|r|r.get(0)).map_err(|_|Error::Storage)?;
+            if previous {return Err(Error::Integrity);}
+            issuer.check_in(tx,&observed).map_err(|_|Error::TargetChanged)?;
+            Ok(())
+        }));
+        // This closure performed no write and no FS allocation has started yet.
+        match result {Ok(result)=>result,Err(ManagedProofError::Busy)=>Err(Error::Busy),
+            Err(ManagedProofError::Closed)=>Err(Error::Cancelled),Err(_)=>Err(Error::Storage)}
     }
 
     /// Necessary protected-birth check for existing Ready discard. The caller

@@ -2,7 +2,6 @@
 use super::*;
 use ch_core::{host::MemorySecretStore,runtime::{CoreConfig,NewAccount}};
 use ch_db::types::{ConversationRow,MessageRow,TopicRow};
-use ch_protocol::Empty;
 use std::{path::Path,sync::atomic::AtomicUsize};
 
 async fn fixture(mode:&str)->(App,Thread) {
@@ -37,7 +36,8 @@ async fn wait_state(app:&App,thread:&Thread,key:&str,state:&str)->Value {
 }
 fn trace(app:&App)->Vec<Value> {std::fs::read_to_string(app.core.data_dir().join("trace.jsonl")).unwrap_or_default().lines().map(|l|serde_json::from_str(l).unwrap()).collect()}
 async fn wait_rpc(app:&App) {tokio::time::timeout(Duration::from_secs(5),async{while !trace(app).iter().any(|r|r["method"]=="media.download"){tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();}
-async fn release(app:&App) {let _:Empty=app.core.host().call("media_fixture","x-media_fixture.release",&json!({})).await.unwrap();}
+async fn release(app:&App,thread:&Thread) {let _:Value=app.core.host().call("media_fixture","messages.fetch_recent",
+    &json!({"account_id":thread.account_id,"chat_id":"fixture-release","limit":1})).await.unwrap();}
 async fn cancel(app:&App,thread:&Thread,key:&str)->Value {let j=job(app,thread,key).await;call(app,"cancelMediaJob",json!({"thread":thread,"sessionId":app.media.session,"jobId":j["id"]})).await}
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
@@ -53,7 +53,7 @@ async fn download_receipt_is_recoverable_idempotent_and_scoped() {
     assert_eq!(start(&app,&thread,"local",Kind::Download,"local:pending").await["ok"],false);
     let foreign=Thread{chat_id:"other".into(),..thread.clone()};
     assert_eq!(call(&app,"cancelMediaJob",json!({"thread":foreign,"sessionId":app.media.session,"jobId":first["value"]["id"]})).await["ok"],false);
-    wait_rpc(&app).await;release(&app).await;let final_job=wait_state(&app,&thread,"intent","succeeded").await;
+    wait_rpc(&app).await;release(&app,&thread).await;let final_job=wait_state(&app,&thread,"intent","succeeded").await;
     assert_eq!(final_job["doneBytes"],"19");
     assert!(!final_job.to_string().contains(".bin"));assert!(!final_job.to_string().contains(&app.core.data_dir().to_string_lossy().into_owned()));
     assert_eq!(trace(&app).iter().filter(|r|r["method"]=="media.download").count(),1);
@@ -65,13 +65,13 @@ async fn only_matching_tracked_progress_updates_and_event_alone_does_not_confirm
     let (app,thread)=fixture("progress-hold").await;start(&app,&thread,"progress",Kind::Download,"message").await;
     tokio::time::timeout(Duration::from_secs(5),async {loop {if job(&app,&thread,"progress").await["doneBytes"]=="4" {break;}tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
     let j=job(&app,&thread,"progress").await;assert_eq!(j["totalBytes"],Value::Null);assert_eq!(j["state"],"running");
-    release(&app).await;wait_state(&app,&thread,"progress","succeeded").await;app.shutdown().await;
+    release(&app,&thread).await;wait_state(&app,&thread,"progress","succeeded").await;app.shutdown().await;
     let (app,thread)=fixture("event-hold").await;start(&app,&thread,"event",Kind::Download,"message").await;
     wait_state(&app,&thread,"event","running").await;
     wait_rpc(&app).await;
     tokio::time::timeout(Duration::from_secs(5),async {loop {let t=thread.clone();let recorded=app.read(move|db|{let c=ch_db::conversation_rowid(db.conn(),&t.account_id,&t.chat_id)?.unwrap();Ok(ch_db::get_message(db.conn(),c,"message")?.unwrap().media.unwrap().path.unwrap().ends_with("message.bin"))}).await.unwrap();if recorded{break;}tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
     assert_ne!(job(&app,&thread,"event").await["state"],"succeeded");
-    release(&app).await;wait_state(&app,&thread,"event","succeeded").await;app.shutdown().await;
+    release(&app,&thread).await;wait_state(&app,&thread,"event","succeeded").await;app.shutdown().await;
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
@@ -92,7 +92,7 @@ async fn cancellation_keeps_ignored_rpc_reserved_and_completion_can_win() {
     wait_rpc(&app).await;
     assert_eq!(cancel(&app,&thread,"cancel").await["value"]["state"],"cancelling");
     assert_eq!(start(&app,&thread,"again",Kind::Download,"message").await["error"]["code"],"conflict");
-    release(&app).await;wait_state(&app,&thread,"cancel","succeeded").await;app.shutdown().await;
+    release(&app,&thread).await;wait_state(&app,&thread,"cancel","succeeded").await;app.shutdown().await;
     let (app,thread)=fixture("completion-wins").await;start(&app,&thread,"race",Kind::Download,"message").await;wait_state(&app,&thread,"race","running").await;
     wait_rpc(&app).await;cancel(&app,&thread,"race").await;let j=wait_state(&app,&thread,"race","succeeded").await;assert_eq!(j["cancelRequested"],true);app.shutdown().await;
 }

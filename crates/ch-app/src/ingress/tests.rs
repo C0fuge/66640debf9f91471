@@ -62,8 +62,10 @@ async fn core_stage_proof_keeps_actual_lease_after_binding_drop_until_all_handle
     assert!(matches!(proof.recheck_ready(), Err(Error::TargetChanged)));
     assert!(app.core.host().config().upload_dir("fixture").join(id).exists());
     drop(proof);
-    tokio::time::timeout(Duration::from_secs(5), remove).await.unwrap().unwrap().unwrap();
-    assert!(!app.core.host().config().upload_dir("fixture").join(id).exists());
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(5), remove).await.unwrap().unwrap(),
+        Err(ch_core::runtime::RuntimeError::SourceInUse)));
+    assert!(app.core.host().config().upload_dir("fixture").join(id).exists(),
+        "dropping the actual verifier drains its lease, but never certifies source closure");
     app.shutdown().await;
 }
 
@@ -665,9 +667,15 @@ async fn hidden_startup_manifests_are_imported_after_owner_lifecycle_refresh() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn equal_birth_replacement_cannot_observe_old_terminal_metadata_or_reuse_key() {
-    let (f, app) = Fixture::new(caps()).await;
+    let (f, mut app) = Fixture::new(caps()).await;
+    app.set_open_file_dialog(Arc::new(Held::default()));
     f.start(&app, "old").await;
-    let ready = f.state(&app, "old", "ready").await;
+    let ready = f.state(&app, "old", "choosing").await;
+    let mut cancel=f.scope(&app);cancel["stageId"]=ready["stageId"].clone();
+    assert_eq!(call(&app,"cancelFileSelection",cancel).await["ok"],true);
+    f.state(&app,"old","cancelled").await;
+    // Use a true terminal chooser receipt with no copied byte history. Actual
+    // protected Ready stages independently veto removal instead of being erased.
     let owner = app.core.accounts().get("fixture").await.unwrap().unwrap();
     app.core.accounts().remove("fixture").await.unwrap();
     app.read(move|db|{

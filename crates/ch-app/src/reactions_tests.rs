@@ -2,7 +2,6 @@
 use super::*;
 use ch_core::{host::MemorySecretStore,runtime::{CoreConfig,NewAccount}};
 use ch_db::types::{ConversationRow,TopicRow};
-use ch_protocol::Empty;
 use std::path::Path;
 
 async fn fixture(mode:&str)->(App,Thread){
@@ -137,7 +136,8 @@ async fn dropped_callers_keep_rpc_thread_guards_and_four_task_quota_until_settle
     tokio::time::timeout(Duration::from_secs(5),async{while calls(&app,"reactions.set")<4{tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
     for task in tasks{task.abort();let _=task.await;}
     let fifth=Thread{chat_id:"c4".into(),..base.clone()};assert_eq!(refresh(&app,&fifth).await["error"]["code"],"conflict");assert_eq!(app.reactions.slots.available_permits(),0);
-    let _:Empty=app.core.host().call("reaction_fixture","x-reaction_fixture.release",&json!({})).await.unwrap();
+    let _:Value=app.core.host().call("reaction_fixture","messages.fetch_recent",
+        &json!({"account_id":base.account_id,"chat_id":"fixture-release","limit":1})).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5),async{while app.reactions.slots.available_permits()!=4{tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
     for n in 0..4{let t=Thread{chat_id:format!("c{n}"),..base.clone()};assert!(baseline(&app,&t).await.iter().any(|r|r.key=="e:❤️"&&r.mine));}
     assert_eq!(refresh(&app,&fifth).await["ok"],true);assert_eq!(calls(&app,"reactions.set"),4);app.shutdown().await;
@@ -163,7 +163,8 @@ fn raw_paid_only_arrays_obey_complete_snapshot_and_policy_bounds(){
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn missing_refresh_supersedes_older_write_proof_and_reactor_cursors(){
     let (app,t)=fixture("good").await;let old=refresh(&app,&t).await["value"].clone();let first=who(&app,&t,&old,Value::Null,Value::Null).await;
-    let _:Empty=app.core.host().call("reaction_fixture","x-reaction_fixture.missing",&json!({})).await.unwrap();
+    let _:Value=app.core.host().call("reaction_fixture","messages.fetch_recent",
+        &json!({"account_id":t.account_id,"chat_id":"fixture-missing","limit":1})).await.unwrap();
     let missing=refresh(&app,&t).await;assert_eq!(missing["ok"],true);assert!(missing["value"]["contextToken"].is_null());
     assert_eq!(set(&app,&t,&old,json!([{"kind":"emoji","emoji":"❤️"}])).await["ok"],false);
     assert_eq!(who(&app,&t,&old,Value::Null,first["value"]["nextCursor"].clone()).await["ok"],false);
