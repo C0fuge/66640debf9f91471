@@ -114,7 +114,7 @@ fn journal_identity_and_progress_are_immutable_or_monotonic_and_receipt_needs_ma
 fn ready_journal_upgrade_reapply_reopen_and_account_metadata_cascade_are_coherent() {
     let temp=tempfile::tempdir().unwrap();let path=temp.path().join("hub.db");
     let db=Db::open_unmigrated(&path).unwrap();db.migrate_to(6).unwrap();seed(db.conn());
-    db.migrate_to(migrations::LATEST).unwrap();journal(db.conn()).unwrap();advance(db.conn());receipt(db.conn()).unwrap();
+    db.migrate_to(7).unwrap();journal(db.conn()).unwrap();advance(db.conn());receipt(db.conn()).unwrap();
     let sql=migrations::MIGRATIONS.iter().find(|m|m.version==7).unwrap().sql;
     db.conn().execute_batch(sql).unwrap();db.conn().execute_batch(sql).unwrap();drop(db);
     let db=Db::open(&path).unwrap();
@@ -132,7 +132,7 @@ fn failed_ready_journal_migration_rolls_back_all_new_objects_and_preserves_versi
     let temp=tempfile::tempdir().unwrap();let db=Db::open_unmigrated(temp.path().join("broken.db")).unwrap();
     db.migrate_to(6).unwrap();seed(db.conn());
     db.conn().execute("CREATE TABLE managed_ready_receipt(deliberate_collision TEXT)",[]).unwrap();
-    assert!(db.migrate_to(migrations::LATEST).is_err());assert_eq!(db.schema_version().unwrap(),6);
+    assert!(db.migrate_to(7).is_err());assert_eq!(db.schema_version().unwrap(),6);
     assert_eq!(db.conn().query_row("SELECT count(*) FROM managed_stage_publication",[],|r|r.get::<_,i64>(0)).unwrap(),1);
     assert_eq!(db.conn().query_row("SELECT count(*) FROM sqlite_master WHERE name='managed_ready_retirement'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     assert_eq!(db.conn().query_row("SELECT count(*) FROM sqlite_master WHERE name='managed_ready_receipt_excludes_birth'",[],|r|r.get::<_,i64>(0)).unwrap(),0);

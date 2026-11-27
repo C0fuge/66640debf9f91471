@@ -56,6 +56,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0007_ready_retirement",
         sql: include_str!("../migrations/0007_ready_retirement.sql"),
     },
+    Migration {
+        version: 8,
+        name: "0008_ready_reference_fence",
+        sql: include_str!("../migrations/0008_ready_reference_fence.sql"),
+    },
 ];
 
 /// The newest schema version this build knows.
