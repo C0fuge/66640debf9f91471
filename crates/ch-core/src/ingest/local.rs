@@ -488,7 +488,33 @@ impl Ingest {
         older_cursor: Option<Option<&str>>,
         finish: impl FnOnce(&Connection, i64, Millis) -> Result<T>,
     ) -> Result<(Applied, T)> {
+        self.apply_history_page_inner(plugin_id, account_id, chat_id, topic_id, messages, older_cursor, None, None, finish)
+    }
+
+    /// History owns the exact fresh Accounts binding through this transaction.
+    /// The final authority check is the local page-write linearization point.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_history_page_owned<T>(
+        &self, plugin_id: &str, account_id: &str, chat_id: &str, topic_id: Option<&str>,
+        messages: &[Message], older_cursor: Option<Option<&str>>,
+        owner: &crate::runtime::AccountStorageObservation,
+        stop: &tokio_util::sync::CancellationToken,
+        finish: impl FnOnce(&Connection, i64, Millis) -> Result<T>,
+    ) -> Result<(Applied, T)> {
+        self.apply_history_page_inner(plugin_id, account_id, chat_id, topic_id, messages, older_cursor,
+            Some(owner), Some(stop), finish)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_history_page_inner<T>(
+        &self, plugin_id: &str, account_id: &str, chat_id: &str, topic_id: Option<&str>,
+        messages: &[Message], older_cursor: Option<Option<&str>>,
+        owner: Option<&crate::runtime::AccountStorageObservation>,
+        stop: Option<&tokio_util::sync::CancellationToken>,
+        finish: impl FnOnce(&Connection, i64, Millis) -> Result<T>,
+    ) -> Result<(Applied, T)> {
         self.local_tx(account_id, "local.history_page", |conn, out, now| {
+            check_history_authority(conn, owner, stop)?;
             self.check_account(conn, plugin_id, account_id)?;
             let existing_conv = ch_db::conversation_rowid(conn, account_id, chat_id)?;
             // Validate the ENTIRE effective page before any write. Missing topic ids keep
@@ -547,7 +573,9 @@ impl Ingest {
             h.last_fetch_at = Some(now);
             h.updated_at = now;
             ch_db::set_history_state(conn, &h)?;
-            finish(conn, conv_id, now)
+            let value = finish(conn, conv_id, now)?;
+            check_history_authority(conn, owner, stop)?;
+            Ok(value)
         })
     }
 
@@ -659,4 +687,21 @@ impl Ingest {
             })?
             .0)
     }
+}
+
+fn check_history_authority(
+    conn: &Connection,
+    owner: Option<&crate::runtime::AccountStorageObservation>,
+    stop: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<()> {
+    if stop.is_some_and(|token| token.is_cancelled()) {
+        return Err(ch_db::Error::Invalid("history service is closed".into()).into());
+    }
+    if let Some(owner) = owner {
+        owner.check(conn).map_err(|error| match error {
+            crate::runtime::RuntimeError::Db(error) => super::IngestError::Db(error),
+            _ => super::IngestError::UnknownAccount { account_id:owner.owner().account_id.clone() },
+        })?;
+    }
+    Ok(())
 }

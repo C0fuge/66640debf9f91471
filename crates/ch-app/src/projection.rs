@@ -188,10 +188,9 @@ mod tests {
     }
 
     fn projected(row: MessageRow) -> Value {
-        let page = history(Page {
-            items: vec![Item::Message(Box::new(row))],
-            ..Default::default()
-        });
+        let mut snapshot = Page::default();
+        snapshot.items = vec![Item::Message(Box::new(row))];
+        let page = history(snapshot);
         page["items"][0]["message"].clone()
     }
 

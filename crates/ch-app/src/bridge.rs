@@ -98,7 +98,7 @@ impl App {
                 let h = self.history.clone();
                 let ck = thread.chat_key();
                 let page = match window {
-                    Window::Latest => blocking(move || Ok(h.open(&ck, limit)?)).await?,
+                    Window::Latest => h.open(&ck, limit).await?,
                     Window::Refresh => h.refresh(&ck, limit).await?,
                     Window::Older { before } => h.older(&ck, before.as_deref(), limit).await?,
                     Window::Newer { after } => h.newer(&ck, &after, limit).await?,

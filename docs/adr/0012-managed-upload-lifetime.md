@@ -54,6 +54,22 @@ before the dependent storage/app work is enabled.
 
 ## Durable source and attempt ownership
 
+New source registration and initial canonical outbox/echo/reference insertion
+share one checked transaction. A merely verified Ready stage creates no source
+row. Core itself performs the durable Ready-to-Claimed transition and privately
+mints its one-use live claim. Exact retained admission lookup comes first, before
+fresh claim/bytes/run/permission checks, including inside the writer. A failed
+or uncertain claim never becomes reenqueuable from row absence. A counted owner
+reservation covers the commit-to-source-gate handoff before worker wake.
+
+Pre-frame exposure and later unlink/quota certificates require a FULL-synchronous
+proof transaction. Existing WAL synchronous=NORMAL commits cannot be called a
+power-loss durability barrier. Use a dedicated proof writer under the existing
+Ingest serialization; all transaction reads, writes and returned snapshots use
+that explicit connection. No staging-filesystem validation or network operation
+runs under the writer. Recovery examines every historical unresolved exposure,
+independently of current outbox pointer/state or a later positive attempt.
+
 Use one reviewed DB migration for the managed source, reverse references,
 backfill coverage and retirement journal. A registration is not admission or
 settlement proof. A bare Sent row, adopted echo, progress, error, cancellation,

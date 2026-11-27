@@ -198,6 +198,7 @@ async fn search_and_history_read_the_running_cores_database() {
     assert_eq!(
         history
             .open(&ChatKey::new("a", "chat"), 50)
+            .await
             .unwrap()
             .message_ids(),
         ["one"]

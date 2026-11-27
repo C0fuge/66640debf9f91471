@@ -90,13 +90,19 @@ impl App {
         rx.await.map_err(|_|if write{Failure::OutcomeUnknown}else{Failure::Unavailable})?
     }
     pub(crate) async fn project_reaction_history(&self,page:ch_core::history::Page)->Result<Value>{
-        self.read(move|db|{
+        let owner=page.owner_observation().cloned().ok_or(Failure::Unavailable)?;
+        let lease=self.history.projection_lease(&owner).await?;
+        let value=self.read(move|db|{
+            lease.check(db.conn())?;
             let mut cached=BTreeMap::new();
             for message in page.messages(){cached.insert(message.id.to_string(),cached_snapshot(db,message)?);}
             let mut value=crate::projection::history(page);
             if let Some(items)=value["items"].as_array_mut(){for item in items{if let Some(message)=item.get_mut("message"){let key=message["rowKey"].as_str().unwrap_or("");let reactions=cached.get(key).cloned().unwrap_or(Value::Null);message["reactions"]=reactions;}}}
+            lease.check(db.conn())?;
             Ok(value)
-        }).await
+        }).await?;
+        if owner.is_revoked(){return Err(Failure::Unavailable);}
+        Ok(value)
     }
 }
 

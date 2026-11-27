@@ -5,12 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ch_core::history::{
+use crate::history::{
     ChatKey, History, HistoryConfig, HistoryError, Item, PluginApi, SharedIngest,
 };
-use ch_core::host::HostError;
-use ch_core::ingest::{Ingest, IngestOptions};
-use ch_db::{Db, now_millis};
+use crate::host::HostError;
+use crate::runtime::{Core, CoreConfig, NewAccount};
+use crate::host::MemorySecretStore;
 use ch_protocol::capabilities::Capabilities;
 use ch_protocol::dto::Message;
 use ch_protocol::{ErrorObject, Event, Timestamp};
@@ -191,28 +191,30 @@ impl PluginApi for Platform {
     }
 }
 
-fn shared_ingest() -> SharedIngest {
-    let db = Db::open_in_memory().unwrap();
-    ch_db::upsert_plugin(
-        db.conn(),
-        &ch_db::PluginRow {
-            plugin_id: "fake".into(),
-            name: "fake".into(),
-            version: "0.1.0".into(),
-            api_version: "1.0.0".into(),
-            install_dir: None,
-            brand_color: None,
-            icon_path: None,
-            manifest_json: None,
-            enabled: true,
-            installed: true,
-            first_seen_at: now_millis(),
-            last_seen_at: now_millis(),
-        },
-    )
-    .unwrap();
-    ch_db::create_account(db.conn(), "acc", "fake", None, &Default::default()).unwrap();
-    Arc::new(Mutex::new(Ingest::new(db, IngestOptions::default())))
+struct Fixture {
+    core: Core,
+    ingest: SharedIngest,
+    _temp: tempfile::TempDir,
+}
+impl std::ops::Deref for Fixture {
+    type Target = SharedIngest;
+    fn deref(&self) -> &Self::Target { &self.ingest }
+}
+
+async fn shared_ingest() -> Fixture {
+    let temp = tempfile::tempdir().unwrap();
+    let plugin = temp.path().join("plugins/fake");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(plugin.join("plugin.json"), json!({
+        "id":"fake","name":"Synthetic history","version":"0.0.1","api_version":"1.2.0",
+        "entry":["python3","-B","-c","pass"],"brand_color":"#123456","multi_account":true,"auth_methods":["none"]
+    }).to_string()).unwrap();
+    let mut config = CoreConfig::new(temp.path(), Arc::new(MemorySecretStore::new()));
+    config.autostart = false;
+    let core = Core::open(config).await.unwrap();
+    core.accounts().add(NewAccount::new("fake").id("acc").no_start()).await.unwrap();
+    let ingest = core.ingest().shared_ingest();
+    Fixture { core, ingest, _temp:temp }
 }
 
 fn live(ing: &SharedIngest, range: std::ops::Range<usize>) {
@@ -239,7 +241,7 @@ fn ids(range: std::ops::Range<usize>) -> Vec<String> {
     range.map(mid).collect()
 }
 
-fn page_ids(p: &ch_core::history::Page) -> Vec<String> {
+fn page_ids(p: &crate::history::Page) -> Vec<String> {
     p.message_ids().into_iter().map(str::to_owned).collect()
 }
 
@@ -258,12 +260,12 @@ fn chat() -> ChatKey {
 
 #[tokio::test]
 async fn open_serves_the_database_first_then_refresh_fetches() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     live(&ing, 97..100);
     let p = Platform::new(100, &[]);
-    let h = History::new(ing.clone(), p.clone(), cfg(50));
+    let h = History::new(&ing.core, p.clone(), cfg(50));
 
-    let page = h.open(&chat(), 20).unwrap();
+    let page = h.open(&chat(), 20).await.unwrap();
     assert_eq!(page_ids(&page), ids(97..100));
     assert!(page.more_older, "start not reached yet");
     assert!(
@@ -285,9 +287,9 @@ async fn open_serves_the_database_first_then_refresh_fetches() {
 
 #[tokio::test]
 async fn page_older_until_the_start() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(120, &[]);
-    let h = History::new(ing.clone(), p.clone(), cfg(50));
+    let h = History::new(&ing.core, p.clone(), cfg(50));
     let mut page = h.refresh(&chat(), 30).await.unwrap();
     let mut all = page_ids(&page);
     let mut rounds = 0;
@@ -319,10 +321,10 @@ async fn page_older_until_the_start() {
 
 #[tokio::test]
 async fn gap_after_offline_is_detected_and_filled_with_a_multi_page_cursor() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(200, &["history.fill_gap"]);
     *p.visible.lock().unwrap() = 60;
-    let h = History::new(ing.clone(), p.clone(), cfg(20));
+    let h = History::new(&ing.core, p.clone(), cfg(20));
     h.refresh(&chat(), 20).await.unwrap();
     // Offline while 140 messages arrive.
     *p.visible.lock().unwrap() = 200;
@@ -360,17 +362,17 @@ async fn gap_after_offline_is_detected_and_filled_with_a_multi_page_cursor() {
     assert_eq!(calls[5]["cursor"], "160");
     assert_eq!(gap_count(&ing), 0);
 
-    let page = h.open(&chat(), 200).unwrap();
+    let page = h.open(&chat(), 200).await.unwrap();
     assert_eq!(page_ids(&page), ids(40..200), "contiguous after the fill");
     assert_eq!(page.gaps().count(), 0);
 }
 
 #[tokio::test]
 async fn scrolling_into_a_gap_fills_it_top_down_without_fill_gap() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(150, &[]);
     *p.visible.lock().unwrap() = 30;
-    let h = History::new(ing.clone(), p.clone(), cfg(20));
+    let h = History::new(&ing.core, p.clone(), cfg(20));
     h.refresh(&chat(), 20).await.unwrap();
     *p.visible.lock().unwrap() = 150;
     let page = h.refresh(&chat(), 20).await.unwrap();
@@ -407,10 +409,10 @@ async fn scrolling_into_a_gap_fills_it_top_down_without_fill_gap() {
 
 #[tokio::test]
 async fn scrolling_newer_at_an_exact_gap_edge_respects_the_fill_budget() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(30, &[]);
     let h = History::new(
-        ing.clone(),
+        &ing.core,
         p.clone(),
         HistoryConfig {
             on_demand_fill_pages: 1,
@@ -443,9 +445,9 @@ async fn scrolling_newer_at_an_exact_gap_edge_respects_the_fill_budget() {
 
 #[tokio::test]
 async fn jump_to_date_with_history_around_records_the_hole_above_the_island() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(300, &["history.jump_to_date", "history.fill_gap"]);
-    let h = History::new(ing.clone(), p.clone(), cfg(20));
+    let h = History::new(&ing.core, p.clone(), cfg(20));
     h.refresh(&chat(), 20).await.unwrap(); // m0280..m0299 stored
 
     let page = h.jump_to_date(&chat(), at(100), 10).await.unwrap();
@@ -485,9 +487,9 @@ async fn jump_to_date_with_history_around_records_the_hole_above_the_island() {
 
 #[tokio::test]
 async fn jump_to_date_without_capability_pages_older() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(100, &[]);
-    let h = History::new(ing.clone(), p.clone(), cfg(20));
+    let h = History::new(&ing.core, p.clone(), cfg(20));
     let page = h.jump_to_date(&chat(), at(30), 6).await.unwrap();
     assert_eq!(page.target.as_deref(), Some("m0030"));
     assert_eq!(page_ids(&page), ids(27..33));
@@ -498,10 +500,10 @@ async fn jump_to_date_without_capability_pages_older() {
 
 #[tokio::test(start_paused = true)]
 async fn concurrent_identical_requests_share_one_call() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(100, &[]);
     *p.delay.lock().unwrap() = Duration::from_secs(1);
-    let h = History::new(ing.clone(), p.clone(), cfg(20));
+    let h = History::new(&ing.core, p.clone(), cfg(20));
     let ck = chat();
     let (a, b, c) = tokio::join!(h.refresh(&ck, 20), h.refresh(&ck, 20), h.refresh(&ck, 20));
     assert_eq!(a.unwrap(), b.unwrap());
@@ -523,9 +525,9 @@ async fn concurrent_identical_requests_share_one_call() {
 
 #[tokio::test(start_paused = true)]
 async fn flood_wait_backs_off_for_the_given_seconds() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(100, &[]);
-    let h = History::new(ing.clone(), p.clone(), cfg(20));
+    let h = History::new(&ing.core, p.clone(), cfg(20));
 
     p.flood_next("messages.fetch_recent", 30);
     let err = h.refresh(&chat(), 20).await.unwrap_err();
@@ -568,14 +570,14 @@ async fn flood_wait_backs_off_for_the_given_seconds() {
 
 #[tokio::test(start_paused = true)]
 async fn background_filler_is_rate_limited_and_waits_out_flood() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(200, &["history.fill_gap"]);
     *p.visible.lock().unwrap() = 50;
     let config = HistoryConfig {
         background_interval: Duration::from_secs(2),
         ..cfg(20)
     };
-    let h = History::new(ing.clone(), p.clone(), config);
+    let h = History::new(&ing.core, p.clone(), config);
     h.refresh(&chat(), 20).await.unwrap();
     *p.visible.lock().unwrap() = 200;
     h.refresh(&chat(), 20).await.unwrap();
@@ -584,7 +586,12 @@ async fn background_filler_is_rate_limited_and_waits_out_flood() {
     p.flood_next("history.fill_gap", 15);
     let cancel = CancellationToken::new();
     let task = h.spawn_background(cancel.clone());
-    tokio::time::sleep(Duration::from_secs(120)).await;
+    // Await actual steps, not a far-future timer: paused Tokio time may advance
+    // that timer while the new blocking DB worker is still settling.
+    for _ in 0..16 {
+        h.0.background_settled.notified().await;
+        if gap_count(&ing) == 0 { break; }
+    }
     assert_eq!(gap_count(&ing), 0, "background closed the gap");
     let times = p.call_times("history.fill_gap");
     assert_eq!(times.len(), 8, "one flooded attempt + 7 pages");
@@ -595,7 +602,7 @@ async fn background_filler_is_rate_limited_and_waits_out_flood() {
     for w in times[1..].windows(2) {
         assert!(w[1] - w[0] >= Duration::from_secs(2), "rate limit");
     }
-    let page = h.open(&chat(), 300).unwrap();
+    let page = h.open(&chat(), 300).await.unwrap();
     assert_eq!(page_ids(&page), ids(30..200));
     cancel.cancel();
     task.await.unwrap();
@@ -603,9 +610,9 @@ async fn background_filler_is_rate_limited_and_waits_out_flood() {
 
 #[tokio::test]
 async fn unknown_account_and_message_are_errors() {
-    let ing = shared_ingest();
+    let ing = shared_ingest().await;
     let p = Platform::new(10, &[]);
-    let h = History::new(ing, p, cfg(20));
+    let h = History::new(&ing.core, p, cfg(20));
     assert!(matches!(
         h.refresh(&ChatKey::new("nope", "c1"), 10).await,
         Err(HistoryError::UnknownAccount(_))
@@ -618,7 +625,7 @@ async fn unknown_account_and_message_are_errors() {
 
 #[tokio::test]
 async fn a_gap_cannot_be_filled_through_another_chat_or_topic() {
-    let ingest = shared_ingest();
+    let ingest = shared_ingest().await;
     live(&ingest, 0..4);
     let gap_id = {
         let guard = ingest.lock().unwrap();
@@ -638,7 +645,7 @@ async fn a_gap_cannot_be_filled_through_another_chat_or_topic() {
         .unwrap()
     };
     let platform = Platform::new(4, &["history.fill_gap"]);
-    let history = History::new(ingest.clone(), platform.clone(), cfg(2));
+    let history = History::new(&ingest.core, platform.clone(), cfg(2));
     for wrong in [
         ChatKey::new("acc", "other"),
         chat().with_topic("other-topic"),
@@ -651,33 +658,33 @@ async fn a_gap_cannot_be_filled_through_another_chat_or_topic() {
 
 #[tokio::test]
 async fn service_changes_are_published_after_message_commit() {
-    let ingest = shared_ingest();
+    let ingest = shared_ingest().await;
     let platform = Platform::new(3, &[]);
-    let bus = ch_core::runtime::ChangeBus::default();
+    let bus = crate::runtime::ChangeBus::default();
     let mut changes = bus.subscribe();
-    let history = History::with_bus(ingest.clone(), platform, cfg(3), bus);
+    let history = History::with_bus(&ingest.core, platform, cfg(3), bus);
     history.refresh(&chat(), 3).await.unwrap();
     let change = changes.try_recv().unwrap();
     assert!(matches!(
         change,
-        ch_core::runtime::CoreChange::Local {
+        crate::runtime::CoreChange::Local {
             service: "history",
             ..
         }
     ));
-    assert_eq!(page_ids(&history.open(&chat(), 0).unwrap()), ids(0..3));
+    assert_eq!(page_ids(&history.open(&chat(), 0).await.unwrap()), ids(0..3));
     assert_eq!(
-        history.open(&chat(), u32::MAX).unwrap().messages().count(),
+        history.open(&chat(), u32::MAX).await.unwrap().messages().count(),
         3
     );
 }
 
 #[tokio::test]
 async fn scrolling_returns_an_exactly_full_stored_window_without_plugin_io() {
-    let ingest = shared_ingest();
+    let ingest = shared_ingest().await;
     live(&ingest, 0..3);
     let platform = Platform::new(100, &[]);
-    let history = History::new(ingest, platform.clone(), cfg(20));
+    let history = History::new(&ingest.core, platform.clone(), cfg(20));
     assert_eq!(
         page_ids(&history.older(&chat(), None, 3).await.unwrap()),
         ids(0..3)
@@ -698,9 +705,9 @@ impl PluginApi for FixedPage {
     }
 }
 
-#[test]
-fn history_pages_validate_every_effective_message_before_writing() {
-    let ingest = shared_ingest();
+#[tokio::test]
+async fn history_pages_validate_every_effective_message_before_writing() {
+    let ingest = shared_ingest().await;
     let guard = ingest.lock().unwrap();
     let ing = &*guard;
     let conn = ing.db().conn();
@@ -790,7 +797,7 @@ fn history_pages_validate_every_effective_message_before_writing() {
 
 #[tokio::test]
 async fn sibling_topic_anchors_and_foreign_corrupt_gaps_are_rejected_without_mutation() {
-    let ingest = shared_ingest();
+    let ingest = shared_ingest().await;
     let gap = {
         let ing = ingest.lock().unwrap();
         let mut m = message("c1", 0);
@@ -813,7 +820,7 @@ async fn sibling_topic_anchors_and_foreign_corrupt_gaps_are_rejected_without_mut
         .unwrap()
     };
     let platform = Platform::new(50, &["history.fill_gap"]);
-    let history = History::new(ingest.clone(), platform.clone(), cfg(10));
+    let history = History::new(&ingest.core, platform.clone(), cfg(10));
     let topic_a = chat().with_topic("topic-a");
     assert!(matches!(
         history.older(&topic_a, Some(&mid(0)), 10).await,
@@ -843,7 +850,7 @@ async fn sibling_topic_anchors_and_foreign_corrupt_gaps_are_rejected_without_mut
 
 #[tokio::test]
 async fn refresh_detects_missing_history_when_new_head_has_the_same_timestamp() {
-    let ingest = shared_ingest();
+    let ingest = shared_ingest().await;
     live(&ingest, 0..1);
     let mut first = message("c1", 2);
     let mut second = message("c1", 1);
@@ -852,7 +859,7 @@ async fn refresh_detects_missing_history_when_new_head_has_the_same_timestamp() 
     let api = Arc::new(FixedPage(
         json!({"messages":[first,second],"next_cursor":"older"}),
     ));
-    let history = History::new(ingest.clone(), api, cfg(10));
+    let history = History::new(&ingest.core, api, cfg(10));
     let page = history.refresh(&chat(), 10).await.unwrap();
     let gap = page.gaps().next().unwrap();
     assert_eq!(gap.after_message_id, mid(0));
@@ -866,7 +873,7 @@ async fn refresh_detects_missing_history_when_new_head_has_the_same_timestamp() 
 
 #[tokio::test]
 async fn failed_gap_insertion_rolls_back_messages_cursor_and_notifications() {
-    let ingest = shared_ingest();
+    let ingest = shared_ingest().await;
     live(&ingest, 0..1);
     ingest
         .lock()
@@ -878,9 +885,9 @@ async fn failed_gap_insertion_rolls_back_messages_cursor_and_notifications() {
          BEGIN SELECT RAISE(ABORT,'injected gap failure'); END;",
         )
         .unwrap();
-    let bus = ch_core::runtime::ChangeBus::default();
+    let bus = crate::runtime::ChangeBus::default();
     let mut changes = bus.subscribe();
-    let history = History::with_bus(ingest.clone(), Platform::new(100, &[]), cfg(10), bus);
+    let history = History::with_bus(&ingest.core, Platform::new(100, &[]), cfg(10), bus);
     assert!(history.refresh(&chat(), 10).await.is_err());
     {
         let ing = ingest.lock().unwrap();
@@ -911,10 +918,10 @@ async fn failed_gap_insertion_rolls_back_messages_cursor_and_notifications() {
 
 #[tokio::test]
 async fn failed_gap_close_rolls_back_the_fetched_fill_page() {
-    let ingest = shared_ingest();
+    let ingest = shared_ingest().await;
     live(&ingest, 0..1);
     let history = History::new(
-        ingest.clone(),
+        &ingest.core,
         Platform::new(20, &["history.fill_gap"]),
         cfg(10),
     );
@@ -949,10 +956,10 @@ async fn failed_gap_close_rolls_back_the_fetched_fill_page() {
 
 #[tokio::test]
 async fn failed_island_split_rolls_back_new_messages_and_preserves_the_old_gap() {
-    let ingest = shared_ingest();
+    let ingest = shared_ingest().await;
     live(&ingest, 0..10);
     let history = History::new(
-        ingest.clone(),
+        &ingest.core,
         Platform::new(200, &["history.fill_gap", "history.jump_to_date"]),
         cfg(20),
     );
@@ -983,14 +990,14 @@ async fn failed_island_split_rolls_back_new_messages_and_preserves_the_old_gap()
 #[tokio::test]
 async fn first_date_jump_keeps_newer_history_reachable_with_or_without_fill_capability() {
     for fill in [false, true] {
-        let ingest = shared_ingest();
+        let ingest = shared_ingest().await;
         let caps = if fill {
             vec!["history.jump_to_date", "history.fill_gap"]
         } else {
             vec!["history.jump_to_date"]
         };
         let platform = Platform::new(100, &caps);
-        let history = History::new(ingest.clone(), platform.clone(), cfg(20));
+        let history = History::new(&ingest.core, platform.clone(), cfg(20));
         let page = history.jump_to_date(&chat(), at(40), 20).await.unwrap();
         assert_eq!(page.target, Some(mid(40)));
         assert_eq!(gap_count(&ingest), 1);
@@ -1001,4 +1008,141 @@ async fn first_date_jump_keeps_newer_history_reachable_with_or_without_fill_capa
             assert_eq!(platform.calls("history.fill_gap")[0]["cursor"], "50");
         }
     }
+}
+
+/// The first network response remains pending until explicitly released. No storage
+/// lease may follow the request into this wait.
+struct StalledPage {
+    calls: std::sync::atomic::AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait]
+impl PluginApi for StalledPage {
+    fn capabilities(&self, _: &str) -> Option<Arc<Capabilities>> {
+        Some(Arc::new(Capabilities::new()))
+    }
+    async fn call(&self, _: &str, _: &str, _: Value) -> Result<Value, HostError> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(json!({"messages":[message("c1", 3)]}))
+    }
+}
+
+#[tokio::test]
+async fn revoked_network_generation_cannot_join_or_write_into_equal_timestamp_replacement() {
+    let fixture = shared_ingest().await;
+    fixture.lock().unwrap().db().conn().execute("UPDATE account SET created_at=1", []).unwrap();
+    let api = Arc::new(StalledPage {
+        calls:Default::default(), entered:Default::default(), release:Default::default(),
+    });
+    let history = History::new(&fixture.core, api.clone(), cfg(10));
+    let cached = history.open(&chat(), 10).await.unwrap();
+    let old_owner = cached.owner_observation().unwrap().clone();
+    history.0.flood.lock().unwrap().insert((old_owner.clone(), "old.method".into()), Instant::now()+Duration::from_secs(600));
+    history.0.gap_errors.lock().unwrap().insert((old_owner.clone(), 7), (1, Instant::now()+Duration::from_secs(600)));
+    let old_request = {
+        let history=history.clone();
+        tokio::spawn(async move { history.refresh(&chat(), 10).await })
+    };
+    api.entered.notified().await;
+    // An outstanding platform call owns no storage guard and cannot block removal.
+    tokio::time::timeout(Duration::from_secs(2), fixture.core.accounts().remove("acc")).await.unwrap().unwrap();
+    fixture.core.accounts().add(NewAccount::new("fake").id("acc").no_start()).await.unwrap();
+    fixture.lock().unwrap().db().conn().execute("UPDATE account SET created_at=1", []).unwrap();
+    api.release.notify_one();
+    assert!(matches!(old_request.await.unwrap(), Err(HistoryError::UnknownAccount(_))));
+    let fresh = history.refresh(&chat(), 10).await.unwrap();
+    assert_eq!(page_ids(&fresh), ids(3..4));
+    assert_ne!(fresh.owner_observation(), Some(&old_owner));
+    assert_eq!(api.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(history.0.inflight.lock().unwrap().is_empty());
+    assert!(history.0.flood.lock().unwrap().is_empty());
+    assert!(history.0.gap_errors.lock().unwrap().is_empty());
+    assert!(history.projection_lease(&old_owner).await.is_err());
+    history.close(); history.drain().await; fixture.core.shutdown().await;
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=2)]
+async fn detached_actual_writer_retains_guard_and_drain_until_final_revoke_rolls_back() {
+    let fixture = shared_ingest().await;
+    let history = History::new(&fixture.core, Platform::new(0, &[]), cfg(10));
+    let ctx = history.ctx(&chat()).await.unwrap();
+    let old = ctx.owner.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let caller = {
+        let history=history.clone();
+        tokio::spawn(async move {
+            let ctx=history.serial(&ctx, &chat()).await?;
+            history.work(&ctx, move |_, ingest, owner, stop| {
+                ingest.apply_history_page_owned("fake", "acc", "c1", None,
+                    &[message("c1", 1)], Some(Some("pending-cursor")), owner, stop,
+                    move |conn, conv, now| {
+                        ch_db::insert_history_gap(conn, &ch_db::types::HistoryGapRow {
+                            conversation_id:conv, after_message_id:mid(1), created_at:now,
+                            ..Default::default()
+                        })?;
+                        let _=entered_tx.send(());
+                        release_rx.recv().unwrap();
+                        Ok(())
+                    })?;
+                Ok::<_,HistoryError>(())
+            }).await
+        })
+    };
+    entered_rx.await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let removal = {
+        let accounts=fixture.core.accounts().clone();
+        tokio::spawn(async move { accounts.remove("acc").await })
+    };
+    old.revocation().cancelled().await;
+    assert!(!removal.is_finished(), "actual blocking writer still owns the storage guard");
+    history.close();
+    let draining = { let history=history.clone(); tokio::spawn(async move { history.drain().await }) };
+    tokio::task::yield_now().await;
+    assert!(!draining.is_finished(), "caller cancellation does not settle the actual writer");
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), draining).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), removal).await.unwrap().unwrap().unwrap();
+    {
+    let ingest=fixture.lock().unwrap();
+    for table in ["message", "conversation", "history_state", "history_gap"] {
+        let count:i64=ingest.db().conn().query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row|row.get(0)).unwrap();
+        assert_eq!(count,0,"old page transaction must not leave {table}");
+    }
+    }
+    fixture.core.shutdown().await;
+}
+
+#[tokio::test]
+async fn final_history_close_veto_rolls_back_page_cursor_stub_and_gap_with_account_retained() {
+    let fixture=shared_ingest().await;
+    let history=History::new(&fixture.core, Platform::new(0,&[]),cfg(10));
+    let ctx=history.ctx(&chat()).await.unwrap();
+    let result=history.work(&ctx, |_,ingest,owner,stop| {
+        ingest.apply_history_page_owned("fake","acc","c1",None,&[message("c1",1)],
+            Some(Some("cursor")),owner,stop,|conn,conv,now| {
+                ch_db::insert_history_gap(conn,&ch_db::types::HistoryGapRow {
+                    conversation_id:conv,after_message_id:mid(1),created_at:now,..Default::default()
+                })?;
+                stop.cancel();
+                Ok(())
+            })?;
+        Ok::<_,HistoryError>(())
+    }).await;
+    assert!(result.is_err());
+    {
+    let ingest=fixture.lock().unwrap();
+    assert!(ch_db::get_account(ingest.db().conn(),"acc").unwrap().is_some());
+    for table in ["message","conversation","history_state","history_gap"] {
+        let count:i64=ingest.db().conn().query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get(0)).unwrap();
+        assert_eq!(count,0,"final veto must roll back {table}");
+    }
+    }
+    history.close(); history.drain().await; fixture.core.shutdown().await;
 }

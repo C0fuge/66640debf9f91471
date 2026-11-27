@@ -27,7 +27,7 @@ mod root;
 mod sink;
 
 pub use accounts::{
-    AccountSettings, AccountStorageBinding, Accounts, NewAccount, SpecDefaults, settings_secret_namespace,
+    AccountSettings, AccountStorageBinding, AccountStorageObservation, Accounts, NewAccount, SpecDefaults, settings_secret_namespace,
     validate_settings,
 };
 pub use bus::{AccountChange, ChangeBus, CoreChange};

@@ -3,12 +3,16 @@
 use super::{AccountRow, Accounts, Arc, HashMap, Mutex, PoisonError, Result, RuntimeError};
 use crate::host::HostConfig;
 use rusqlite::Connection;
+use std::{hash::{Hash, Hasher}, fmt};
 use std::path::{Path, PathBuf};
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 pub(super) struct Gates(Mutex<HashMap<PathBuf, Arc<Gate>>>,
+    #[cfg(test)] Mutex<Option<Arc<CaptureHook>>>,
+    // Separate one-shot hook inside an actual metadata worker. The ABA hook
+    // above deliberately remains outside the DB mutex so removal can proceed.
     #[cfg(test)] Mutex<Option<Arc<CaptureHook>>>);
 #[cfg(test)]
 type CaptureHook = dyn Fn() + Send + Sync;
@@ -131,10 +135,52 @@ pub struct AccountStorageBinding {
     gate: Arc<Gate>,
     guard: Arc<OwnedRwLockReadGuard<()>>,
 }
+
+/// Lease-free identity of one Accounts-issued owner generation. It retains no
+/// storage read guard and cannot authorize I/O without fresh exact reacquisition.
+#[derive(Clone)]
+pub struct AccountStorageObservation {
+    owner: AccountRow,
+    root: PathBuf,
+    gate: Arc<Gate>,
+}
+impl fmt::Debug for AccountStorageObservation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AccountStorageObservation").finish_non_exhaustive()
+    }
+}
+impl PartialEq for AccountStorageObservation {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner.account_id == other.owner.account_id && Arc::ptr_eq(&self.gate, &other.gate)
+    }
+}
+impl Eq for AccountStorageObservation {}
+impl Hash for AccountStorageObservation {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.owner.account_id.hash(state);
+        Arc::as_ptr(&self.gate).hash(state);
+    }
+}
+impl AccountStorageObservation {
+    pub fn owner(&self) -> &AccountRow { &self.owner }
+    pub fn revocation(&self) -> CancellationToken { self.gate.token.clone() }
+    pub fn is_revoked(&self) -> bool { self.gate.token.is_cancelled() }
+    /// Recheck the original generation and persisted owner inside a DB snapshot.
+    pub(crate) fn check(&self, conn: &Connection) -> Result<()> {
+        if self.is_revoked() { return Err(unknown(&self.owner.account_id)); }
+        check_owner(conn, &self.owner)?;
+        if self.is_revoked() { return Err(unknown(&self.owner.account_id)); }
+        Ok(())
+    }
+}
+
 impl AccountStorageBinding {
     pub fn owner(&self) -> &AccountRow { &self.owner }
     pub fn revocation(&self) -> CancellationToken { self.gate.token.clone() }
     pub fn is_revoked(&self) -> bool { self.gate.token.is_cancelled() }
+    pub fn observation(&self) -> AccountStorageObservation {
+        AccountStorageObservation { owner:self.owner.clone(), root:self.root.clone(), gate:self.gate.clone() }
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn uploads(&self) -> PathBuf { self.root.join("uploads") }
     #[cfg(target_os = "linux")]
@@ -144,6 +190,41 @@ impl AccountStorageBinding {
 }
 
 impl Accounts {
+    /// Capture owner and Gate together, then release the short capture lease.
+    /// Callers may retain this observation across network I/O without blocking removal.
+    pub async fn storage_observation_for(&self, account_id: &str) -> Result<AccountStorageObservation> {
+        Ok(self.storage_binding_for(account_id).await?.observation())
+    }
+
+    /// Acquire a bounded-use lease for exactly the originally observed Gate.
+    /// No matching timestamp or replacement generation can substitute for it.
+    pub async fn storage_binding_for_observation(&self, observed: &AccountStorageObservation) -> Result<AccountStorageBinding> {
+        if observed.is_revoked() || !self.0.storage.current(&observed.root, &observed.gate) {
+            return Err(unknown(&observed.owner.account_id));
+        }
+        let guard = tokio::select! {
+            biased;
+            _ = observed.gate.token.cancelled() => return Err(unknown(&observed.owner.account_id)),
+            guard = observed.gate.drain.clone().read_owned() => Arc::new(guard),
+        };
+        let owner = observed.owner.clone();
+        let root = observed.root.clone();
+        let inner = self.0.clone();
+        let lease = guard.clone();
+        self.db(move |db| {
+            let _lease = lease;
+            check_owner(db.conn(), &owner)?;
+            if !exclusive(db.conn(), inner.host.config(), &owner, &root)? {
+                return Err(unknown(&owner.account_id));
+            }
+            Ok(())
+        }).await?;
+        if observed.is_revoked() || !self.0.storage.current(&observed.root, &observed.gate) {
+            return Err(unknown(&observed.owner.account_id));
+        }
+        Ok(AccountStorageBinding { owner:observed.owner.clone(), root:observed.root.clone(), gate:observed.gate.clone(), guard })
+    }
+
     /// Pin a persisted account's configured storage against destructive teardown.
     /// The token revokes queued work. Retain the guard through actual I/O settlement.
     /// Native choosers keep only the token and recheck it after acquiring a fresh guard.
@@ -205,6 +286,10 @@ impl Accounts {
         let id = account_id.to_owned();
         let inner = self.0.clone();
         let (owner, root, gate) = self.db(move |db| {
+            #[cfg(test)] {
+                let hook = inner.storage.2.lock().unwrap_or_else(PoisonError::into_inner).take();
+                if let Some(hook) = hook { hook(); }
+            }
             let owner = ch_db::get_account(db.conn(), &id)?.ok_or_else(|| unknown(&id))?;
             let root = directory(inner.host.config(), &id);
             let gate = inner.storage.get(&root);
@@ -279,6 +364,83 @@ mod capture_tests {
     use crate::{host::MemorySecretStore, runtime::{Core, CoreConfig, NewAccount}};
     use std::sync::Condvar;
     use tokio::sync::Notify;
+
+    #[tokio::test(flavor="multi_thread", worker_threads=3)]
+    async fn dropped_history_capture_keeps_drain_pending_until_actual_metadata_worker_settles() {
+        use crate::history::{ChatKey, History, HistoryConfig};
+        use std::time::Duration;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("plugins/fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), serde_json::json!({"id":"fixture","name":"Fixture","version":"0.0.1","api_version":"1.2.0",
+            "entry":["python3","-B","-c","pass"],"brand_color":"#123456","multi_account":true,"auth_methods":["none"]}).to_string()).unwrap();
+        let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new())); config.autostart=false;
+        let core=Core::open(config).await.unwrap();
+        core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+        let arrived=Arc::new(Notify::new());
+        let latch=Arc::new((Mutex::new(false),Condvar::new()));
+        let signal=arrived.clone();let blocked=latch.clone();
+        *core.accounts().0.storage.2.lock().unwrap()=Some(Arc::new(move|| {
+            signal.notify_one();
+            let mut released=blocked.0.lock().unwrap();
+            while !*released {released=blocked.1.wait(released).unwrap();}
+        }));
+        let history=History::from_core(&core,HistoryConfig::default());
+        let request={let history=history.clone();tokio::spawn(async move {
+            history.refresh(&ChatKey::new("owner","chat"),10).await
+        })};
+        tokio::time::timeout(Duration::from_secs(5),arrived.notified()).await.unwrap();
+        // The hook is running inside the actual Accounts DB closure, before its
+        // read has finished. Cancelling the outer request must not settle it.
+        request.abort();assert!(request.await.unwrap_err().is_cancelled());
+        history.close();
+        let mut draining={let history=history.clone();tokio::spawn(async move {history.drain().await})};
+        let waited=tokio::time::timeout(Duration::from_millis(50),&mut draining).await.is_err();
+        *latch.0.lock().unwrap()=true;latch.1.notify_all();
+        assert!(waited,"drain returned while actual account metadata work remained blocked");
+        tokio::time::timeout(Duration::from_secs(5),draining).await.unwrap().unwrap();
+        assert!(history.refresh(&ChatKey::new("owner","chat"),10).await.is_err());
+        let db=core.open_db().unwrap();
+        assert!(ch_db::get_account(db.conn(),"owner").unwrap().is_some());
+        for table in ["conversation","message","history_state","history_gap"] {
+            let count:i64=db.conn().query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|row|row.get(0)).unwrap();
+            assert_eq!(count,0,"closed History must not write {table}");
+        }
+        drop(db);
+        core.shutdown().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=3)]
+    async fn lease_free_observation_survives_no_guard_and_cannot_rebind_equal_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("plugins/fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), serde_json::json!({"id":"fixture","name":"Fixture","version":"0.0.1","api_version":"1.2.0",
+            "entry":["python3","-B","-c","pass"],"brand_color":"#123456","multi_account":true,"auth_methods":["none"]}).to_string()).unwrap();
+        let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new())); config.autostart=false;
+        let core=Core::open(config).await.unwrap();
+        core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+        core.open_db().unwrap().conn().execute("UPDATE account SET created_at=1 WHERE account_id='owner'",[]).unwrap();
+        let old=core.accounts().storage_observation_for("owner").await.unwrap();
+        assert_eq!(old,old.clone());
+        // A retained observation alone must not hold removal behind a network wait.
+        tokio::time::timeout(std::time::Duration::from_secs(5),core.accounts().remove("owner")).await.unwrap().unwrap();
+        assert!(old.is_revoked());
+        core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+        core.open_db().unwrap().conn().execute("UPDATE account SET created_at=1 WHERE account_id='owner'",[]).unwrap();
+        let fresh=core.accounts().storage_observation_for("owner").await.unwrap();
+        assert_ne!(old,fresh);
+        assert!(matches!(core.accounts().storage_binding_for_observation(&old).await,Err(RuntimeError::UnknownAccount(_))));
+        let binding=core.accounts().storage_binding_for_observation(&fresh).await.unwrap();
+        assert_eq!(binding.observation(),fresh);
+        let accounts=core.accounts().clone();
+        let removing=tokio::spawn(async move{accounts.remove("owner").await});
+        tokio::time::timeout(std::time::Duration::from_secs(5),fresh.revocation().cancelled()).await.unwrap();
+        assert!(!removing.is_finished(),"only the newly acquired binding owns a storage lease");
+        drop(binding);
+        tokio::time::timeout(std::time::Duration::from_secs(5),removing).await.unwrap().unwrap().unwrap();
+        core.shutdown().await;
+    }
 
     #[tokio::test(flavor="multi_thread", worker_threads=4)]
     async fn captured_gate_cannot_follow_same_id_recreation_with_identical_owner_metadata() {

@@ -55,10 +55,13 @@
 
 mod api;
 mod store;
+mod owner;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use ch_db::Millis;
@@ -71,17 +74,18 @@ use ch_protocol::methods::{
 use ch_protocol::{ErrorCode, Id, Timestamp};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::sync::{Notify, OnceCell};
+use tokio::sync::{Notify, OnceCell, Semaphore, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub use api::PluginApi;
+pub use owner::HistoryReadLease;
 use store::{Key, ResolvedGap};
 
 use crate::host::HostError;
 use crate::ingest::{Applied, Ingest, IngestError};
-use crate::runtime::{ChangeBus, Core};
+use crate::runtime::{AccountStorageObservation, Accounts, ChangeBus, Core};
 
 /// The ingest/database handle the services share (`Db` is `!Sync`).
 pub type SharedIngest = Arc<Mutex<Ingest>>;
@@ -192,9 +196,12 @@ pub struct Page {
     /// `jump_to_date`: the message to scroll to (the first one at or after the date, else the
     /// newest one before it).
     pub target: Option<Id>,
+    owner: Option<AccountStorageObservation>,
 }
 
 impl Page {
+    /// The exact account generation of this snapshot; never a wire field.
+    pub fn owner_observation(&self) -> Option<&AccountStorageObservation> { self.owner.as_ref() }
     /// The messages, oldest first.
     pub fn messages(&self) -> impl Iterator<Item = &MessageRow> {
         self.items.iter().filter_map(|i| match i {
@@ -273,20 +280,28 @@ enum Op {
     Jump(Millis, u32),
 }
 
-type Inflight = HashMap<(ChatKey, Op), Arc<OnceCell<Result<Page>>>>;
+type Scope = (AccountStorageObservation, ChatKey);
+type Inflight = HashMap<(Scope, Op), Arc<OnceCell<Result<Page>>>>;
+const DB_JOBS: u32 = 64;
 
 struct Inner {
     ingest: SharedIngest,
     bus: Option<ChangeBus>,
     api: Arc<dyn PluginApi>,
+    accounts: Accounts,
     cfg: HistoryConfig,
-    chat_locks: Mutex<HashMap<ChatKey, Arc<tokio::sync::Mutex<()>>>>,
+    chat_locks: Mutex<HashMap<Scope, Weak<tokio::sync::Mutex<()>>>>,
     inflight: Mutex<Inflight>,
     /// `(account_id, method)` → blocked until.
-    flood: Mutex<HashMap<(String, String), Instant>>,
+    flood: Mutex<HashMap<(AccountStorageObservation, String), Instant>>,
     /// gap id → (failures, retry not before).
-    gap_errors: Mutex<HashMap<i64, (u32, Instant)>>,
+    gap_errors: Mutex<HashMap<(AccountStorageObservation, i64), (u32, Instant)>>,
     wake: Notify,
+    stop: CancellationToken,
+    closed: Mutex<bool>,
+    db_slots: Arc<Semaphore>,
+    #[cfg(test)]
+    background_settled: Notify,
 }
 
 /// The history service. Cheap to clone.
@@ -301,14 +316,18 @@ impl std::fmt::Debug for History {
     }
 }
 
+#[derive(Clone)]
 struct Ctx {
+    owner: AccountStorageObservation,
     plugin_id: String,
-    caps: Arc<Capabilities>,
+    caps: Option<Arc<Capabilities>>,
+    // Actual blocking DB work retains serialization if its async caller disappears.
+    serial: Option<Arc<OwnedMutexGuard<()>>>,
 }
 
 impl Ctx {
     fn fill_mode(&self) -> bool {
-        self.caps.has(CAP_FILL_GAP)
+        self.caps.as_ref().is_some_and(|caps| caps.has(CAP_FILL_GAP))
     }
 }
 
@@ -346,25 +365,25 @@ fn untag<'a>(prefix: &str, c: &'a Option<String>) -> Option<&'a str> {
 
 impl History {
     /// A history service over `ingest`, calling plugins through `api`.
-    pub fn new(ingest: SharedIngest, api: Arc<dyn PluginApi>, cfg: HistoryConfig) -> Self {
-        Self::build(ingest, api, cfg, None)
+    pub fn new(core: &Core, api: Arc<dyn PluginApi>, cfg: HistoryConfig) -> Self {
+        Self::build(core, api, cfg, None)
     }
 
     /// As [`History::new`], publishing committed message changes on the runtime bus.
     pub fn with_bus(
-        ingest: SharedIngest,
+        core: &Core,
         api: Arc<dyn PluginApi>,
         cfg: HistoryConfig,
         bus: ChangeBus,
     ) -> Self {
-        Self::build(ingest, api, cfg, Some(bus))
+        Self::build(core, api, cfg, Some(bus))
     }
 
     /// Use the running core's writer, plugin host and change bus. Ingest policy updates on
     /// the core also apply to subsequent history fetches.
     pub fn from_core(core: &Core, cfg: HistoryConfig) -> Self {
         Self::with_bus(
-            core.ingest().shared_ingest(),
+            core,
             Arc::new(core.host().clone()),
             cfg,
             core.bus().clone(),
@@ -372,22 +391,28 @@ impl History {
     }
 
     fn build(
-        ingest: SharedIngest,
+        core: &Core,
         api: Arc<dyn PluginApi>,
         mut cfg: HistoryConfig,
         bus: Option<ChangeBus>,
     ) -> Self {
         cfg.page_size = cfg.page_size.clamp(1, 200);
         Self(Arc::new(Inner {
-            ingest,
+            ingest: core.ingest().shared_ingest(),
             bus,
             api,
+            accounts: core.accounts().clone(),
             cfg,
             chat_locks: Mutex::default(),
             inflight: Mutex::default(),
             flood: Mutex::default(),
             gap_errors: Mutex::default(),
             wake: Notify::new(),
+            stop: CancellationToken::new(),
+            closed: Mutex::new(false),
+            db_slots: Arc::new(Semaphore::new(DB_JOBS as usize)),
+            #[cfg(test)]
+            background_settled: Notify::new(),
         }))
     }
 
@@ -399,21 +424,24 @@ impl History {
     // ---- public API ---------------------------------------------------------------------
 
     /// The newest `limit` stored messages. Database only, never blocks on a plugin.
-    pub fn open(&self, ck: &ChatKey, limit: u32) -> Result<Page> {
+    pub async fn open(&self, ck: &ChatKey, limit: u32) -> Result<Page> {
         let limit = self.limit(limit);
-        self.db(|conn| Ok(self.older_window(conn, ck, None, limit)?.page))
+        let ctx = self.ctx(ck).await?;
+        let key = ck.clone();
+        let page = self.read(&ctx, move |this, conn| Ok(this.older_window(conn, &key, None, limit)?.page)).await?;
+        self.page(&ctx, page)
     }
 
     /// Fetch the newest page from the plugin, record a gap if the stored history does not reach
     /// it, and return the newest `limit` stored messages.
     pub async fn refresh(&self, ck: &ChatKey, limit: u32) -> Result<Page> {
         let limit = self.limit(limit);
-        self.dedup(ck, Op::Refresh(limit), || async {
-            let lock = self.chat_lock(ck);
-            let _g = lock.lock().await;
-            let ctx = self.ctx(ck)?;
+        let ctx = self.ctx(ck).await?;
+        self.dedup(&ctx, ck, Op::Refresh(limit), || async {
+            let ctx = self.serial(&ctx, ck).await?;
             self.refresh_inner(&ctx, ck).await?;
-            self.db(|conn| Ok(self.older_window(conn, ck, None, limit)?.page))
+            let key = ck.clone();
+            self.read(&ctx, move |this, conn| Ok(this.older_window(conn, &key, None, limit)?.page)).await
         })
         .await
     }
@@ -427,22 +455,22 @@ impl History {
         limit: u32,
     ) -> Result<Page> {
         let limit = self.limit(limit);
+        let ctx = self.ctx(ck).await?;
         let op = Op::Older(before_message_id.map(str::to_owned), limit);
-        self.dedup(ck, op, || async {
-            let lock = self.chat_lock(ck);
-            let _g = lock.lock().await;
+        self.dedup(&ctx, ck, op, || async {
+            let ctx = self.serial(&ctx, ck).await?;
             let before = match before_message_id {
-                Some(id) => Some(self.key_of(ck, id)?),
+                Some(id) => Some(self.key_of(&ctx, ck, id).await?),
                 None => None,
             };
             let (mut fetched, mut filled) = (0, 0);
             loop {
-                let w = self.db(|conn| self.older_window(conn, ck, before, limit))?;
+                let key = ck.clone();
+                let w = self.read(&ctx, move |this, conn| this.older_window(conn, &key, before, limit)).await?;
                 if let Some(Item::Gap(g)) = w.page.items.first() {
                     if filled >= self.0.cfg.on_demand_fill_pages {
                         return Ok(w.page);
                     }
-                    let ctx = self.ctx(ck)?;
                     self.fill_page(&ctx, ck, g.gap_id, self.0.cfg.max_inline_flood_wait)
                         .await?;
                     filled += 1;
@@ -451,7 +479,6 @@ impl History {
                 if w.full || w.reached_start || fetched >= self.0.cfg.max_fetch_pages {
                     return Ok(w.page);
                 }
-                let ctx = self.ctx(ck)?;
                 self.fetch_older_page(&ctx, ck).await?;
                 fetched += 1;
             }
@@ -462,21 +489,21 @@ impl History {
     /// `limit` messages newer than `after_message_id`, filling a gap it runs into.
     pub async fn newer(&self, ck: &ChatKey, after_message_id: &str, limit: u32) -> Result<Page> {
         let limit = self.limit(limit);
+        let ctx = self.ctx(ck).await?;
         let op = Op::Newer(after_message_id.to_owned(), limit);
-        self.dedup(ck, op, || async {
-            let lock = self.chat_lock(ck);
-            let _g = lock.lock().await;
-            let after = self.key_of(ck, after_message_id)?;
+        self.dedup(&ctx, ck, op, || async {
+            let ctx = self.serial(&ctx, ck).await?;
+            let after = self.key_of(&ctx, ck, after_message_id).await?;
             let mut filled = 0;
             loop {
-                let w = self.db(|conn| self.newer_window(conn, ck, after, limit))?;
+                let key = ck.clone();
+                let w = self.read(&ctx, move |this, conn| this.newer_window(conn, &key, after, limit)).await?;
                 let Some(Item::Gap(g)) = w.page.items.last() else {
                     return Ok(w.page);
                 };
                 if filled >= self.0.cfg.on_demand_fill_pages {
                     return Ok(w.page);
                 }
-                let ctx = self.ctx(ck)?;
                 self.fill_page(&ctx, ck, g.gap_id, self.0.cfg.max_inline_flood_wait)
                     .await?;
                 filled += 1;
@@ -490,16 +517,16 @@ impl History {
     /// or pages older history until the date is covered (bounded by `max_fetch_pages`).
     pub async fn jump_to_date(&self, ck: &ChatKey, at: Millis, limit: u32) -> Result<Page> {
         let limit = self.limit(limit);
-        self.dedup(ck, Op::Jump(at, limit), || async {
-            let lock = self.chat_lock(ck);
-            let _g = lock.lock().await;
+        let ctx = self.ctx(ck).await?;
+        self.dedup(&ctx, ck, Op::Jump(at, limit), || async {
+            let ctx = self.serial(&ctx, ck).await?;
             let mut around_done = false;
             for _ in 0..self.0.cfg.max_fetch_pages.max(1) {
-                let Some(hole) = self.db(|conn| self.locate_hole(conn, ck, at))? else {
+                let key = ck.clone();
+                let Some(hole) = self.read(&ctx, move |this, conn| this.locate_hole(conn, &key, at)).await? else {
                     break;
                 };
-                let ctx = self.ctx(ck)?;
-                if !around_done && ctx.caps.has(CAP_JUMP) {
+                if !around_done && ctx.caps.as_ref().is_some_and(|caps| caps.has(CAP_JUMP)) {
                     self.around_inner(&ctx, ck, at, hole).await?;
                     around_done = true;
                     continue;
@@ -512,24 +539,25 @@ impl History {
                     Hole::Bottom(_) => self.fetch_older_page(&ctx, ck).await?,
                 }
             }
-            self.db(|conn| self.around_window(conn, ck, at, limit))
+            let key = ck.clone();
+            self.read(&ctx, move |this, conn| this.around_window(conn, &key, at, limit)).await
         })
         .await
     }
 
     /// Fill a gap on demand, up to `on_demand_fill_pages` pages.
     pub async fn fill_gap(&self, ck: &ChatKey, gap_id: i64) -> Result<GapFill> {
-        let lock = self.chat_lock(ck);
-        let _g = lock.lock().await;
-        let ctx = self.ctx(ck)?;
+        let captured = self.ctx(ck).await?;
+        let ctx = self.serial(&captured, ck).await?;
         let mut pages = 0;
         while pages < self.0.cfg.on_demand_fill_pages.max(1) {
-            if self.db(|conn| {
+            let key = ck.clone();
+            if self.read(&ctx, move |_this, conn| {
                 Ok(
-                    store::resolved_gap(conn, gap_id, Self::conv(conn, ck)?, ck.topic_key())?
+                    store::resolved_gap(conn, gap_id, Self::conv(conn, &key)?, key.topic_key())?
                         .is_none(),
                 )
-            })? {
+            }).await? {
                 return Ok(GapFill {
                     closed: true,
                     pages,
@@ -560,7 +588,9 @@ impl History {
 
     /// How long `method` is blocked for `account_id` by a `FLOOD_WAIT`, if at all.
     pub fn flood_wait_remaining(&self, account_id: &str, method: &str) -> Option<Duration> {
-        let until = *lock(&self.0.flood).get(&(account_id.to_owned(), method.to_owned()))?;
+        self.prune();
+        let until = lock(&self.0.flood).iter().find_map(|((owner, key), until)|
+            (owner.owner().account_id == account_id && key == method).then_some(*until))?;
         let now = Instant::now();
         (until > now).then(|| until - now)
     }
@@ -581,29 +611,13 @@ impl History {
         }
     }
 
-    fn db<T>(&self, f: impl FnOnce(&rusqlite::Connection) -> Result<T>) -> Result<T> {
-        let g = lock(&self.0.ingest);
-        f(g.db().conn())
-    }
-
-    fn ingest<T>(&self, f: impl FnOnce(&Ingest) -> Result<T>) -> Result<T> {
-        let g = lock(&self.0.ingest);
-        f(&g)
-    }
-
-    fn chat_lock(&self, ck: &ChatKey) -> Arc<tokio::sync::Mutex<()>> {
-        lock(&self.0.chat_locks)
-            .entry(ck.clone())
-            .or_default()
-            .clone()
-    }
-
-    async fn dedup<F, Fut>(&self, ck: &ChatKey, op: Op, f: F) -> Result<Page>
+    async fn dedup<F, Fut>(&self, ctx: &Ctx, ck: &ChatKey, op: Op, f: F) -> Result<Page>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Page>>,
     {
-        let key = (ck.clone(), op);
+        self.active(ctx)?;
+        let key = ((ctx.owner.clone(), ck.clone()), op);
         let cell = lock(&self.0.inflight)
             .entry(key.clone())
             .or_default()
@@ -613,22 +627,8 @@ impl History {
         if m.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
             m.remove(&key);
         }
-        res
-    }
-
-    fn ctx(&self, ck: &ChatKey) -> Result<Ctx> {
-        let account = self
-            .db(|conn| Ok(ch_db::get_account(conn, &ck.account_id)?))?
-            .ok_or_else(|| HistoryError::UnknownAccount(ck.account_id.clone()))?;
-        let caps = self
-            .0
-            .api
-            .capabilities(&account.plugin_id)
-            .ok_or_else(|| HistoryError::PluginNotRunning(account.plugin_id.clone()))?;
-        Ok(Ctx {
-            plugin_id: account.plugin_id,
-            caps,
-        })
+        drop(m);
+        self.page(ctx, res?)
     }
 
     fn conv(conn: &rusqlite::Connection, ck: &ChatKey) -> Result<Option<i64>> {
@@ -639,14 +639,16 @@ impl History {
         )?)
     }
 
-    fn key_of(&self, ck: &ChatKey, message_id: &str) -> Result<Key> {
-        self.db(|conn| {
-            let conv = Self::conv(conn, ck)?;
+    async fn key_of(&self, ctx: &Ctx, ck: &ChatKey, message_id: &str) -> Result<Key> {
+        let key = ck.clone();
+        let id = message_id.to_owned();
+        self.read(ctx, move |_this, conn| {
+            let conv = Self::conv(conn, &key)?;
             Ok(match conv {
-                Some(c) => store::key_of(conn, c, ck.topic(), message_id)?,
+                Some(c) => store::key_of(conn, c, key.topic(), &id)?,
                 None => None,
             })
-        })?
+        }).await?
         .ok_or_else(|| HistoryError::UnknownMessage(message_id.to_owned()))
     }
 
@@ -659,10 +661,13 @@ impl History {
         params: &P,
         inline_wait: Duration,
     ) -> Result<R> {
-        let key = (account_id.to_owned(), method.to_owned());
+        self.active(ctx)?;
+        if ctx.caps.is_none() { return Err(HistoryError::PluginNotRunning(ctx.plugin_id.clone())); }
+        let key = (ctx.owner.clone(), method.to_owned());
         let params = serde_json::to_value(params)
             .map_err(|e| HistoryError::Plugin(Arc::new(HostError::Json(e))))?;
         for attempt in 0.. {
+            self.active(ctx)?;
             let until = lock(&self.0.flood).get(&key).copied();
             if let Some(until) = until.filter(|u| *u > Instant::now()) {
                 let wait = until.saturating_duration_since(Instant::now());
@@ -672,14 +677,24 @@ impl History {
                         retry_after: wait,
                     });
                 }
-                tokio::time::sleep_until(until).await;
+                let revoked = ctx.owner.revocation();
+                tokio::select! {
+                    biased;
+                    _ = self.0.stop.cancelled() => return Err(HistoryError::UnknownAccount(account_id.to_owned())),
+                    _ = revoked.cancelled() => return Err(HistoryError::UnknownAccount(account_id.to_owned())),
+                    _ = tokio::time::sleep_until(until) => {},
+                }
             }
-            match self
-                .0
-                .api
-                .call(&ctx.plugin_id, method, params.clone())
-                .await
-            {
+            self.active(ctx)?;
+            let revoked = ctx.owner.revocation();
+            let response = tokio::select! {
+                biased;
+                _ = self.0.stop.cancelled() => return Err(HistoryError::UnknownAccount(account_id.to_owned())),
+                _ = revoked.cancelled() => return Err(HistoryError::UnknownAccount(account_id.to_owned())),
+                result = self.0.api.call(&ctx.plugin_id, method, params.clone()) => result,
+            };
+            self.active(ctx)?;
+            match response {
                 Ok(v) => {
                     return serde_json::from_value(v)
                         .map_err(|e| HistoryError::Plugin(Arc::new(HostError::Json(e))));
@@ -740,6 +755,7 @@ impl History {
                 more_older: has_more || blocking.is_some() || !reached_start,
                 more_newer: before.is_some(),
                 target: None,
+                owner: None,
             },
             full,
             reached_start,
@@ -783,6 +799,7 @@ impl History {
                 more_older: true,
                 more_newer: has_more || blocking.is_some(),
                 target: None,
+                owner: None,
             },
             full,
             reached_start: false,
@@ -813,6 +830,7 @@ impl History {
             more_older: lower.page.more_older,
             more_newer: upper.page.more_newer,
             target,
+            owner: None,
         })
     }
 
@@ -858,15 +876,16 @@ impl History {
 
     /// Newest page + gap detection.
     async fn refresh_inner(&self, ctx: &Ctx, ck: &ChatKey) -> Result<()> {
-        let (prior, state) = self.db(|conn| {
-            Ok(match Self::conv(conn, ck)? {
+        let key = ck.clone();
+        let (prior, state) = self.read(ctx, move |_this, conn| {
+            Ok(match Self::conv(conn, &key)? {
                 Some(c) => (
-                    store::newest_platform(conn, c, ck.topic())?,
-                    ch_db::get_history_state(conn, c, ck.topic_key())?,
+                    store::newest_platform(conn, c, key.topic())?,
+                    ch_db::get_history_state(conn, c, key.topic_key())?,
                 ),
                 None => (None, None),
             })
-        })?;
+        }).await?;
         let res: PagedMessagesResult = self
             .call(
                 ctx,
@@ -877,7 +896,10 @@ impl History {
             )
             .await?;
         let fill_mode = ctx.fill_mode();
-        let recorded = self.ingest(|ing| {
+        let scope = ck.clone();
+        let plugin = ctx.plugin_id.clone();
+        let recorded = self.work(ctx, move |this, ing, owner, stop| {
+            let ck = &scope;
             let never_paged = state
                 .as_ref()
                 .is_none_or(|s| s.older_cursor.is_none() && !s.reached_start);
@@ -886,13 +908,14 @@ impl History {
                 Some(c) if never_paged => Some(Some(c.as_str())),
                 Some(_) => None,
             };
-            let (applied, recorded) = ing.apply_history_page_with(
-                &ctx.plugin_id,
+            let (applied, recorded) = ing.apply_history_page_owned(
+                &plugin,
                 &ck.account_id,
                 &ck.chat_id,
                 ck.topic(),
                 &res.messages,
                 older_arg,
+                owner, stop,
                 |conn, conv, now| {
                     let (Some((prior_key, prior_id)), Some(next)) = (&prior, &res.next_cursor)
                     else {
@@ -927,9 +950,9 @@ impl History {
                     Ok(true)
                 },
             )?;
-            self.publish(applied);
+            this.publish(applied);
             Ok(recorded)
-        })?;
+        }).await?;
         if recorded {
             self.0.wake.notify_one();
         }
@@ -939,14 +962,15 @@ impl History {
     /// One page further back along the `older_cursor` chain (the newest page if the chain was
     /// never started).
     async fn fetch_older_page(&self, ctx: &Ctx, ck: &ChatKey) -> Result<()> {
-        let cursor = self.db(|conn| {
-            Ok(match Self::conv(conn, ck)? {
+        let key = ck.clone();
+        let cursor = self.read(ctx, move |_this, conn| {
+            Ok(match Self::conv(conn, &key)? {
                 Some(c) => {
-                    ch_db::get_history_state(conn, c, ck.topic_key())?.and_then(|s| s.older_cursor)
+                    ch_db::get_history_state(conn, c, key.topic_key())?.and_then(|s| s.older_cursor)
                 }
                 None => None,
             })
-        })?;
+        }).await?;
         let Some(cursor) = cursor else {
             return self.refresh_inner(ctx, ck).await;
         };
@@ -959,18 +983,22 @@ impl History {
                 self.0.cfg.max_inline_flood_wait,
             )
             .await?;
-        self.ingest(|ing| {
-            let applied = ing.apply_history_page(
-                &ctx.plugin_id,
+        let scope = ck.clone();
+        let plugin = ctx.plugin_id.clone();
+        self.work(ctx, move |this, ing, owner, stop| {
+            let ck = &scope;
+            let (applied, ()) = ing.apply_history_page_owned(
+                &plugin,
                 &ck.account_id,
                 &ck.chat_id,
                 ck.topic(),
                 &res.messages,
                 Some(res.next_cursor.as_deref()),
+                owner, stop, |_, _, _| Ok(()),
             )?;
-            self.publish(applied);
+            this.publish(applied);
             Ok(())
-        })
+        }).await
     }
 
     /// Keys of a page's messages after ingest, with their ids.
@@ -997,14 +1025,15 @@ impl History {
         gap_id: i64,
         inline_wait: Duration,
     ) -> Result<bool> {
-        let Some(g) = self.db(|conn| {
+        let key = ck.clone();
+        let Some(g) = self.read(ctx, move |_this, conn| {
             Ok(store::resolved_gap(
                 conn,
                 gap_id,
-                Self::conv(conn, ck)?,
-                ck.topic_key(),
+                Self::conv(conn, &key)?,
+                key.topic_key(),
             )?)
-        })?
+        }).await?
         else {
             return Ok(true);
         };
@@ -1026,14 +1055,18 @@ impl History {
             self.call(ctx, &ck.account_id, FETCH_RECENT, &p, inline_wait)
                 .await?
         };
-        self.ingest(|ing| {
-            let (applied, closed) = ing.apply_history_page_with(
-                &ctx.plugin_id,
+        let scope = ck.clone();
+        let plugin = ctx.plugin_id.clone();
+        self.work(ctx, move |this, ing, owner, stop| {
+            let ck = &scope;
+            let (applied, closed) = ing.apply_history_page_owned(
+                &plugin,
                 &ck.account_id,
                 &ck.chat_id,
                 ck.topic(),
                 &res.messages,
                 None,
+                owner, stop,
                 |conn, conv, now| {
                     // The request awaited plugin I/O. Recheck ownership inside the write
                     // transaction so removal/replacement of a gap cannot target another row.
@@ -1104,9 +1137,9 @@ impl History {
                     Ok(closed)
                 },
             )?;
-            self.publish(applied);
+            this.publish(applied);
             Ok(closed)
-        })
+        }).await
     }
 
     /// `history.around` into a hole; records the holes left on either side of the island.
@@ -1129,7 +1162,10 @@ impl History {
             )
             .await?;
         let fill_mode = ctx.fill_mode();
-        let recorded = self.ingest(|ing| {
+        let scope = ck.clone();
+        let plugin = ctx.plugin_id.clone();
+        let recorded = self.work(ctx, move |this, ing, owner, stop| {
+            let ck = &scope;
             let island_min = res.messages.iter().map(|m| m.sent_at.unix_millis()).min();
             let (older_arg, prev_older) = match &hole {
                 Hole::Bottom(oldest) => {
@@ -1144,13 +1180,14 @@ impl History {
                 }
                 Hole::Gap(_) => (None, None),
             };
-            let (applied, recorded) = ing.apply_history_page_with(
-                &ctx.plugin_id,
+            let (applied, recorded) = ing.apply_history_page_owned(
+                &plugin,
                 &ck.account_id,
                 &ck.chat_id,
                 ck.topic(),
                 &res.messages,
                 older_arg,
+                owner, stop,
                 |conn, conv, now| {
                     let current_gap = match &hole {
                         Hole::Gap(g) => Some(
@@ -1270,9 +1307,9 @@ impl History {
                     Ok(recorded)
                 },
             )?;
-            self.publish(applied);
+            this.publish(applied);
             Ok(recorded)
-        })?;
+        }).await?;
         if recorded {
             self.0.wake.notify_one();
         }
@@ -1284,13 +1321,18 @@ impl History {
     async fn background_loop(&self, cancel: CancellationToken) {
         loop {
             tokio::select! {
+                _ = self.0.stop.cancelled() => return,
                 _ = cancel.cancelled() => return,
                 _ = tokio::time::sleep(self.0.cfg.background_interval) => {}
             }
-            if let Some(next) = self.background_step().await {
+            let next = self.background_step().await;
+            #[cfg(test)]
+            self.0.background_settled.notify_one();
+            if let Some(next) = next {
                 let idle = Instant::now() + self.0.cfg.background_idle;
                 let deadline = next.map_or(idle, |n| n.min(idle));
                 tokio::select! {
+                    _ = self.0.stop.cancelled() => return,
                     _ = cancel.cancelled() => return,
                     _ = self.0.wake.notified() => {}
                     _ = tokio::time::sleep_until(deadline) => {}
@@ -1301,7 +1343,8 @@ impl History {
 
     /// Fill one page of some gap. `None` = worked; `Some(t)` = idle, something may be ready at `t`.
     async fn background_step(&self) -> Option<Option<Instant>> {
-        let gaps = match self.db(|conn| Ok(store::all_gaps(conn)?)) {
+        self.prune();
+        let gaps = match self.global_read(|conn| Ok(store::all_gaps(conn)?)).await {
             Ok(g) => g,
             Err(e) => {
                 tracing::warn!(error = %e, "background history: listing gaps failed");
@@ -1312,45 +1355,49 @@ impl History {
         let mut earliest: Option<Instant> = None;
         let mut note = |t: Instant| earliest = Some(earliest.map_or(t, |e| e.min(t)));
         for (gap_id, account_id, chat_id, topic) in gaps {
-            if let Some(&(_, until)) = lock(&self.0.gap_errors).get(&gap_id)
-                && until > now
-            {
-                note(until);
-                continue;
-            }
             let ck = ChatKey {
                 account_id,
                 chat_id,
                 topic_id: (!topic.is_empty()).then_some(topic),
             };
-            let Ok(ctx) = self.ctx(&ck) else { continue };
+            let Ok(mut ctx) = self.ctx(&ck).await else { continue };
+            if ctx.caps.is_none() { continue; }
+            let error_key = (ctx.owner.clone(), gap_id);
+            if let Some(&(_, until)) = lock(&self.0.gap_errors).get(&error_key)
+                && until > now
+            {
+                note(until);
+                continue;
+            }
             let method = if ctx.fill_mode() {
                 FILL_GAP
             } else {
                 FETCH_RECENT
             };
             if let Some(&until) =
-                lock(&self.0.flood).get(&(ck.account_id.clone(), method.to_owned()))
+                lock(&self.0.flood).get(&(ctx.owner.clone(), method.to_owned()))
                 && until > now
             {
                 note(until);
                 continue;
             }
-            let Ok(_g) = self.chat_lock(&ck).try_lock_owned() else {
+            let Ok(guard) = self.chat_lock(&ctx, &ck).try_lock_owned() else {
                 continue;
             };
+            ctx.serial = Some(Arc::new(guard));
             match self.fill_page(&ctx, &ck, gap_id, Duration::ZERO).await {
                 Ok(_) => {
-                    lock(&self.0.gap_errors).remove(&gap_id);
+                    lock(&self.0.gap_errors).remove(&error_key);
                 }
                 Err(HistoryError::FloodWait { .. }) => {}
                 Err(e) => {
+                    if self.active(&ctx).is_err() { self.prune(); continue; }
                     let mut errs = lock(&self.0.gap_errors);
-                    let n = errs.get(&gap_id).map_or(0, |(n, _)| *n);
+                    let n = errs.get(&error_key).map_or(0, |(n, _)| *n);
                     let backoff =
                         Duration::from_secs(30 << n.min(7)).min(Duration::from_secs(3600));
                     tracing::warn!(gap_id, error = %e, ?backoff, "background gap fill failed");
-                    errs.insert(gap_id, (n + 1, Instant::now() + backoff));
+                    errs.insert(error_key, (n + 1, Instant::now() + backoff));
                 }
             }
             return None;

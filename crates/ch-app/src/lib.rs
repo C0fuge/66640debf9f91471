@@ -250,9 +250,11 @@ impl App {
             self.media.close();
             self.reactions.close();
             self.chat_flags.close();
+            self.history.close();
             self.text_admissions.close();
             let text_admissions = self.text_admissions.clone();
             let chat_flags = self.chat_flags.clone();
+            let history = self.history.clone();
             let (ingress, outbox, core, reactions) = (self.ingress.clone(), self.outbox.clone(), self.core.clone(), self.reactions.clone());
             let directory = (self._lock.clone(), self._demo.clone());
             // Teardown owns the directory and all drains. Cancelling any waiter
@@ -261,6 +263,7 @@ impl App {
                 let _directory = directory;
                 ingress.drain().await;
                 text_admissions.drain().await;
+                history.drain().await;
                 outbox.shutdown().await;
                 core.shutdown().await;
                 reactions.drain().await;
