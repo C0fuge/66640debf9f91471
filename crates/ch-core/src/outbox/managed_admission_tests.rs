@@ -437,6 +437,53 @@ async fn actual_native_reply_certifies_already_sent_exact_ids_without_changing_r
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_native_replacement_between_exposure_and_queue_cannot_use_the_old_permit() {
+    let f=Fixture::with_mode(true,Some("success")).await;
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    let (release,hook,entered)=pause("native-before-frame");
+    *f.outbox.inner.managed_checkpoint.lock().unwrap()=Some(hook);
+    f.outbox.start().unwrap();entered.await.unwrap();
+    let db=f.core.open_db().unwrap();
+    let old_nonce:String=db.conn().query_row("SELECT nonce FROM managed_producer",[],|r|r.get(0)).unwrap();
+    f.assert_no_wire();
+    f.core.host().restart_plugin("fixture").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            if let Ok(producer)=f.core.host().source_producer("fixture","owner").await
+                && producer.nonce()!=old_nonce {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    release.release();
+    wait_attempt_state(&f,"no_wire").await;wait_native_state(&f,item.id,OutboxState::Failed).await;
+    f.assert_no_wire();
+    assert_eq!(f.count("managed_dispatch"),1);
+    assert_eq!(db.conn().query_row("SELECT count(*) FROM managed_dispatch WHERE state='positive'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert!(f.stage().join("bytes").exists());
+    assert!(matches!(f.outbox.retry(item.id),Err(OutboxError::ManagedUnavailable)));
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_native_observer_settles_after_outbox_shutdown_aborts_its_rpc_waiter() {
+    let f=Fixture::with_mode(true,Some("early")).await;
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    f.outbox.start().unwrap();
+    tokio::time::timeout(Duration::from_secs(5),async {
+        while !f.temp.path().join("wire").exists() {tokio::time::sleep(Duration::from_millis(10)).await;}
+    }).await.unwrap();
+    let before=std::fs::read(f.temp.path().join("wire")).unwrap();
+    tokio::time::timeout(Duration::from_secs(3),f.outbox.shutdown()).await.unwrap();
+    assert!(f.outbox.inner.inflight.lock().unwrap().is_empty(),"the scheduler's actual task was aborted");
+    assert!(!f.temp.path().join("wire.closed").exists(),"the real native source reader remains open");
+    std::fs::write(f.temp.path().join("wire.release"),b"release actual reader").unwrap();
+    wait_native_state(&f,item.id,OutboxState::Sent).await;wait_attempt_state(&f,"positive").await;
+    assert_eq!(std::fs::read(f.temp.path().join("wire")).unwrap(),before);
+    assert_eq!(f.count("managed_dispatch"),1);assert_eq!(f.count("message"),1);
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn actual_native_process_exit_never_certifies_helper_scope_or_replays_a_source() {
     let f=Fixture::with_mode(true,Some("exit-after-read")).await;
     let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();

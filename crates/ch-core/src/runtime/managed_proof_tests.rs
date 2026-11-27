@@ -250,6 +250,33 @@ async fn reserved_native_reply_survives_busy_ordinary_writer_close_and_cancelled
     assert_eq!(count(db.conn(),"managed_ref"),2);
 }
 
+#[cfg(target_os="linux")]
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn native_work_reservations_are_bounded_and_foreign_tickets_do_not_admit_callbacks() {
+    let (_temp,writer)=writer();
+    let mut tickets=Vec::new();
+    for _ in 0..NATIVE_LIMIT {tickets.push(writer.reserve_native().unwrap());}
+    assert!(matches!(writer.reserve_native(),Err(ManagedProofError::Busy)));
+    let (_other_temp,other)=self::writer();
+    let foreign=tickets[0].clone();
+    assert!(matches!(other.submit_native(foreign,|_|->Result<(),()> {panic!("foreign callback must never run")}),
+        Err(ManagedProofError::Closed)));
+    let (release,block,entered)=pause();
+    let first=writer.submit(move|_|{block();Ok::<_,()>(())}).unwrap();entered.await.unwrap();
+    let mut ordinary=vec![first];
+    for _ in 1..JOB_LIMIT {ordinary.push(writer.submit(|_|Ok::<_,()>(())).unwrap());}
+    let mut pending=Vec::new();
+    for ticket in &tickets {
+        for _ in 0..2 {pending.push(writer.submit_native(ticket.clone(),|_|Ok::<_,()>(())).unwrap());}
+    }
+    assert!(matches!(writer.submit_native(tickets[0].clone(),|_|->Result<(),()> {panic!("overflow callback must never run")}),
+        Err(ManagedProofError::Busy)));
+    drop(tickets);release.release();
+    for receipt in ordinary {receipt.await.unwrap().unwrap().unwrap();}
+    for receipt in pending {receipt.await.unwrap().unwrap().unwrap();}
+    writer.drain().await.unwrap();other.drain().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bounded_admission_rejects_overflow_and_close_without_queuing() {
     let (_tmp, writer) = writer();

@@ -1,6 +1,6 @@
 //! One native managed send. No generic transport fallback or automatic replay.
 use super::*;
-use crate::{host::{HostError,NativeProducer},managed_sources::SourceInput,
+use crate::{host::NativeProducer,managed_sources::SourceInput,
     runtime::{ManagedProofWriter,ManagedProofTransaction,NativeProofTicket,LogicalOwnerObservation}};
 use ch_protocol::{dto::{Direction,MediaKind},methods::MessageResult};
 use sha2::{Digest,Sha256};
@@ -336,6 +336,14 @@ pub(super) async fn dispatch(inner:Arc<Inner>,row:OutboxRow,input:SourceInput,
     let permit=ManagedPermit {grant:WireGrant {input,producer,params:row.params,stopped},
         completion:Completion {proofs:context.sources.proofs().clone(),attempt,ticket,
             publisher}};
+    #[cfg(test)]
+    {
+        let checkpoint=inner.managed_checkpoint.lock().unwrap().clone();
+        if let Some(checkpoint)=checkpoint {
+            tokio::task::spawn_blocking(move||checkpoint("native-before-frame")).await
+                .map_err(|_|OutboxError::ManagedUnavailable)?;
+        }
+    }
     // The native Pending owns completion even when this waiter/task is dropped.
     let _=context.host.call_managed(permit,cancel,request_id).await;
     Ok(())
