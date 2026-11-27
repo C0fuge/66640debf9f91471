@@ -178,6 +178,13 @@ impl Dir {
         }
         chain
     }
+    pub(super) fn mkdir(&self, name: &CStr) -> io::Result<()> {
+        // SAFETY: this directory is held and callers provide one checked component.
+        if unsafe { libc::mkdirat(self.fd(), name.as_ptr(), 0o700) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
     pub fn lock(&self) -> Result<File> {
         // New open description: concurrent users of the same Dir also contend.
         let f = openat(self.fd(), c".", libc::O_RDONLY | libc::O_DIRECTORY, 0)?;

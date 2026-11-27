@@ -144,6 +144,53 @@ fn pause(phase: &'static str) -> (Release, Arc<TextCheckpoint>, oneshot::Receive
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_core_copy_exclusively_publishes_ready_without_source_registration_or_escaped_flock() {
+    let f=Fixture::new(false).await;
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let original:Manifest=serde_json::from_slice(&std::fs::read(f.stage().join("manifest.json")).unwrap()).unwrap();
+    let id="33333333333333333333333333333333";
+    let content=b"actual Core-created synthetic bytes";
+    let description=||crate::managed_stage::CopyDescription {stage_id:id.into(),scope:original.scope.clone(),
+        created:1,name:"new.bin".into(),size:content.len() as u64,limit:1024};
+    let manifest=crate::managed_stage::copy_ready_stage(&binding,description(),&mut &content[..],|_|Ok(())).unwrap();
+    let path=f.core.host().config().upload_dir("owner").join(id);
+    assert_eq!(std::fs::read(path.join("bytes")).unwrap(),content);
+    assert_eq!(manifest.sha256,format!("{:x}",Sha256::digest(content)));
+    assert!(manifest.fingerprint.staged());assert!(manifest.phase==Phase::Ready);
+    assert_ne!(manifest.fingerprint.ino,original.fingerprint.ino);
+    assert_eq!(f.count("managed_source"),0);assert_eq!(f.count("outbox"),0);
+    // The actual creation writer has dropped its byte descriptor/flock before
+    // returning metadata; a real independent verifier can immediately claim.
+    let proof=VerifiedStageBinding::verify_ready(&binding,id,1024,|_|Ok(())).unwrap();
+    drop(proof);
+    assert!(crate::managed_stage::copy_ready_stage(&binding,description(),&mut &b"foreign replacement"[..],|_|Ok(())).is_err());
+    assert_eq!(std::fs::read(path.join("bytes")).unwrap(),content);
+    let other=Fixture::new(false).await;
+    let foreign=other.core.accounts().storage_binding_for("owner").await.unwrap();
+    assert!(f.core.stage_mutations().check_binding(&foreign).is_err(),"same owner labels cannot bridge Core issuers");
+    drop(foreign);other.close().await;drop(binding);f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_core_copy_checks_bounded_eof_and_cancel_before_ready_publication() {
+    let f=Fixture::new(false).await;
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let original:Manifest=serde_json::from_slice(&std::fs::read(f.stage().join("manifest.json")).unwrap()).unwrap();
+    let id="44444444444444444444444444444444";
+    for (content,size,cancel) in [(&b"short"[..],6,false),(&b"long"[..],3,false),(&b"exact"[..],5,true)] {
+        let description=crate::managed_stage::CopyDescription {stage_id:id.into(),scope:original.scope.clone(),
+            created:1,name:"new.bin".into(),size,limit:1024};
+        let result=crate::managed_stage::copy_ready_stage(&binding,description,&mut &content[..],|count| {
+            if cancel && count==size {Err(crate::managed_stage::Error::Cancelled)} else {Ok(())}
+        });
+        assert!(result.is_err());
+        assert!(!f.core.host().config().upload_dir("owner").join(id).exists(),"only the actual fresh incomplete allocation is rolled back");
+        assert_eq!(f.count("managed_source"),0);assert_eq!(f.count("outbox"),0);
+    }
+    drop(binding);f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn actual_claim_commits_source_echo_outbox_refs_and_parked_worker() {
     let f=Fixture::new(true).await;
     let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();

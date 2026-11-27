@@ -156,6 +156,7 @@ impl Source {
         source.check()?;
         Ok(source)
     }
+    pub fn display_name(&self)->&str {&self.display_name}
     pub fn len(&self) -> u64 {
         self.fingerprint.size
     }

@@ -1,5 +1,5 @@
 use super::{
-    CHUNK, Error, Format, Intent, Manifest, Owner, Phase, Result, Scope, Source, check_size,
+    CHUNK, Error, Format, Intent, Manifest, Owner, Phase, Result, Source, check_size,
     fd::{self, Dir, Policy},
     manifest::{Fingerprint, hex, opaque},
 };
@@ -7,16 +7,21 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
-    fs::{File, Permissions},
+    fs::File,
     io::{self, Read, Write},
     os::fd::AsFd,
     os::unix::{
         ffi::OsStrExt,
-        fs::{MetadataExt, PermissionsExt},
+        fs::MetadataExt,
     },
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+#[cfg(test)]
+use std::{fs::Permissions,os::unix::fs::PermissionsExt};
+#[cfg(test)]
+use super::Scope;
 
 const MANIFEST_CAP: u64 = 64 * 1024;
 
@@ -131,9 +136,35 @@ impl Store {
         Stage::load(dir, owner, stage_id, self.mutations.clone())
     }
 
+    /// Production copying delegates actual exclusive creation to Core. Source
+    /// validation and progress remain on the same counted App FS worker.
+    pub fn stage_bound(&self,owner:&Owner,binding:&ch_core::runtime::AccountStorageBinding,
+        description:ch_core::managed_stage::CopyDescription,source:Source,
+        mut checkpoint:impl FnMut(u64)->Result<()>)->Result<Stage> {
+        let actual=binding.owner();
+        if actual.account_id!=owner.account || actual.plugin_id!=owner.plugin
+            || actual.created_at!=owner.account_created
+            || !owner.matches(&description.scope) || description.size!=source.len() {
+            return Err(Error::TargetChanged);
+        }
+        self.mutations.as_ref().ok_or(Error::Integrity)?.check_binding(binding)?;
+        self.account(owner)?.check()?;
+        let stage_id=description.stage_id.clone();let size=source.len();
+        let mut reader=&source.file;
+        let manifest=ch_core::managed_stage::copy_ready_stage(binding,description,&mut reader,|count| {
+            source.check()?;checkpoint(count)?;
+            if count==size {source.publication_check()?;}
+            Ok(())
+        })?;
+        let stage=self.recover(owner,&stage_id)?;
+        if stage.manifest()!=&manifest {return Err(Error::StageChanged);}
+        Ok(stage)
+    }
+
     /// Call after atomically charging source.len() and one slot. Re-inventory on
     /// errors before releasing retained charges. The checkpoint may revoke copy
     /// or publication and gets cumulative local bytes (including the final check).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn stage(
         &self,

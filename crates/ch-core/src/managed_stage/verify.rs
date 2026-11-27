@@ -109,24 +109,39 @@ impl VerifiedStageBinding {
 }
 
 fn open_stage(owner: &AccountStorageBinding, id: &str) -> Result<Arc<Dir>> {
-    let uploads = owner.uploads();
-    let account = uploads.parent().ok_or(Error::Integrity)?;
-    let accounts = account.parent().ok_or(Error::Integrity)?;
-    let data = accounts.parent().ok_or(Error::Integrity)?;
-    if accounts.file_name().is_none_or(|v| v != "accounts") { return Err(Error::Integrity); }
-    let mut dir = fd::data_dir(data)?;
-    for (name, policy) in [
-        (b"accounts".as_slice(), Policy::Owner),
-        (account.file_name().ok_or(Error::Integrity)?.as_bytes(), Policy::Owner),
-        (b"uploads".as_slice(), Policy::Private),
-        (id.as_bytes(), Policy::Private),
-    ] {
-        let next = dir.child(&fd::cname(name)?, policy)?;
-        if next.identity.mount != dir.identity.mount { return Err(Error::Integrity); }
-        dir = next;
-    }
+    let uploads=open_uploads(owner,false)?;
+    let dir=uploads.child(&fd::cname(id.as_bytes())?,Policy::Private)?;
+    if dir.identity.mount!=uploads.identity.mount {return Err(Error::Integrity);}
     dir.check()?;
     Ok(dir)
+}
+
+pub(super) fn open_uploads(owner:&AccountStorageBinding,create:bool)->Result<Arc<Dir>> {
+    if owner.is_revoked() {return Err(Error::TargetChanged);}
+    let uploads=owner.uploads();
+    let account=uploads.parent().ok_or(Error::Integrity)?;
+    let accounts=account.parent().ok_or(Error::Integrity)?;
+    let data=accounts.parent().ok_or(Error::Integrity)?;
+    if accounts.file_name().is_none_or(|v|v!="accounts")
+        || uploads.file_name().is_none_or(|v|v!="uploads") {return Err(Error::Integrity);}
+    let data=fd::data_dir(data)?;
+    let accounts=data.child(c"accounts",Policy::Owner)?;
+    let account=accounts.child(&fd::cname(account.file_name().ok_or(Error::Integrity)?.as_bytes())?,Policy::Owner)?;
+    if accounts.identity.mount!=data.identity.mount || account.identity.mount!=accounts.identity.mount {
+        return Err(Error::Integrity);
+    }
+    if create {
+        match account.mkdir(c"uploads") {
+            Ok(())=>{},Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>{},
+            Err(error)=>return Err(error.into()),
+        }
+    }
+    let uploads=account.child(c"uploads",Policy::Private)?;
+    if uploads.identity.mount!=account.identity.mount {return Err(Error::Integrity);}
+    uploads.check()?;
+    if create {account.file.sync_all()?;accounts.file.sync_all()?;data.file.sync_all()?;}
+    if owner.is_revoked() {return Err(Error::TargetChanged);}
+    Ok(uploads)
 }
 
 pub(super) fn check_layout(dir: &Dir) -> Result<()> {

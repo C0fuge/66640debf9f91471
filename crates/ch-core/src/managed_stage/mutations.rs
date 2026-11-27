@@ -14,6 +14,15 @@ impl StageMutations {
         self.catalog.check_accounts_root(accounts_root)
     }
 
+    /// Check the actual Accounts/Core issuer, rather than matching owner labels.
+    /// This is a negative consistency check, not a source or cleanup permit.
+    pub fn check_binding(&self,binding:&crate::runtime::AccountStorageBinding)->Result<()> {
+        if binding.is_revoked() || !Arc::ptr_eq(&self.catalog,&binding.stage_mutations()?.catalog) {
+            return Err(super::Error::TargetChanged);
+        }
+        Ok(())
+    }
+
     /// Retain inside the actual synchronous operation through all FS settlement.
     /// Bookkeeping failure leaves Unknown; a closed Core permanently vetoes start.
     pub fn begin(&self) -> Result<StageMutation> {

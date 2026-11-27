@@ -9,6 +9,8 @@ mod account_root;
 pub(crate) use account_root::{AccountRootAnchor, AccountRootIdentity};
 pub(crate) mod catalog;
 mod mutations;
+mod copy;
+pub use copy::{CopyDescription,copy_ready_stage};
 pub use mutations::{StageMutations, StageMutation};
 pub(crate) use claim::PreparedStageClaim;
 pub(crate) use identity::StageIdentity;

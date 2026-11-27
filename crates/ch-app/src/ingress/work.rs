@@ -417,7 +417,7 @@ impl Job {
             let a = j.s.fs_owner(&j.owner);
             match action {
                 Action::Choose(_) => {
-                    j.copy(&store, &a, source.ok_or(fs::Error::UnsafeSource)?, &life)
+                    j.copy(&store, &a, source.ok_or(fs::Error::UnsafeSource)?, &life, &_binding)
                 }
                 Action::Send(i) => j.admit(&store, &a, &i, &life, &_binding),
                 Action::Discard => j.discard(&store, &a, &life),
@@ -432,6 +432,7 @@ impl Job {
         owner: &fs::Owner,
         path: PathBuf,
         life: &CancellationToken,
+        binding: &ch_core::runtime::AccountStorageBinding,
     ) -> Work<()> {
         let limit = self.effective(None)?;
         let source = fs::Source::open(&path, &self.s.private_roots(), limit)?;
@@ -458,13 +459,14 @@ impl Job {
             chat: self.thread.chat_id.clone(),
             topic: self.thread.topic_id.clone(),
         };
-        let staged = store.stage(
+        let staged = store.stage_bound(
             owner,
-            &self.stage,
-            scope,
-            ch_db::now_millis(),
+            binding,
+            ch_core::managed_stage::CopyDescription {
+                stage_id:self.stage.clone(),scope,created:ch_db::now_millis(),
+                name:source.display_name().to_owned(),size,limit,
+            },
             source,
-            limit,
             |n| {
                 self.check(life)?;
                 #[cfg(test)]
