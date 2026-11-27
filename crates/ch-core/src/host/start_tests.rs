@@ -147,6 +147,9 @@ async fn actual_external_frame_rejects_stale_catalog_and_original_native_run() {
         plugin_version:None,capabilities:Arc::new(Default::default())});
     let scope=core.host().capture_start("fixture","owner").await.unwrap();
     assert!(registry.set_start("fixture","owner",AccountSpec::default(),&scope));
+    assert!(registry.update_start("fixture","owner",&scope,true,|record| {
+        record.info.wanted=true;record.info.phase=AccountPhase::Starting;
+    }).is_some());
     let (conn,mut frames)=connection(&registry);
     let (id,reply)=conn.request(PendingKind::AccountStart("owner".into(),scope),"account.start",
         serde_json::json!({}),Duration::from_secs(1),None,&conn).unwrap();
