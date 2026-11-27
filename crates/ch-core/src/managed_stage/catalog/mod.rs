@@ -5,6 +5,7 @@
 //! enforcement remain separate activation gates. A complete inventory never
 //! proves legacy physical readers closed;
 //! stable unproved stage evidence and old inode negatives survive later absence.
+mod origins;
 mod scan;
 mod inputs;
 pub(crate) use inputs::ExternalInputs;
@@ -97,6 +98,7 @@ struct State {
     poisoned: bool,
     closed: bool,
     inodes: BTreeSet<Inode>,
+    origins:origins::Origins,
     stages: BTreeMap<StageKey, LegacyCandidate>,
     root: Option<Inode>,
 }
@@ -229,13 +231,15 @@ impl PrivateByteCatalog {
         // Partial negative evidence remains useful, even when publication is refused.
         let mut complete = scanned.complete;
         for inode in scanned.inodes {
-            if state.inodes.contains(&inode) { continue; }
-            if state.inodes.len() == MAX_INODES {
+            if !state.inodes.contains(&inode) && state.inodes.len() == MAX_INODES {
                 // This negative cannot be retained. A later smaller scan must
                 // never erase uncertainty about its possible outside aliases.
                 state.poisoned=true;complete=false;continue;
             }
             state.inodes.insert(inode);
+            if state.origins.record(inode,scanned.origins.get(&inode).cloned()) {
+                state.poisoned=true;complete=false;
+            }
         }
         // A supported copy may expose a temporary empty stage while this scan
         // runs. Only stable observations may become sticky legacy evidence.

@@ -358,3 +358,54 @@ fn actual_stage_history_overflow_keeps_unknown_owner_veto_after_its_directory_mo
     assert_eq!(f.catalog.legacy_candidates().len(),MAX_STAGES);
     assert!(f.catalog.view().inode_count()<MAX_INODES,"this is stage capacity, not inode capacity");
 }
+
+#[test]
+fn repeated_actual_inode_observation_keeps_anchored_origin_without_duplicate_records() {
+    use super::origins::Observation;
+    let f=Fixture::new();let bytes=f.stage("owner",FIRST,CLIENT1,Phase::Ready);
+    f.catalog.refresh().unwrap();
+    let meta=fs::metadata(&bytes).unwrap();let inode=Inode {dev:meta.dev(),ino:meta.ino()};
+    let original={
+        let state=f.catalog.lock();assert_eq!(state.origins.len(),2);
+        let Some(Observation::At(location))=state.origins.get(&inode) else {panic!("actual bounded origin missing")};
+        assert!(location.key.account==b"owner" && location.key.stage==FIRST.as_bytes() && location.name==b"bytes");
+        assert!(location.file.dev==inode.dev && location.file.ino==inode.ino && location.file.mount!=0);
+        for (identity,path) in location.namespace.iter().zip([
+            f.data.clone(),f.data.join("accounts"),f.data.join("accounts/owner"),
+            f.data.join("accounts/owner/uploads"),bytes.parent().unwrap().to_path_buf(),
+        ]) {
+            let actual=fs::metadata(path).unwrap();
+            assert!(identity.dev==actual.dev() && identity.ino==actual.ino() && identity.mount!=0);
+        }
+        location.clone()
+    };
+    f.catalog.refresh().unwrap();
+    let state=f.catalog.lock();assert_eq!(state.origins.len(),2);
+    assert!(state.origins.get(&inode)==Some(&Observation::At(original)));
+}
+
+#[test]
+fn same_actual_inode_moved_between_stages_stays_ambiguous_after_names_disappear() {
+    use super::origins::Observation;
+    let f=Fixture::new();let first=f.stage("owner",FIRST,CLIENT1,Phase::Ready);
+    let second=f.stage("owner",SECOND,CLIENT2,Phase::Ready);
+    f.catalog.refresh().unwrap();
+    let meta=fs::metadata(&first).unwrap();let inode=Inode {dev:meta.dev(),ino:meta.ino()};
+    fs::rename(&second,f._temp.path().join("kept-second-inode")).unwrap();
+    fs::rename(&first,&second).unwrap();assert!(f.catalog.refresh().is_err());
+    assert!(matches!(f.catalog.lock().origins.get(&inode),Some(Observation::Ambiguous)));
+    fs::rename(&second,&first).unwrap();fs::remove_dir_all(second.parent().unwrap()).unwrap();
+    // Rename changes ctime. Make this synthetic on-disk manifest consistent
+    // again so a healthy scan, not another parse/fingerprint error, is tested.
+    let manifest_path=first.parent().unwrap().join("manifest.json");
+    let mut manifest:Manifest=serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest.fingerprint=Fingerprint::from(fs::metadata(&first).unwrap());
+    fs::write(manifest_path,serde_json::to_vec(&manifest).unwrap()).unwrap();
+    f.catalog.refresh().unwrap();
+    assert!(matches!(f.catalog.lock().origins.get(&inode),Some(Observation::Ambiguous)));
+    let outside=f._temp.path().join("moved-original");fs::rename(&first,&outside).unwrap();
+    fs::remove_dir_all(first.parent().unwrap()).unwrap();f.catalog.refresh().unwrap();
+    assert!(known(&f.catalog,&outside),"directory absence never forgets the original inode");
+    let state=f.catalog.lock();assert!(matches!(state.origins.get(&inode),Some(Observation::Ambiguous)));
+    assert_eq!(state.origins.len(),4,"all original byte and manifest negatives remain");
+}

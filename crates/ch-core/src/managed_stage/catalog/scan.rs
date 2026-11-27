@@ -1,6 +1,6 @@
 //! Independent fixed-depth walk. Never trusts App inventory or stored manifest hashes
 //! as positive ownership/settlement evidence; all descriptors close in this operation.
-use super::{Inode, LegacyCandidate, StageKey, StageKind};
+use super::{Inode, LegacyCandidate, StageKey, StageKind,origins::{Location,Observation}};
 use crate::managed_stage::{Error, Result, fd::{self, Dir, Policy}, manifest::{Fingerprint, Phase},
     verify::read_manifest_file};
 use std::{collections::{BTreeMap, BTreeSet}, ffi::{OsString, CString}, fs, io,
@@ -13,6 +13,7 @@ const METADATA: u64 = 1024 * 1024;
 pub(super) struct Scan {
     pub(super) complete: bool,
     pub(super) inodes: BTreeSet<Inode>,
+    pub(super) origins:BTreeMap<Inode,Observation>,
     pub(super) stages: BTreeMap<StageKey, LegacyCandidate>,
     pub(super) root: Option<Inode>,
     remaining: usize,
@@ -23,7 +24,7 @@ pub(super) struct Scan {
 }
 
 fn empty()->Scan {
-    Scan {complete:true,inodes:BTreeSet::new(),stages:BTreeMap::new(),root:None,
+    Scan {complete:true,inodes:BTreeSet::new(),origins:BTreeMap::new(),stages:BTreeMap::new(),root:None,
         remaining:MANAGED,metadata:METADATA,seen_stage:BTreeMap::new(),seen_client:BTreeMap::new(),
         #[cfg(test)] probe:None}
 }
@@ -67,12 +68,12 @@ impl Scan {
         if accounts.identity.mount != data.identity.mount { return Err(Error::Integrity); }
         let mut count = ACCOUNTS;
         for account in entries(&accounts, &mut count)? {
-            if self.account(&accounts, &account).is_err() { self.complete = false; }
+            if self.account(&accounts, &account,data.identity).is_err() { self.complete = false; }
         }
         accounts.check()
     }
 
-    fn account(&mut self, accounts: &Arc<Dir>, account_name: &OsString) -> Result<()> {
+    fn account(&mut self, accounts: &Arc<Dir>, account_name: &OsString,data:fd::Identity) -> Result<()> {
         let account = accounts.child(&name(account_name)?, Policy::Owner)?;
         if account.identity.mount != accounts.identity.mount { return Err(Error::Integrity); }
         let uploads = match account.child(c"uploads", Policy::Private) {
@@ -82,7 +83,7 @@ impl Scan {
         if uploads.identity.mount != account.identity.mount { return Err(Error::Integrity); }
         for stage in entries(&uploads, &mut self.remaining)? {
             let key = StageKey { account: account_name.as_bytes().to_vec(), stage: stage.as_bytes().to_vec() };
-            if self.stage(&uploads, &stage, key.clone()).is_err() {
+            if self.stage(&uploads, &stage, key.clone(),[data,accounts.identity,account.identity,uploads.identity]).is_err() {
                 self.complete = false;
                 self.stages.entry(key.clone()).or_insert_with(|| unknown(key, None)).unproved = true;
             }
@@ -90,12 +91,12 @@ impl Scan {
         uploads.check()
     }
 
-    fn stage(&mut self, uploads: &Arc<Dir>, stage_name: &OsString, key: StageKey) -> Result<()> {
+    fn stage(&mut self, uploads: &Arc<Dir>, stage_name: &OsString, key: StageKey,namespace:[fd::Identity;4]) -> Result<()> {
         let probe = fd::openat(uploads.fd(), &name(stage_name)?, libc::O_PATH, 0)?;
         uploads.bind(&name(stage_name)?, &probe)?;
         let metadata = probe.metadata()?;
         if metadata.is_file() {
-            self.record(&probe)?; // Orphan regular bytes under uploads still deny aliases.
+            self.record(&probe,Observation::Ambiguous)?; // Orphan regular bytes under uploads still deny aliases.
             self.stages.insert(key.clone(), unknown(key, None));
             return Err(Error::Integrity);
         }
@@ -114,9 +115,14 @@ impl Scan {
             #[cfg(test)]
             if let Some(probe)=&self.probe {probe(&metadata);}
             if metadata.is_file() {
-                self.record(&file)?;
-                if metadata.uid() != fd::uid() || metadata.nlink() != 1
-                    || fd::id(&file)?.mount != dir.identity.mount { valid = false; }
+                let id=fd::id(&file)?;
+                let owned=metadata.uid()==fd::uid() && metadata.nlink()==1 && id.mount==dir.identity.mount;
+                let observed=if owned {Observation::At(Location {
+                    namespace:[namespace[0],namespace[1],namespace[2],namespace[3],dir.identity],
+                    key:key.clone(),name:child.as_bytes().to_vec(),file:id,
+                })} else {Observation::Ambiguous};
+                self.record(&file,observed)?;
+                if !owned { valid=false; }
             } else { valid = false; }
             match child.as_bytes() {
                 b"bytes" => {
@@ -154,11 +160,14 @@ impl Scan {
         if valid { Ok(()) } else { Err(Error::Integrity) }
     }
 
-    fn record(&mut self, file: &fs::File) -> Result<()> {
+    fn record(&mut self, file: &fs::File,observed:Observation) -> Result<()> {
         let id = fd::id(file)?;
         if id.ino == 0 { return Err(Error::Integrity); }
-        if !self.inodes.insert(Inode { dev: id.dev, ino: id.ino }) { return Err(Error::Integrity); }
-        Ok(())
+        let inode=Inode {dev:id.dev,ino:id.ino};
+        if !self.inodes.insert(inode) {
+            self.origins.insert(inode,Observation::Ambiguous);return Err(Error::Integrity);
+        }
+        self.origins.insert(inode,observed);Ok(())
     }
 }
 
