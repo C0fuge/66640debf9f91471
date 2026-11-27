@@ -24,7 +24,11 @@ mod policy;
 mod transport;
 mod worker;
 mod text_admission;
+#[cfg(target_os = "linux")]
+mod managed_admission;
 pub use text_admission::{TextAdmissionError, TextAdmissionLifetime, TextAdmissionTarget};
+#[cfg(target_os = "linux")]
+pub use managed_admission::ManagedAdmissionError;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -77,6 +81,9 @@ pub enum OutboxError {
     /// The expected owner or retained intent differs. No foreign row is exposed.
     #[error("outbox admission conflict")]
     AdmissionConflict,
+    /// Managed rows require the owned dispatch/admission path, never generic mutation.
+    #[error("managed outbox operation is unavailable")]
+    ManagedUnavailable,
     /// Database.
     #[error(transparent)]
     Db(#[from] ch_db::Error),
@@ -577,8 +584,12 @@ pub(crate) struct Inner {
     wall_start: Millis,
     clock_start: tokio::time::Instant,
     bus: Option<ChangeBus>,
+    #[cfg(target_os = "linux")]
+    managed: Option<managed_admission::Context>,
     #[cfg(test)]
     text_checkpoint: Mutex<Option<Arc<TextCheckpoint>>>,
+    #[cfg(all(test, target_os = "linux"))]
+    managed_checkpoint: Mutex<Option<Arc<TextCheckpoint>>>,
 }
 #[cfg(test)]
 type TextCheckpoint = dyn Fn(&str) + Send + Sync;
@@ -604,6 +615,15 @@ fn validate_admission_id(id: &str) -> Result<()> {
     } else {
         Err(OutboxError::InvalidRequest("invalid local client ID".into()))
     }
+}
+
+// Descriptive indexed barrier only; this never creates a source/read/dispatch permit.
+fn managed_row(conn: &rusqlite::Connection, row: &OutboxRow) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM managed_source WHERE client_id=?1)
+             OR EXISTS(SELECT 1 FROM managed_outbox_dispatch WHERE outbox_id=?2)",
+        rusqlite::params![row.client_id, row.id], |r| r.get(0),
+    ).map_err(ch_db::Error::from)?)
 }
 
 fn matching_admission(
@@ -656,8 +676,12 @@ impl Outbox {
                 wall_start: now_millis(),
                 clock_start: tokio::time::Instant::now(),
                 bus: None,
+                #[cfg(target_os = "linux")]
+                managed: None,
                 #[cfg(test)]
                 text_checkpoint: Mutex::default(),
+                #[cfg(all(test, target_os = "linux"))]
+                managed_checkpoint: Mutex::default(),
             }),
         }
     }
@@ -671,6 +695,14 @@ impl Outbox {
             policy,
         );
         Arc::get_mut(&mut outbox.inner).expect("new outbox").bus = Some(core.bus().clone());
+        #[cfg(target_os = "linux")]
+        {
+            let sources = core.managed_sources();
+            let inner = Arc::get_mut(&mut outbox.inner).expect("new outbox");
+            inner.managed = Some(managed_admission::Context {
+                sources, host: core.host().clone(), accounts: core.accounts().clone(),
+            });
+        }
         let weak = Arc::downgrade(&outbox.inner);
         let stop = outbox.inner.stopping.clone();
         let mut events = core.subscribe();
@@ -885,6 +917,21 @@ impl Outbox {
         request: &OutboxRequest,
         sender: Option<&EchoSender>,
     ) -> Result<(Option<Applied>, OutboxItem)> {
+        self.insert_with_echo_in(tx, account_id, client_id, request, sender,
+            |echo| Ok(ingest.apply_local_echo_in(tx, account_id, echo)?))
+    }
+
+    // Both NORMAL and FULL callers supply their actual transaction and echo
+    // helper. This body never reads another connection or locks shared ingest.
+    fn insert_with_echo_in(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        account_id: &str,
+        client_id: &str,
+        request: &OutboxRequest,
+        sender: Option<&EchoSender>,
+        apply_echo: impl FnOnce(&LocalEcho) -> Result<(Applied, i64)>,
+    ) -> Result<(Option<Applied>, OutboxItem)> {
         let kind = request.kind();
         let mut row = OutboxRow {
             account_id: account_id.to_owned(),
@@ -898,7 +945,7 @@ impl Outbox {
             ..Default::default()
         };
         let applied = if let Some(echo) = request.echo(client_id, sender) {
-            let (change, echo_id) = ingest.apply_local_echo_in(tx, account_id, &echo)?;
+            let (change, echo_id) = apply_echo(&echo)?;
             row.echo_message_id = Some(echo_id);
             Some(change)
         } else {
@@ -915,6 +962,7 @@ impl Outbox {
     pub fn cancel(&self, id: i64) -> Result<OutboxItem> {
         let g = self.inner.ingest();
         let row = Inner::row_in(&g, id)?;
+        if managed_row(g.db().conn(), &row)? { return Err(OutboxError::ManagedUnavailable); }
         let state = OutboxState::parse(&row.state).unwrap_or(OutboxState::Failed);
         if let Some(mid) = Inner::adopted_id(&g, &row)?
             && matches!(state, OutboxState::Sending | OutboxState::Queued)
@@ -959,6 +1007,7 @@ impl Outbox {
     pub fn retry(&self, id: i64) -> Result<OutboxItem> {
         let g = self.inner.ingest();
         let row = Inner::row_in(&g, id)?;
+        if managed_row(g.db().conn(), &row)? { return Err(OutboxError::ManagedUnavailable); }
         let state = OutboxState::parse(&row.state).unwrap_or(OutboxState::Failed);
         if state != OutboxState::Failed {
             return Err(OutboxError::WrongState {
@@ -998,6 +1047,7 @@ impl Outbox {
     pub fn delete(&self, id: i64) -> Result<()> {
         let g = self.inner.ingest();
         let row = Inner::row_in(&g, id)?;
+        if managed_row(g.db().conn(), &row)? { return Err(OutboxError::ManagedUnavailable); }
         let state = OutboxState::parse(&row.state).unwrap_or(OutboxState::Failed);
         if state == OutboxState::Sending {
             return Err(OutboxError::WrongState {
@@ -1138,6 +1188,7 @@ impl Inner {
         let Ok(row) = Self::row_in(&g, id) else {
             return;
         };
+        if !matches!(managed_row(g.db().conn(), &row), Ok(false)) { return; }
         let done = i64::try_from(e.done_bytes).unwrap_or(i64::MAX);
         if row.client_id != *client_id
             || row.state != outbox_state::SENDING
@@ -1244,6 +1295,7 @@ impl Inner {
     }
 
     fn same_item(g: &Ingest, row: &OutboxRow) -> Result<bool> {
+        if managed_row(g.db().conn(), row)? { return Ok(false); }
         Ok(ch_db::get_outbox(g.db().conn(), row.id)?
             .is_some_and(|r| r.client_id == row.client_id && r.account_id == row.account_id))
     }
@@ -1253,6 +1305,7 @@ impl Inner {
     }
 
     fn adopted_id(g: &Ingest, row: &OutboxRow) -> Result<Option<Id>> {
+        if managed_row(g.db().conn(), row)? { return Ok(None); }
         let Some(echo) = row.echo_message_id else {
             return Ok(None);
         };

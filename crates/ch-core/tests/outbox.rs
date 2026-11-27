@@ -5,6 +5,8 @@
 mod admission;
 #[path = "outbox/replies.rs"]
 mod replies;
+#[path = "outbox/managed.rs"]
+mod managed;
 mod common;
 
 use std::collections::VecDeque;

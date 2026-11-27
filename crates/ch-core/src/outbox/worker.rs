@@ -120,6 +120,10 @@ fn pass(
         if !lanes.insert(row.chat_id.clone()) || active.contains_key(&row.client_id) {
             continue;
         }
+        // Managed dispatch is not implemented yet. Neither a missing in-memory
+        // gate nor a plain Outbox::new transport may turn a durable owned row
+        // into an ordinary send/reconciliation. Keep its lane parked, unchanged.
+        if super::managed_row(conn, &row)? { continue; }
         let Some(kind) = OutboxKind::parse(&row.kind)
             .filter(|k| k.method() == row.method && row.params["account_id"] == row.account_id)
         else {
@@ -233,6 +237,7 @@ fn pass(
 
 fn owned_attempt(g: &Ingest, row: &OutboxRow, plugin: &str) -> Result<Option<OutboxRow>> {
     let conn = g.db().conn();
+    if super::managed_row(conn, row)? { return Ok(None); }
     if !ch_db::get_account(conn, &row.account_id)?.is_some_and(|a| a.plugin_id == plugin) {
         return Ok(None);
     }

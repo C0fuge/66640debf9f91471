@@ -99,7 +99,7 @@ impl From<OutboxError> for Failure {
             OutboxError::InvalidRequest(_) => Self::Invalid,
             OutboxError::NotFound(_) | OutboxError::UnknownAccount(_) => Self::Missing,
             OutboxError::WrongState { .. } | OutboxError::AdmissionConflict => Self::Conflict,
-            OutboxError::Stopped => Self::Unavailable,
+            OutboxError::Stopped | OutboxError::ManagedUnavailable => Self::Unavailable,
             _ => Self::Internal,
         }
     }

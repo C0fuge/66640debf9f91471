@@ -4,6 +4,9 @@ use crate::runtime::AccountStorageBinding;
 use ch_protocol::methods::{FileKind, MessagesSendFileParams};
 use std::{fs::File, io::{self, Write}, path::PathBuf};
 
+mod preparation;
+pub(crate) use preparation::PreparedStageClaim;
+
 const MANIFEST_CAP: usize = 64 * 1024;
 
 /// One actual durable Ready -> Claimed transition. Recovered JSON cannot mint this.
@@ -74,14 +77,24 @@ impl LiveStageClaim {
 
     /// Initial admission may take this path exactly once, including failed checks.
     pub fn checked_path(&mut self) -> Result<PathBuf> {
-        if self.used { return Err(Error::Integrity); }
+        self.burn_unused()?;
+        self.validate_claimed()?;
+        Ok(self.proof.dir.path.join("bytes"))
+    }
+
+    fn burn_unused(&mut self) -> Result<()> {
+        let used = self.used;
         self.used = true;
+        if used { Err(Error::Integrity) } else { Ok(()) }
+    }
+
+    fn validate_claimed(&self) -> Result<()> {
         self.proof.check_bytes()?;
         check_layout(&self.proof.dir)?;
         if read_manifest_file(&self.proof.dir)?.0 != self.proof.manifest {
             return Err(Error::StageChanged);
         }
-        Ok(self.proof.dir.path.join("bytes"))
+        Ok(())
     }
 
     /// Bookkeep local admission only after Core independently matches its exact retained row.
@@ -109,19 +122,21 @@ impl LiveStageClaim {
     }
 
     pub(crate) fn canonical_request(&self) -> Result<OutboxRequest> {
-        let m = &self.proof.manifest;
-        let Phase::Claimed(intent) = &m.phase else { return Err(Error::Integrity); };
-        let path = self.proof.dir.path.join("bytes");
-        let photo = !intent.as_file && matches!(m.format, super::manifest::Format::Jpeg | super::manifest::Format::Png);
-        Ok(OutboxRequest::SendFile(MessagesSendFileParams {
-            account_id: m.scope.account.clone(), chat_id: m.scope.chat.clone(),
-            topic_id: m.scope.topic.clone(), path: path.to_str().ok_or(Error::Integrity)?.into(),
-            filename: Some(m.name.clone()), kind: Some(if photo { FileKind::Photo } else { FileKind::Document }),
-            caption: (!intent.caption.is_empty()).then(|| intent.caption.clone()),
-            as_file: intent.as_file.then_some(true), spoiler: intent.spoiler.then_some(true),
-            ..Default::default()
-        }))
+        canonical_request(&self.proof.manifest, &self.proof.dir.path.join("bytes"))
     }
+}
+
+pub(super) fn canonical_request(m: &Manifest, path: &std::path::Path) -> Result<OutboxRequest> {
+    let Phase::Claimed(intent) = &m.phase else { return Err(Error::Integrity); };
+    let photo = !intent.as_file && matches!(m.format, super::manifest::Format::Jpeg | super::manifest::Format::Png);
+    Ok(OutboxRequest::SendFile(MessagesSendFileParams {
+        account_id: m.scope.account.clone(), chat_id: m.scope.chat.clone(),
+        topic_id: m.scope.topic.clone(), path: path.to_str().ok_or(Error::Integrity)?.into(),
+        filename: Some(m.name.clone()), kind: Some(if photo { FileKind::Photo } else { FileKind::Document }),
+        caption: (!intent.caption.is_empty()).then(|| intent.caption.clone()),
+        as_file: intent.as_file.then_some(true), spoiler: intent.spoiler.then_some(true),
+        ..Default::default()
+    }))
 }
 
 #[cfg(test)]
@@ -258,6 +273,90 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn preparation_owns_original_binding_and_flock_and_burns_admission_once() {
+        let f = Fixture::new().await;
+        // Fixture::proof already drops the caller binding; only the real claim retains it.
+        let claim = f.proof().await.claim(intent()).unwrap();
+        let directory = claim.proof.dir.clone();
+        let prepared = claim.prepare_admission();
+        let observed = prepared.owner_observation();
+        assert!(matches!(directory.lock(), Err(Error::Busy)));
+        let identity = prepared.identity().unwrap().clone();
+        let json = identity.to_persisted_json().unwrap();
+        assert!(super::super::StageIdentity::from_persisted_json(&json).unwrap() == identity);
+        assert!(super::super::StageIdentity::from_persisted_json(&json.replacen("\"version\":1", "\"version\":2", 1)).is_err());
+        let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let namespace = legacy.as_object_mut().unwrap().remove("namespace").unwrap();
+        legacy["ancestry"] = namespace;
+        assert!(super::super::StageIdentity::from_persisted_json(&legacy.to_string()).is_err());
+        let mut extra: serde_json::Value = serde_json::from_str(&json).unwrap();
+        extra["namespace"][0]["mount"] = 100.into();
+        assert!(super::super::StageIdentity::from_persisted_json(&extra.to_string()).is_err());
+        let mut spent = prepared.into_claim();
+        assert!(matches!(spent.checked_path(), Err(Error::Integrity)));
+        let prepared_again = spent.prepare_admission();
+        assert!(matches!(prepared_again.identity(), Err(Error::Integrity)));
+        assert!(prepared_again.request().is_ok(), "spent authority must preserve comparison intent");
+        let accounts = f.core.accounts().clone();
+        let removing = tokio::spawn(async move { accounts.remove("owner").await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed.revocation().cancelled()).await.unwrap();
+        assert!(!removing.is_finished(), "prepared claim alone retains the actual storage lease");
+        drop(prepared_again);
+        tokio::time::timeout(std::time::Duration::from_secs(5), removing).await.unwrap().unwrap().unwrap();
+        // A directory descriptor alone has no storage lease or flock authority.
+        drop(directory);
+        assert!(observed.is_revoked());
+        drop(identity);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn current_held_mount_checks_remain_strict_with_stable_namespace_metadata() {
+        let f = Fixture::new().await;
+        let mut claim = f.proof().await.claim(intent()).unwrap();
+        let identity = super::super::StageIdentity::capture(&claim.proof).unwrap();
+        let actual = claim.proof.dir.identity;
+        // Synthetic observation fault only; no OS mount manipulation or fake proof.
+        Arc::get_mut(&mut claim.proof.dir).unwrap().identity.mount = actual.mount.wrapping_add(1);
+        assert!(matches!(claim.validate_claimed(), Err(Error::StageChanged)));
+        Arc::get_mut(&mut claim.proof.dir).unwrap().identity = actual;
+        claim.validate_claimed().unwrap();
+        assert!(super::super::StageIdentity::capture(&claim.proof).unwrap() == identity);
+        let json: serde_json::Value = serde_json::from_str(&identity.to_persisted_json().unwrap()).unwrap();
+        assert_eq!(json["namespace"].as_array().unwrap().len(), 5);
+        drop(claim);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_preparation_keeps_exact_original_intent_for_retained_lookup_first() {
+        let f = Fixture::new().await;
+        let claim = f.proof().await.claim(intent()).unwrap();
+        f.admit(&claim);
+        let directory = claim.proof.dir.clone();
+        let mut changed = claim.manifest().clone();
+        let Phase::Claimed(changed_intent) = &mut changed.phase else { panic!("missing real claim") };
+        changed_intent.caption = "foreign disk caption".into();
+        std::fs::write(directory.path.join("manifest.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
+        let prepared = claim.prepare_admission();
+        assert!(matches!(prepared.identity(), Err(Error::StageChanged)));
+        let request = prepared.request().unwrap();
+        let OutboxRequest::SendFile(params) = request else { panic!("wrong comparison request") };
+        assert_eq!(params.caption.as_deref(), Some(" literal "));
+        assert!(f.outbox.get_matching_admission(prepared.owner_binding().owner(), CLIENT, request).unwrap().is_some(),
+            "an exact retained admission is still readable despite failed FS preparation");
+        assert!(matches!(directory.lock(), Err(Error::Busy)), "failure retains the original claim until the decision settles");
+        let mut spent = prepared.into_claim();
+        assert!(matches!(spent.checked_path(), Err(Error::Integrity)));
+        drop(spent);
+        drop(directory.lock().unwrap());
+        assert!(f.disk() == changed, "preparation never rewrites observed/requested intent");
+        let count:i64 = f.core.open_db().unwrap().conn().query_row("SELECT count(*) FROM outbox", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+        f.close().await;
     }
 
     #[tokio::test]

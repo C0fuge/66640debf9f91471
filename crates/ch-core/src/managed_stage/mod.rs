@@ -4,6 +4,9 @@ pub mod manifest;
 mod fd;
 mod verify;
 mod claim;
+mod identity;
+pub(crate) use claim::PreparedStageClaim;
+pub(crate) use identity::StageIdentity;
 pub use claim::LiveStageClaim;
 pub use verify::VerifiedStageBinding;
 

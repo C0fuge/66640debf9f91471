@@ -190,6 +190,16 @@ impl AccountStorageBinding {
 }
 
 impl Accounts {
+    // Intrinsic issuer/current-generation check only, not a read lease or posting
+    // permission. A matching row/root from another Accounts factory is insufficient.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn owns_storage_observation(&self, observed: &AccountStorageObservation) -> bool {
+        !observed.is_revoked()
+            && observed.root == directory(self.0.host.config(), &observed.owner.account_id)
+            && self.0.storage.current(&observed.root, &observed.gate)
+            && !observed.is_revoked()
+    }
+
     /// Capture owner and Gate together, then release the short capture lease.
     /// Callers may retain this observation across network I/O without blocking removal.
     pub async fn storage_observation_for(&self, account_id: &str) -> Result<AccountStorageObservation> {

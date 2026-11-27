@@ -117,6 +117,8 @@ pub struct Core {
     bus: ChangeBus,
     sink: Arc<IngestSink>,
     managed_proofs: ManagedProofWriter,
+    #[cfg(target_os = "linux")]
+    managed_sources: Arc<crate::managed_sources::ManagedSources>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -163,6 +165,8 @@ impl Core {
         opts.path_filter = Some(account_path_filter(&host_config));
         let sink = Arc::new(IngestSink::new(Ingest::new(ingest_db, opts), bus.clone()));
         let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(), proof_db);
+        #[cfg(target_os = "linux")]
+        let managed_sources = crate::managed_sources::ManagedSources::new(managed_proofs.clone());
         let host = HostHandle::new(host_config, sink.clone(), Arc::clone(&config.secrets));
         let host_rx = host.subscribe();
         let accounts = Accounts::new(accounts_db, host.clone(), config.secrets, bus.clone());
@@ -189,6 +193,8 @@ impl Core {
             bus,
             sink,
             managed_proofs,
+            #[cfg(target_os = "linux")]
+            managed_sources,
             tasks: Mutex::new(tasks),
         })
     }
@@ -223,6 +229,11 @@ impl Core {
         &self.managed_proofs
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn managed_sources(&self) -> Arc<crate::managed_sources::ManagedSources> {
+        Arc::clone(&self.managed_sources)
+    }
+
     /// `<data_dir>/hub.db`. Services open their own connection with [`Core::open_db`].
     pub fn db_path(&self) -> &Path {
         &self.db_path
@@ -242,6 +253,8 @@ impl Core {
     /// Stop every plugin gracefully (§4.5), persist the accounts' final state, checkpoint the
     /// WAL. Accounts stay wanted in the database and resume on the next open.
     pub async fn shutdown(&self) {
+        #[cfg(target_os = "linux")]
+        self.managed_sources.close();
         self.managed_proofs.close();
         let tasks: Vec<_> =
             std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
@@ -258,6 +271,10 @@ impl Core {
         }
         for t in tasks {
             let _ = t.await;
+        }
+        #[cfg(target_os = "linux")]
+        if self.managed_sources.drain().await.is_err() {
+            warn!("draining managed local admission jobs failed");
         }
         if let Err(e) = self.managed_proofs.drain().await {
             warn!("draining managed proof writes: {e}");

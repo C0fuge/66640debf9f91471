@@ -39,7 +39,71 @@ struct Inner {
 #[derive(Clone)]
 pub struct HostHandle(Arc<Inner>);
 
+// A local-admission lifetime only. It grants no frame/producer/source permission.
+#[cfg(target_os = "linux")]
+pub(crate) struct FileAdmissionScope {
+    run: CancellationToken,
+    host: HostHandle,
+    plugin: String,
+    account: String,
+}
+
+#[cfg(target_os = "linux")]
+impl FileAdmissionScope {
+    pub(crate) fn check(&self) -> Result<(), HostError> {
+        if self.run.is_cancelled() { return Err(HostError::ShuttingDown); }
+        let registry = self.host.0.registry.lock();
+        let entry = registry.get(&self.plugin).ok_or(HostError::ShuttingDown)?;
+        let record = entry.accounts.get(&self.account).ok_or(HostError::ShuttingDown)?;
+        // Check current actual lifetime under one bounded registry reservation;
+        // retain the captured interval's permanent veto instead of replacing it.
+        // Local file admission intentionally allows a disconnected running account.
+        if !entry.state.is_running() || !record.info.wanted
+            || record.info.phase != super::state::AccountPhase::Running
+            || self.run.is_cancelled()
+        { return Err(HostError::ShuttingDown); }
+        Ok(())
+    }
+}
+
 impl HostHandle {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn file_admission_scope(
+        &self, plugin: &str, account: &str, params: &Value, bytes: u64,
+    ) -> Result<FileAdmissionScope, HostError> {
+        let run = self.running_account_token(plugin, account).ok_or(HostError::ShuttingDown)?;
+        let Some(PluginState::Running { capabilities, .. }) = self.plugin_state(plugin) else {
+            return Err(HostError::ShuttingDown);
+        };
+        if !self.account(plugin, account).is_some_and(|info| info.wanted
+            && info.phase == super::state::AccountPhase::Running)
+        { return Err(HostError::ShuttingDown); }
+        let method = ch_protocol::method("messages.send_file").ok_or(HostError::ShuttingDown)?;
+        if let Some(cap) = method.capability.filter(|cap| !capabilities.has(cap)) {
+            return Err(HostError::rpc(ErrorObject::not_supported(cap)));
+        }
+        if let Some(gate) = method.missing_capabilities(params, |cap| capabilities.has(cap)).next() {
+            return Err(HostError::rpc(ErrorObject::not_supported(gate.capability)));
+        }
+        let limit = match capabilities.get("send.file") {
+            Some(ch_protocol::Flag::Bool(true)) => Some(crate::managed_stage::MAX_BYTES),
+            Some(ch_protocol::Flag::Params(params)) => match params.get("max_bytes") {
+                None => Some(crate::managed_stage::MAX_BYTES),
+                Some(value) => value.as_u64().filter(|&n| n > 0)
+                    .map(|n| n.min(crate::managed_stage::MAX_BYTES)),
+            },
+            _ => None,
+        };
+        if limit.is_none_or(|limit| bytes > limit) {
+            return Err(HostError::rpc(ErrorObject::not_supported("send.file")));
+        }
+        // A process/account replacement between snapshots permanently revokes the
+        // captured old interval. Never substitute a newer run with matching IDs.
+        let scope = FileAdmissionScope { run, host: self.clone(), plugin: plugin.into(), account: account.into() };
+        scope.check()?;
+        Ok(scope)
+    }
+
     /// Create a host and discover plugins. Nothing is spawned until an account is started or
     /// [`HostHandle::enable_plugin`] is called.
     pub fn new(

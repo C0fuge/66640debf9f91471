@@ -161,6 +161,14 @@ impl Dir {
         }
         Ok(())
     }
+    pub(super) fn identity_for_ancestor(&self, path: &Path) -> Result<Identity> {
+        let mut current = Some(self);
+        while let Some(dir) = current {
+            if dir.path == path { return Ok(dir.identity); }
+            current = dir.parent.as_ref().map(|(parent, _)| parent.as_ref());
+        }
+        Err(Error::Integrity)
+    }
     pub fn lock(&self) -> Result<File> {
         // New open description: concurrent users of the same Dir also contend.
         let f = openat(self.fd(), c".", libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
