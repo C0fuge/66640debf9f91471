@@ -28,6 +28,7 @@ pub(crate) struct NativeProducer {
     instance:Arc<Instance>,
     origin:LogicalOwnerObservation,
     run:CancellationToken,
+    releases_source:bool,
 }
 impl NativeProducer {
     pub(super) fn capture(instance:&Option<Arc<Instance>>,origin:LogicalOwnerObservation,
@@ -35,9 +36,10 @@ impl NativeProducer {
         // This is the LIVE raw initialize metadata of this exact connection.
         let promised=matches!(capabilities.get("send.file"),Some(ch_protocol::Flag::Params(params))
             if params.get("source_release").and_then(serde_json::Value::as_str)==Some("on_success"));
-        if !promised || origin.is_revoked() || run.is_cancelled() {return None;}
-        Some(Self {instance:instance.clone()?,origin,run})
+        if origin.is_revoked() || run.is_cancelled() {return None;}
+        Some(Self {instance:instance.clone()?,origin,run,releases_source:promised})
     }
+    pub(crate) fn releases_source(&self)->bool {self.releases_source}
     pub(crate) fn nonce(&self) -> &str {&self.instance.nonce}
     pub(crate) fn native_pid(&self) -> u32 {self.instance.pid}
     pub(crate) fn account(&self) -> &str {self.origin.account_id()}

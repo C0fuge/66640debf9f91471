@@ -76,6 +76,10 @@ impl Fixture {
                     tokio::task::yield_now().await;
                 }
             }).await.unwrap();
+            // Ordinary admission/guard fixtures deliberately stay offline, so
+            // their rows remain parked while running-account admission is valid.
+            // A missing release promise is no longer a reason to disable upload.
+            if mode.is_none() {fixture.disconnect().await;}
         }
         fixture
     }
@@ -430,6 +434,27 @@ async fn actual_managed_admission_wakes_the_already_idle_account_worker() {
     wait_native_state(&f,item.id,OutboxState::Sent).await;wait_attempt_state(&f,"positive").await;
     assert_eq!(f.count("managed_dispatch"),1);assert_eq!(f.count("message"),1);
     f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_older_and_unpromised_native_peers_deliver_without_a_source_release_certificate() {
+    for mode in ["old-peer","old-bool-peer","unknown-release","malformed-release"] {
+    let f=Fixture::with_mode(true,Some(mode)).await;
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    wait_native_state(&f,item.id,OutboxState::Sent).await;wait_attempt_state(&f,"unknown").await;
+    let db=f.core.open_db().unwrap();
+    let (promise,settled):(Option<String>,Option<i64>)=db.conn().query_row(
+        "SELECT d.source_release,s.settled_dispatch_id FROM managed_dispatch d JOIN managed_source s ON s.id=d.source_id",
+        [],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert!(promise.is_none());assert!(settled.is_none());
+    assert_eq!(db.conn().query_row("SELECT count(*) FROM managed_dispatch WHERE state='positive'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(f.outbox.get(item.id).unwrap().result_message_ids,Some(vec!["remote-file".into()]));
+    assert_eq!(f.count("message"),1);assert_eq!(f.count("managed_dispatch"),1);
+    assert!(f.stage().join("bytes").exists());
+    assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+    assert!(matches!(f.outbox.retry(item.id),Err(OutboxError::ManagedUnavailable)));
+    f.close().await;
+    }
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]

@@ -57,8 +57,17 @@ for line in sys.stdin:
             "send.album": True, "edit": True, "edit.media": True,
             "group.photo": True, "profile.edit": True,
         }}
-        if _source_mode:
+        if _source_mode == "unknown-release":
+            result["capabilities"]["send.file"]["source_release"] = "future"
+        elif _source_mode == "malformed-release":
+            result["capabilities"]["send.file"]["source_release"] = True
+        elif _source_mode and _source_mode not in ("old-peer", "old-bool-peer"):
             result["capabilities"]["send.file"]["source_release"] = "on_success"
+        if _source_mode == "old-peer":
+            result["api_version"] = "1.1.0"
+        elif _source_mode == "old-bool-peer":
+            result["api_version"] = "1.0.0"
+            result["capabilities"]["send.file"] = True
     elif method == "messages.fetch_recent" and params.get("chat_id") == "disconnect":
         write({"jsonrpc": "2.0", "method": "status", "params": {
             "account_id": params["account_id"], "state": "disconnected", "reconnecting": False,

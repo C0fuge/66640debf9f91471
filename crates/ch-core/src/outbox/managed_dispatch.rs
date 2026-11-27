@@ -27,7 +27,7 @@ impl WireGrant {
 #[derive(Clone)]
 struct Attempt {
     id:i64,nonce:String,source:i64,fingerprint:String,row:OutboxRow,
-    owner:AccountRow,producer_nonce:String,
+    owner:AccountRow,producer_nonce:String,releases_source:bool,
     origin:LogicalOwnerObservation,
 }
 #[derive(Clone)]
@@ -201,11 +201,15 @@ fn settle(scope:&ManagedProofTransaction<'_,'_>,attempt:&Attempt,message:&ch_pro
         if let Some(delivery)=Inner::set_echo_delivery_in(tx,&updated,"sent")? {changes.push(OutboxChange::Ingested(delivery));}
         changes.push(OutboxChange::Item(OutboxItem::from_row(&updated)));
     } else {return Ok(vec![]);}
-    tx.execute("UPDATE managed_dispatch SET state='positive',result_ids_json=?2,response_digest=?3,
-        updated_at=?4 WHERE id=?1",rusqlite::params![attempt.id,serde_json::to_string(&ids)?,digest,now_millis()])
-        .map_err(ch_db::Error::from)?;
-    tx.execute("UPDATE managed_source SET settled_dispatch_id=?2,updated_at=?3 WHERE id=?1",
-        rusqlite::params![attempt.source,attempt.id,now_millis()]).map_err(ch_db::Error::from)?;
+    // Delivery is independent of physical source closure. Older live peers may
+    // send successfully without promising that all source readers have settled.
+    tx.execute("UPDATE managed_dispatch SET state=?5,result_ids_json=?2,response_digest=?3,
+        updated_at=?4 WHERE id=?1",rusqlite::params![attempt.id,serde_json::to_string(&ids)?,digest,now_millis(),
+            if attempt.releases_source {"positive"} else {"unknown"}]).map_err(ch_db::Error::from)?;
+    if attempt.releases_source {
+        tx.execute("UPDATE managed_source SET settled_dispatch_id=?2,updated_at=?3 WHERE id=?1",
+            rusqlite::params![attempt.source,attempt.id,now_millis()]).map_err(ch_db::Error::from)?;
+    }
     if attempt.origin.is_revoked() {return Err(OutboxError::AdmissionConflict);}
     Ok(changes)
 }
@@ -222,13 +226,14 @@ fn matching_attempt(conn:&rusqlite::Connection,attempt:&Attempt)->Result<Option<
         JOIN account a ON a.account_id=s.account_id
         WHERE d.id=?1 AND d.nonce=?2 AND d.source_id=?3 AND d.outbox_id=?4 AND d.client_id=?5
         AND d.method='messages.send_file' AND d.params_json=?6 AND d.source_fingerprint=?7
-        AND d.source_release='on_success' AND p.nonce=?8 AND current.outbox_id=?4
+        AND d.source_release IS ?12 AND p.nonce=?8 AND current.outbox_id=?4
         AND s.fingerprint_json=?7 AND s.intent_json=?6 AND s.client_id=?5
         AND s.account_id=?9 AND s.plugin_id=?10 AND s.account_created_at=?11
         AND a.plugin_id=?10 AND a.created_at=?11)",
         rusqlite::params![attempt.id,attempt.nonce,attempt.source,row.id,row.client_id,
             serde_json::to_string(&row.params)?,attempt.fingerprint,attempt.producer_nonce,
-            attempt.owner.account_id,attempt.owner.plugin_id,attempt.owner.created_at],|r|r.get(0))
+            attempt.owner.account_id,attempt.owner.plugin_id,attempt.owner.created_at,
+            attempt.releases_source.then_some("on_success")],|r|r.get(0))
         .map_err(ch_db::Error::from)?;
     Ok(matched.then_some(row))
 }
@@ -245,8 +250,8 @@ pub(super) async fn dispatch(inner:Arc<Inner>,row:OutboxRow,input:SourceInput,
         return Err(OutboxError::AdmissionConflict);
     }
     let Ok(producer)=context.host.source_producer(&owner.plugin_id,&owner.account_id).await else {
-        // Unsupported unregistered migration baseline never falls through to raw
-        // transport. Its selected source stays parked, not a retry loop.
+        // No live original native producer means no wire or raw fallback.
+        // This selection stays parked rather than recapturing a replacement.
         return Ok(());
     };
     if producer.account()!=owner.account_id || producer.plugin()!=owner.plugin_id || !producer.live() {
@@ -311,8 +316,9 @@ pub(super) async fn dispatch(inner:Arc<Inner>,row:OutboxRow,input:SourceInput,
         let now=now_millis();
         tx.execute("INSERT INTO managed_dispatch(nonce,source_id,producer_id,outbox_id,client_id,method,
             params_json,source_fingerprint,source_release,state,created_at,updated_at)
-            VALUES(?1,?2,?3,?4,?5,'messages.send_file',?6,?7,'on_success','exposed',?8,?8)",
-            rusqlite::params![nonce,source,producer,current.id,current.client_id,intent,fingerprint,now]).map_err(ch_db::Error::from)?;
+            VALUES(?1,?2,?3,?4,?5,'messages.send_file',?6,?7,?9,'exposed',?8,?8)",
+            rusqlite::params![nonce,source,producer,current.id,current.client_id,intent,fingerprint,now,
+                native.releases_source().then_some("on_success")]).map_err(ch_db::Error::from)?;
         let id=tx.last_insert_rowid();
         tx.execute("INSERT INTO managed_outbox_dispatch(outbox_id,dispatch_id) VALUES(?1,?2)",
             rusqlite::params![current.id,id]).map_err(ch_db::Error::from)?;
@@ -330,7 +336,8 @@ pub(super) async fn dispatch(inner:Arc<Inner>,row:OutboxRow,input:SourceInput,
             && !ch_db::get_topic(tx,target.id,topic)?.is_some_and(|topic|!topic.closed && !topic.is_gone)
         {return Err(OutboxError::AdmissionConflict);}
         if stop.is_cancelled() || !native.live() {return Err(OutboxError::ManagedUnavailable);}
-        Ok(Attempt {id,nonce,source,fingerprint,row:current,owner,producer_nonce:native.nonce().into(),origin:native.origin()})
+        Ok(Attempt {id,nonce,source,fingerprint,row:current,owner,producer_nonce:native.nonce().into(),
+            releases_source:native.releases_source(),origin:native.origin()})
     }).await.map_err(|_|OutboxError::ManagedUnavailable)??;
     let publisher=Publisher::for_row(&inner,&row);
     let permit=ManagedPermit {grant:WireGrant {input,producer,params:row.params,stopped},
