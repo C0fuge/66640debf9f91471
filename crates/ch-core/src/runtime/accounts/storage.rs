@@ -157,6 +157,7 @@ pub(super) fn check_owner(conn: &Connection, expected: &AccountRow) -> Result<()
 pub(super) fn managed_in_use(conn:&Connection,account:&str) -> Result<bool> {
     Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM managed_source WHERE account_id=?1)
         OR EXISTS(SELECT 1 FROM managed_stage_publication WHERE account_id=?1)
+        OR EXISTS(SELECT 1 FROM managed_ready_retirement WHERE account_id=?1)
         OR EXISTS(SELECT 1 FROM managed_dispatch LIMIT 1)
         OR EXISTS(SELECT 1 FROM managed_retirement LIMIT 1)",[account],|row|row.get(0))
         .map_err(ch_db::Error::from)?)
@@ -543,6 +544,28 @@ mod capture_tests {
     use crate::{host::MemorySecretStore, runtime::{Core, CoreConfig, NewAccount}};
     use std::sync::Condvar;
     use tokio::sync::Notify;
+
+    #[test]
+    fn unresolved_ready_journal_metadata_alone_vetoes_only_its_original_owner() {
+        let db=ch_db::Db::open_in_memory().unwrap();let conn=db.conn();
+        conn.execute_batch("INSERT INTO plugin(plugin_id,name,first_seen_at,last_seen_at) VALUES('fixture','Fixture',0,0);
+            INSERT INTO account(account_id,plugin_id,created_at,updated_at) VALUES('owner','fixture',0,0),('other','fixture',0,0);
+            INSERT INTO managed_stage_publication(stage_id,nonce,client_id,account_id,plugin_id,account_created_at,path,identity_json,created_at)
+            VALUES('11111111111111111111111111111111','22222222222222222222222222222222',
+            '33333333333333333333333333333333','owner','fixture',0,'/synthetic/bytes','{}',0);
+            INSERT INTO managed_ready_retirement(stage_id,nonce,birth_nonce,client_id,account_id,plugin_id,
+                account_created_at,path,identity_json,created_at,updated_at)
+            SELECT stage_id,'44444444444444444444444444444444',nonce,client_id,account_id,plugin_id,
+                account_created_at,path,identity_json,0,0 FROM managed_stage_publication;").unwrap();
+        // Deliberate metadata corruption isolates the journal guard from the
+        // existing publication/source guards. No filesystem/removal permission.
+        conn.pragma_update(None,"foreign_keys","OFF").unwrap();
+        conn.execute("DELETE FROM managed_stage_publication",[]).unwrap();
+        conn.pragma_update(None,"foreign_keys","ON").unwrap();
+        assert!(managed_in_use(conn,"owner").unwrap());
+        assert!(!managed_in_use(conn,"other").unwrap());
+        assert_eq!(conn.query_row("SELECT count(*) FROM managed_source",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
 
     #[cfg(target_os = "linux")]
     async fn directory_core() -> (tempfile::TempDir, Core) {

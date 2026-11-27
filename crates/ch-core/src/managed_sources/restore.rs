@@ -14,6 +14,9 @@ fn unavailable() -> RuntimeError { RuntimeError::ManagedLifetimeRecoveryUnavaila
 pub(super) fn load(conn:&Connection,config:&HostConfig) -> Result<Recovered> {
     let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Deferred)
         .map_err(ch_db::Error::from)?;
+    let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_ready_retirement LIMIT 1)",
+        [],|r|r.get(0)).map_err(ch_db::Error::from)?;
+    if pending {return Err(unavailable());}
     // Descriptive publication facts may survive interrupted Ready publication.
     // Restore validates bounded metadata only; no reader/claim/dispatch is minted.
     // A later explicit admission must independently verify the actual Ready inode.

@@ -15,6 +15,8 @@ fn expected_tables() -> Vec<&'static str> {
         "history_state",
         "media_file",
         "managed_stage_publication",
+        "managed_ready_retirement",
+        "managed_ready_receipt",
         "member",
         "message",
         "message_fts",

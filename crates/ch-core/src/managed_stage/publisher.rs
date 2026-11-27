@@ -94,7 +94,8 @@ impl StagePublisher {
                 [],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|Error::Storage)?;
             if count>=256 || bytes>=1_048_576 {return Err(Error::Busy);}
             let previous:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_stage_publication WHERE stage_id=?1 OR path=?2)
-                OR EXISTS(SELECT 1 FROM managed_source WHERE stage_id=?1 OR path=?2)",
+                OR EXISTS(SELECT 1 FROM managed_source WHERE stage_id=?1 OR path=?2)
+                OR EXISTS(SELECT 1 FROM managed_ready_receipt WHERE stage_id=?1 OR path=?2)",
                 rusqlite::params![stage,path.to_str()],|r|r.get(0)).map_err(|_|Error::Storage)?;
             if previous {return Err(Error::Integrity);}
             issuer.check_in(tx,&observed).map_err(|_|Error::TargetChanged)?;
@@ -145,7 +146,8 @@ impl StagePublisher {
                 [],|row|Ok((row.get(0)?,row.get(1)?))).map_err(|_|Error::Storage)?;
             if count>=256 || bytes+json.len() as i64>1_048_576 {return Err(Error::Busy);}
             let m=identity.manifest();
-            let historical:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_source WHERE stage_id=?1 OR path=?2 OR client_id=?3)",
+            let historical:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_source WHERE stage_id=?1 OR path=?2 OR client_id=?3)
+                OR EXISTS(SELECT 1 FROM managed_ready_receipt WHERE stage_id=?1 OR path=?2 OR client_id=?3)",
                 rusqlite::params![m.stage_id,identity.path().to_str(),m.client_id],|row|row.get(0)).map_err(|_|Error::Storage)?;
             if historical {return Err(Error::Integrity);}
             tx.execute("INSERT INTO managed_stage_publication(stage_id,nonce,client_id,account_id,plugin_id,

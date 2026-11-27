@@ -86,6 +86,8 @@ for line in sys.stdin:
         continue
     write({"jsonrpc": "2.0", "id": frame["id"], "result": result})
     if method == "account.start":
+        if marker := os.environ.get("CH_TEST_LIFETIME_START_MARKER"):
+            Path(marker).write_text("started")
         write({"jsonrpc": "2.0", "method": "status", "params": {
             "account_id": params["account_id"], "state": "connected", "reconnecting": False,
         }})

@@ -51,6 +51,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0006_stage_publications",
         sql: include_str!("../migrations/0006_stage_publications.sql"),
     },
+    Migration {
+        version: 7,
+        name: "0007_ready_retirement",
+        sql: include_str!("../migrations/0007_ready_retirement.sql"),
+    },
 ];
 
 /// The newest schema version this build knows.

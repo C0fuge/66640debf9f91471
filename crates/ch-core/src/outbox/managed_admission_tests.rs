@@ -1346,3 +1346,46 @@ async fn local_recovery_never_replaces_changed_bytes_or_bridges_another_core_iss
     assert!(!f.stage().join("manifest.json").exists());assert_eq!(f.count("managed_stage_publication"),1);
     f.assert_no_admission();f.assert_no_wire();f.close().await;
 }
+
+fn negative_ready_journal(f:&Fixture) {
+    // Deliberate unproved SQL intent is only a negative barrier, never a physical
+    // result, source permission or completed-retirement provider.
+    f.core.open_db().unwrap().conn().execute("INSERT INTO managed_ready_retirement(stage_id,nonce,
+        birth_nonce,client_id,account_id,plugin_id,account_created_at,path,identity_json,created_at,updated_at)
+        SELECT stage_id,?1,nonce,client_id,account_id,plugin_id,account_created_at,path,identity_json,0,0
+        FROM managed_stage_publication WHERE stage_id=?2",rusqlite::params!["f".repeat(32),STAGE]).unwrap();
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn pending_ready_journal_never_grants_recovery_discard_or_fresh_source_admission() {
+    let f=Fixture::new(true).await;negative_ready_journal(&f);
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let proof=VerifiedStageBinding::verify_ready(&binding,STAGE,1024,|_|Ok(())).unwrap();
+    assert!(f.core.stage_publisher().check_unadmitted_ready(&proof).await.is_err());drop(proof);
+    assert!(f.core.stage_publisher().recover_ready(binding,STAGE.into()).await.is_err());
+    assert!(matches!(f.outbox.enqueue_managed_file_checked(f.claim().await).await,
+        Err(ManagedAdmissionError::Rejected(OutboxError::AdmissionConflict))));
+    f.assert_no_admission();f.assert_no_wire();assert!(f.stage().join("bytes").exists());
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_pending_ready_journal_stops_before_autostart_and_removing_only_intent_reopens() {
+    let f=Fixture::new(false).await;negative_ready_journal(&f);
+    f.outbox.shutdown().await;f.core.shutdown().await;
+    let marker=f.temp.path().join("unexpected-start");
+    let config=|| {
+        let mut config=CoreConfig::new(f.temp.path(),f.secrets.clone());
+        config.host=f.core.host().config().clone();config.autostart=true;
+        config.host.env.insert("CH_TEST_LIFETIME_START_MARKER".into(),marker.to_string_lossy().into_owned());
+        config
+    };
+    assert!(matches!(Core::open(config()).await,Err(RuntimeError::ManagedLifetimeRecoveryUnavailable)));
+    assert!(!marker.exists());assert!(f.stage().join("bytes").exists());f.assert_no_wire();
+    f.core.open_db().unwrap().conn().execute("DELETE FROM managed_ready_retirement",[]).unwrap();
+    let core=Core::open(config()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5),async {
+        while !marker.exists() {tokio::time::sleep(Duration::from_millis(10)).await;}
+    }).await.unwrap();
+    f.assert_no_admission();f.assert_no_wire();core.shutdown().await;f.close().await;
+}
