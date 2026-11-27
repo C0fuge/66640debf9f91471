@@ -238,11 +238,14 @@ async fn dropping_core_revokes_only_metadata_and_retained_handles_cannot_mint_or
     let f = Fixture::new().await; let old = f.snapshot();
     let Fixture { temp, core, secrets } = f;
     let accounts = core.accounts().clone(); let sink = core.ingest().clone(); let host = core.host().clone();
+    let db_path=core.db_path().to_owned();
     drop(core);
     assert!(old.origin().is_revoked());
     assert!(!accounts.persist_owned(old.clone()).await.unwrap());
     sink.deliver_owned("fixture", old.origin().clone(), status("after-drop")).await.unwrap();
-    let row = accounts.get("owner").await.unwrap().unwrap();
+    assert!(accounts.get("owner").await.is_err(),"closed metadata service refuses new reads");
+    let disk=ch_db::Db::open(&db_path).unwrap();
+    let row=ch_db::get_account(disk.conn(),"owner").unwrap().unwrap();
     assert_ne!(row.me_user_id.as_deref(), Some("after-drop"));
     assert!(accounts.0.logical_owners.capture(&row).is_none());
     // Explicit test cleanup: synchronous Core Drop never claimed process or
@@ -275,7 +278,8 @@ async fn cancelled_shutdown_and_drainer_keep_actual_metadata_work_owned_and_old_
     // independent native snapshot or the legitimate final shutdown resync.
     // The boundary under test is NO CHANGE after issuer close, not absence of
     // metadata that was positively admitted for this owner before close.
-    let baseline = f.core.accounts().get("owner").await.unwrap().unwrap();
+    assert!(f.core.accounts().get("owner").await.is_err());
+    let baseline=ch_db::get_account(f.core.open_db().unwrap().conn(),"owner").unwrap().unwrap();
     let handles = || -> i64 {
         f.core.open_db().unwrap().conn().query_row("SELECT COUNT(*) FROM platform_handle
             WHERE account_id='owner' AND user_id IN ('paused-shutdown', 'after-close')", [], |row| row.get(0)).unwrap()
@@ -290,7 +294,8 @@ async fn cancelled_shutdown_and_drainer_keep_actual_metadata_work_owned_and_old_
     release.release();
     tokio::time::timeout(Duration::from_secs(5), completed).await.unwrap().unwrap();
     tokio::time::timeout(Duration::from_secs(5), drain).await.unwrap().unwrap().unwrap();
-    assert_eq!(f.core.accounts().get("owner").await.unwrap().unwrap(), baseline);
+    assert!(f.core.accounts().get("owner").await.is_err());
+    assert_eq!(ch_db::get_account(f.core.open_db().unwrap().conn(),"owner").unwrap().unwrap(),baseline);
     assert_eq!(handles(), 0);
     f.core.shutdown().await;
     let reopened = Core::open(config(&f.temp, f.secrets.clone())).await.unwrap();
