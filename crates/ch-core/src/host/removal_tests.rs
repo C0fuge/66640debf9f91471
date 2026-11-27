@@ -124,3 +124,46 @@ async fn in_flight_ordinary_stop_refuses_removal_until_its_exact_reply() {
     assert!(f.core.accounts().get("owner").await.unwrap().is_none());
     f.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_core_stop_recovers_accepted_revoked_start_without_discarding_unproved_copy() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::configured(Some("delayed-start")).await;
+    let old = preserve_inputs(&f).await;
+    let host = f.core.host().clone();
+    let starting = tokio::spawn(async move { host.start_account("fixture", "owner", AccountSpec::default()).await });
+    until(|| f._temp.path().join("start-waiting").exists()).await;
+    // Pending start has no positive native ACK and remains busy, with no stop frame.
+    assert!(matches!(f.core.host().stop_account("fixture", "owner").await,
+        Err(HostError::AccountBusy(_, "starting"))));
+    assert_eq!(requests(&f, "account.stop"), 0);
+    // Real unregistered private bytes: catalog denial, never fabricated source
+    // registration or a positive physical-reader/closure claim.
+    let uploads = f.core.host().config().upload_dir("owner");
+    let unproved = uploads.join("unproved-copy");
+    let mutation = f.core.stage_mutations().begin().unwrap();
+    fs::create_dir_all(&uploads).unwrap();
+    fs::set_permissions(&uploads, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&unproved, b"unproved private bytes").unwrap();
+    fs::set_permissions(&unproved, fs::Permissions::from_mode(0o400)).unwrap();
+    drop(mutation);
+    preserved_refusal(&f, &old).await; // Refused before strict stop; old Gate is revoked.
+    assert_eq!(requests(&f, "account.stop"), 0);
+    fs::write(f._temp.path().join("release-start"), b"").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), starting).await.unwrap().unwrap().unwrap();
+    assert!(f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Starting));
+    // The exact peer's ACK is native Active evidence despite stale UI adoption.
+    // Explicit Core disable follows ordinary stop policy and sends one real RPC.
+    tokio::time::timeout(Duration::from_secs(5), f.core.accounts().set_enabled("owner", false)).await.unwrap().unwrap();
+    assert!(f.core.host().account("fixture", "owner").is_some_and(|info| info.phase == AccountPhase::Stopped && !info.wanted));
+    assert_eq!(requests(&f, "account.stop"), 1);
+    assert_eq!(fs::read(&unproved).unwrap(), b"unproved private bytes");
+    let fresh = f.core.accounts().storage_observation_for("owner").await.unwrap();
+    preserved_refusal(&f, &fresh).await; // Stop did not turn the copy into safe deletion.
+    assert_eq!(requests(&f, "account.stop"), 1);
+    assert_eq!(fs::read(&unproved).unwrap(), b"unproved private bytes");
+    let sources: i64 = f.core.open_db().unwrap().conn().query_row("SELECT count(*) FROM managed_source", [], |row| row.get(0)).unwrap();
+    assert_eq!(sources, 0);
+    assert!(f.core.accounts().get("owner").await.unwrap().is_some_and(|row| !row.enabled));
+    f.close().await;
+}

@@ -294,6 +294,11 @@ impl Registry {
         }
     }
 
+    fn can_stop_accepted_start(&self, plugin: &str, account: &str, connection: &Arc<()>) -> bool {
+        self.lock().get(plugin).and_then(|entry| entry.accounts.get(account))
+            .is_some_and(|record| record.removal.can_stop_current_peer(connection))
+    }
+
     pub(super) fn forget_unexposed_wish(&self, plugin: &str, account: &str) {
         let mut state = self.lock();
         if let Some(record) = state.get_mut(plugin).and_then(|entry| entry.accounts.get_mut(account)) {
@@ -1406,11 +1411,11 @@ impl Supervisor {
                 let _ = reply.send(Err(HostError::AccountBusy(account_id, "stopping")));
                 return;
             }
-            Some(AccountPhase::Starting) => {
+            Some(AccountPhase::Starting) if !self.registry.can_stop_accepted_start(&self.plugin_id, &account_id, &conn.identity) => {
                 let _ = reply.send(Err(HostError::AccountBusy(account_id, "starting")));
                 return;
             }
-            Some(AccountPhase::Running) => {}
+            Some(AccountPhase::Starting | AccountPhase::Running) => {}
         }
         self.registry
             .update_account(&self.plugin_id, &account_id, |r| {

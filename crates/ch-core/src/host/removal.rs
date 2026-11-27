@@ -100,6 +100,11 @@ impl Evidence {
             _ => Decision::Refuse,
         }
     }
+    // Nondestructive ordinary stop recovery only: older unknown work still
+    // vetoes removal, but must not prevent stopping this exactly accepted peer.
+    pub(super) fn can_stop_current_peer(&self, connection: &Arc<()>) -> bool {
+        matches!(&self.current, Some(Current::Active(active)) if Arc::ptr_eq(connection, &active.connection))
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +125,23 @@ mod tests {
         let stop = Request::new(&foreign, 9);
         evidence.stop(stop.clone()); evidence.finish(&stop, true);
         evidence.shutdown_confirmed(&foreign);
+        assert!(matches!(evidence.decision(None), Decision::Refuse));
+    }
+
+    #[test]
+    fn ordinary_current_peer_stop_can_recover_without_erasing_older_unknown() {
+        let peer = Arc::new(()); let foreign = Arc::new(());
+        let mut evidence = Evidence::default(); let old = Request::new(&peer, 1);
+        evidence.start(old.clone()); evidence.finish(&old, false);
+        let current = Request::new(&peer, 2); evidence.start(current.clone());
+        assert!(!evidence.can_stop_current_peer(&peer)); // Still unresolved Starting.
+        evidence.finish(&current, true);
+        assert!(evidence.can_stop_current_peer(&peer));
+        assert!(!evidence.can_stop_current_peer(&foreign));
+        assert!(matches!(evidence.decision(Some(&peer)), Decision::Refuse));
+        let stop = Request::new(&peer, 3); evidence.stop(stop.clone());
+        assert!(!evidence.can_stop_current_peer(&peer)); // Stopping remains busy.
+        evidence.finish(&stop, true);
         assert!(matches!(evidence.decision(None), Decision::Refuse));
     }
 }
