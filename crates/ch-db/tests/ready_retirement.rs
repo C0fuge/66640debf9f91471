@@ -69,6 +69,15 @@ fn journal_binds_exact_unadmitted_birth_and_excludes_every_source_identity_colli
     conn.execute("INSERT INTO outbox(account_id,chat_id,client_id,kind,method,params_json,state,created_at,updated_at)
         VALUES('owner','chat',?1,'send_file','messages.send_file','{}','failed',0,0)",[CLIENT]).unwrap();
     assert!(journal(conn).is_err(),"a canonical legacy receipt also prevents retirement");
+    // Even foreign-key-disabled loss of a publication must not make its pending
+    // identity reusable. This adds only a negative SQL guard, no absence proof.
+    let orphan=Db::open_in_memory().unwrap();let conn=orphan.conn();seed(conn);journal(conn).unwrap();
+    conn.pragma_update(None,"foreign_keys","OFF").unwrap();
+    conn.execute("DELETE FROM managed_stage_publication",[]).unwrap();
+    conn.pragma_update(None,"foreign_keys","ON").unwrap();
+    assert!(conn.execute("INSERT INTO managed_stage_publication(stage_id,nonce,client_id,account_id,plugin_id,
+        account_created_at,path,identity_json,created_at) VALUES(?1,?2,?3,'owner','fixture',0,?4,'{}',0)",
+        params![STAGE,BIRTH,CLIENT,PATH]).is_err());
 }
 
 #[test]

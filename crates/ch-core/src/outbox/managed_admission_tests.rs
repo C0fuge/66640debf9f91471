@@ -1389,3 +1389,25 @@ async fn actual_pending_ready_journal_stops_before_autostart_and_removing_only_i
     }).await.unwrap();
     f.assert_no_admission();f.assert_no_wire();core.shutdown().await;f.close().await;
 }
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn orphaned_pending_ready_identity_refuses_before_any_new_copy_allocation() {
+    let f=Fixture::new(false).await;negative_ready_journal(&f);
+    let manifest:Manifest=serde_json::from_slice(&std::fs::read(f.stage().join("manifest.json")).unwrap()).unwrap();
+    // Synthetic loss isolates the old journal from normal birth/source guards.
+    // It never certifies that old readers closed or earns physical cleanup.
+    let db=f.core.open_db().unwrap();
+    db.conn().pragma_update(None,"foreign_keys","OFF").unwrap();
+    db.conn().execute("DELETE FROM managed_stage_publication",[]).unwrap();
+    db.conn().pragma_update(None,"foreign_keys","ON").unwrap();
+    let mutation=f.core.stage_mutations().begin().unwrap();
+    std::fs::remove_dir_all(f.stage()).unwrap();drop(mutation);
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let result=f.core.stage_publisher().copy(binding,crate::managed_stage::CopyDescription {
+        stage_id:STAGE.into(),scope:manifest.scope,created:1,name:"replacement.bin".into(),size:15,limit:1024,
+    },memory_copy(b"synthetic bytes"),|_|panic!("orphan journal must refuse before file allocation")).await;
+    assert!(matches!(result,Err(crate::managed_stage::Error::Integrity)));
+    assert!(!f.stage().exists());assert_eq!(f.count("managed_stage_publication"),0);
+    assert_eq!(f.count("managed_ready_retirement"),1);f.assert_no_admission();f.assert_no_wire();
+    f.close().await;
+}

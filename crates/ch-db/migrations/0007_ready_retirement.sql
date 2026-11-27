@@ -95,6 +95,8 @@ END;
 CREATE TRIGGER IF NOT EXISTS managed_ready_receipt_excludes_birth BEFORE INSERT ON managed_stage_publication
 WHEN EXISTS(SELECT 1 FROM managed_ready_receipt r
  WHERE r.stage_id=NEW.stage_id OR r.client_id=NEW.client_id OR r.path=NEW.path)
+ OR EXISTS(SELECT 1 FROM managed_ready_retirement j
+ WHERE j.stage_id=NEW.stage_id OR j.client_id=NEW.client_id OR j.path=NEW.path)
 BEGIN SELECT RAISE(ABORT,'ready receipt excludes publication reuse'); END;
 CREATE TRIGGER IF NOT EXISTS managed_ready_receipt_immutable BEFORE UPDATE ON managed_ready_receipt
 BEGIN SELECT RAISE(ABORT,'ready receipt is immutable'); END;

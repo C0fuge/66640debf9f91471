@@ -101,7 +101,7 @@ impl PublicationIdentity {
             WHEN length(CAST(identity_json AS BLOB))<=65536 THEN identity_json END
             FROM managed_stage_publication WHERE stage_id=?1 AND client_id=?2
             AND account_id=?3 AND plugin_id=?4 AND account_created_at=?5 AND path=?6 AND source_id IS NULL
-            AND NOT EXISTS(SELECT 1 FROM managed_ready_retirement WHERE stage_id=?1)
+            AND NOT EXISTS(SELECT 1 FROM managed_ready_retirement WHERE stage_id=?1 OR client_id=?2 OR path=?6)
             AND NOT EXISTS(SELECT 1 FROM managed_ready_receipt WHERE stage_id=?1 OR client_id=?2 OR path=?6)",
             rusqlite::params![m.stage_id,m.client_id,m.scope.account,m.scope.plugin,
                 m.scope.account_created,self.path().to_str()],|row|row.get(0))
