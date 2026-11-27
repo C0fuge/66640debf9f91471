@@ -4,11 +4,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use ch_db::{Db, Transaction};
 use tokio::sync::{Semaphore, oneshot};
+#[cfg(target_os="linux")]
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
 use crate::ingest::{Applied, Ingest, LocalEcho};
 
 const JOB_LIMIT: u32 = 4;
+#[cfg(target_os="linux")]
+const NATIVE_LIMIT:u32=4;
+pub(crate) type SubmittedProof<R,E> = oneshot::Receiver<Result<Result<R,E>,ManagedProofError>>;
 
 /// Failure to execute or durably finish proof work. A failed commit is ambiguous;
 /// callers must reconcile existing durable identity rather than replay an effect.
@@ -55,6 +60,8 @@ impl<'db> ManagedProofTransaction<'_, 'db> {
     pub fn transaction(&self) -> &Transaction<'db> {
         self.tx
     }
+    #[cfg(target_os="linux")]
+    pub(crate) fn ingest(&self) -> &Ingest {self.ingest}
 
     /// Insert an echo on this transaction, without opening a nested ingest writer.
     /// The caller publishes returned changes only after successful durable commit.
@@ -69,6 +76,8 @@ impl<'db> ManagedProofTransaction<'_, 'db> {
 
 struct State {
     closed: bool,
+    #[cfg(target_os="linux")]
+    native_closed:bool,
     jobs: Vec<JoinHandle<()>>,
 }
 
@@ -76,6 +85,12 @@ struct Inner {
     ingest: Arc<Mutex<Ingest>>,
     db: Mutex<Option<Db>>,
     slots: Arc<Semaphore>,
+    #[cfg(target_os="linux")]
+    native:Arc<Semaphore>,
+    #[cfg(target_os="linux")]
+    native_work:Arc<Semaphore>,
+    #[cfg(target_os="linux")]
+    issuer:Arc<()>,
     state: Mutex<State>,
 }
 
@@ -90,6 +105,9 @@ struct Inner {
 pub struct ManagedProofWriter {
     inner: Arc<Inner>,
 }
+#[cfg(target_os="linux")]
+#[derive(Clone)]
+pub(crate) struct NativeProofTicket { _slot:Arc<OwnedSemaphorePermit>,issuer:Arc<()> }
 
 impl ManagedProofWriter {
     pub(super) fn new(ingest: Arc<Mutex<Ingest>>, db: Option<Db>) -> Self {
@@ -98,7 +116,13 @@ impl ManagedProofWriter {
                 ingest,
                 db: Mutex::new(db),
                 slots: Arc::new(Semaphore::new(JOB_LIMIT as usize)),
-                state: Mutex::new(State { closed: false, jobs: Vec::new() }),
+                #[cfg(target_os="linux")]
+                native:Arc::new(Semaphore::new(NATIVE_LIMIT as usize)),
+                #[cfg(target_os="linux")]
+                native_work:Arc::new(Semaphore::new((NATIVE_LIMIT*2) as usize)),
+                #[cfg(target_os="linux")]
+                issuer:Arc::new(()),
+                state: Mutex::new(State { closed: false,#[cfg(target_os="linux")] native_closed:false, jobs: Vec::new() }),
             }),
         }
     }
@@ -113,6 +137,14 @@ impl ManagedProofWriter {
         E: Send + 'static,
         F: FnOnce(&ManagedProofTransaction<'_, '_>) -> Result<R, E> + Send + 'static,
     {
+        self.submit(f)?.await.map_err(|_|ManagedProofError::TaskFailed)?
+    }
+
+    // Native response resolution admits actual bounded DB work synchronously.
+    // Dropping an RPC waiter or delaying its next poll cannot race past drain.
+    pub(crate) fn submit<R,E,F>(&self,f:F) -> Result<SubmittedProof<R,E>,ManagedProofError>
+    where R:Send+'static,E:Send+'static,
+        F:FnOnce(&ManagedProofTransaction<'_,'_>)->Result<R,E>+Send+'static {
         let (send, recv) = oneshot::channel();
         {
             let mut state = self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -131,7 +163,39 @@ impl ManagedProofWriter {
                 let _ = send.send(result);
             }));
         }
-        recv.await.map_err(|_| ManagedProofError::TaskFailed)?
+        Ok(recv)
+    }
+
+    #[cfg(target_os="linux")]
+    pub(crate) fn reserve_native(&self)->Result<NativeProofTicket,ManagedProofError> {
+        let state=self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.closed {return Err(ManagedProofError::Closed);}
+        let slot=self.inner.native.clone().try_acquire_owned().map_err(|_|ManagedProofError::Busy)?;
+        Ok(NativeProofTicket {_slot:Arc::new(slot),issuer:self.inner.issuer.clone()})
+    }
+
+    // Only a ticket reserved BEFORE exposure may enter after ordinary close.
+    // At most four metadata-only callbacks wait for DB slots without occupying
+    // blocking threads. The actual worker owns the ticket through COMMIT.
+    #[cfg(target_os="linux")]
+    pub(crate) fn submit_native<R,E,F>(&self,ticket:NativeProofTicket,f:F)
+        ->Result<SubmittedProof<R,E>,ManagedProofError>
+    where R:Send+'static,E:Send+'static,
+        F:FnOnce(&ManagedProofTransaction<'_,'_>)->Result<R,E>+Send+'static {
+        let (send,recv)=oneshot::channel();
+        let mut state=self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.native_closed || !Arc::ptr_eq(&ticket.issuer,&self.inner.issuer) {return Err(ManagedProofError::Closed);}
+        let work=self.inner.native_work.clone().try_acquire_owned().map_err(|_|ManagedProofError::Busy)?;
+        state.jobs.retain(|job|!job.is_finished());
+        let inner=self.inner.clone();
+        state.jobs.push(tokio::spawn(async move {
+            let Ok(slot)=inner.slots.clone().acquire_owned().await else {return;};
+            let _=tokio::task::spawn_blocking(move|| {
+                let _work=work;let _ticket=ticket;let _slot=slot;
+                let _=send.send(inner.run(f));
+            }).await;
+        }));
+        Ok(recv)
     }
 
     /// Synchronously deny new work. Existing jobs continue to own their DB and slot.
@@ -145,12 +209,17 @@ impl ManagedProofWriter {
         let jobs = {
             let mut state = self.inner.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.closed = true;
+            #[cfg(target_os="linux")]
+            {state.native_closed=true;}
             std::mem::take(&mut state.jobs)
         };
         let mut failed = false;
         for job in jobs {
             failed |= job.await.is_err();
         }
+        #[cfg(target_os="linux")]
+        let _native=Arc::clone(&self.inner.native).acquire_many_owned(NATIVE_LIMIT)
+            .await.map_err(|_|ManagedProofError::TaskFailed)?;
         let _all = Arc::clone(&self.inner.slots).acquire_many_owned(JOB_LIMIT)
             .await.map_err(|_| ManagedProofError::TaskFailed)?;
         if failed { Err(ManagedProofError::TaskFailed) } else { Ok(()) }

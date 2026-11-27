@@ -18,7 +18,7 @@ async fn fixture() -> (tempfile::TempDir, Core) {
 
 fn connection(registry: &Arc<Registry>) -> (Arc<Conn>, mpsc::Receiver<Out>) {
     let (writer, frames) = mpsc::channel(16);
-    (Arc::new(Conn { plugin_id: "fixture".into(), identity: Arc::new(()), registry: Arc::downgrade(registry), origins: None, pending: Mutex::default(), writer,
+    (Arc::new(Conn { late:Mutex::default(),producer:None,plugin_id: "fixture".into(), identity: Arc::new(()), registry: Arc::downgrade(registry), origins: None, pending: Mutex::default(), writer,
         ping_misses: AtomicU32::new(0), stalled: AtomicBool::new(false), initialized: AtomicBool::new(true) }), frames)
 }
 

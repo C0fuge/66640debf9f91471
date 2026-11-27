@@ -41,5 +41,7 @@ pub use accounts::{
 pub use bus::{AccountChange, ChangeBus, CoreChange};
 pub use error::{RuntimeError, SettingsProblem};
 pub use managed_proof::{ManagedProofError, ManagedProofTransaction, ManagedProofWriter};
+#[cfg(target_os="linux")]
+pub(crate) use managed_proof::NativeProofTicket;
 pub use root::{Core, CoreConfig, DB_FILE, default_data_dir};
 pub use sink::{IngestSink, account_path_filter};

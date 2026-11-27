@@ -406,6 +406,11 @@ impl Registry {
 // ---------------------------------------------------------------------------------------
 
 pub(crate) enum Command {
+    #[cfg(target_os = "linux")]
+    SourceProducer { account:String, reply:oneshot::Sender<Result<super::NativeProducer,HostError>> },
+    #[cfg(target_os="linux")]
+    ManagedFile {permit:Box<crate::outbox::ManagedPermit>,cancel:CancellationToken,
+        request_id:Arc<std::sync::OnceLock<i64>>,reply:oneshot::Sender<Result<Value,HostError>>},
     StartAccount {
         account_id: String,
         spec: AccountSpec,
@@ -442,6 +447,8 @@ pub(crate) enum Command {
 // ---------------------------------------------------------------------------------------
 
 enum PendingKind {
+    #[cfg(target_os="linux")]
+    ManagedFile(Box<crate::outbox::ManagedCompletion>),
     Initialize,
     Ping,
     Shutdown,
@@ -477,6 +484,10 @@ enum Out {
 static NEXT_REQUEST_ID: AtomicI64 = AtomicI64::new(1);
 
 struct Conn {
+    #[cfg(target_os="linux")]
+    late:Mutex<HashMap<i64,Box<crate::outbox::ManagedCompletion>>>,
+    #[cfg(target_os = "linux")]
+    producer:Option<Arc<super::managed::Instance>>,
     #[cfg(target_os = "linux")]
     origins: Option<super::origins::Origins>,
     plugin_id: String,
@@ -493,6 +504,10 @@ struct Conn {
 }
 
 impl Conn {
+    #[cfg(target_os="linux")]
+    fn late(&self)->std::sync::MutexGuard<'_,HashMap<i64,Box<crate::outbox::ManagedCompletion>>> {
+        self.late.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     fn pending(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Pending>> {
         self.pending
             .lock()
@@ -621,6 +636,10 @@ impl Conn {
 
     /// Fail every pending request (process died).
     fn fail_all(&self, registry: &Registry, reason: &str) {
+        #[cfg(target_os="linux")]
+        for (_,completion) in self.late().drain() {
+            completion.observe(Err(ErrorObject::new(ErrorCode::Internal,"native process ended; holders remain unknown")));
+        }
         let drained: Vec<(i64, Pending)> = self.pending().drain().collect();
         for (id, p) in drained {
             fail_lifecycle(self, registry, id, &p.kind);
@@ -640,6 +659,10 @@ impl Conn {
                     });
                 }
                 _ => {}
+            }
+            #[cfg(target_os="linux")]
+            if let PendingKind::ManagedFile(completion)=p.kind {
+                completion.observe(Err(ErrorObject::new(ErrorCode::Internal,"native process ended; holders remain unknown")));
             }
             let _ = p
                 .reply
@@ -709,6 +732,39 @@ enum Idle {
 }
 
 impl Supervisor {
+    #[cfg(target_os="linux")]
+    fn managed_file(&self,conn:&Arc<Conn>,permit:crate::outbox::ManagedPermit,cancel:CancellationToken,
+        request_id:Arc<std::sync::OnceLock<i64>>,reply:oneshot::Sender<Result<Value,HostError>>) {
+        if cancel.is_cancelled() || !permit.producer().same_connection(&conn.producer) {
+            permit.split().1.no_wire();let _=reply.send(Err(HostError::ShuttingDown));return;
+        }
+        let id=NEXT_REQUEST_ID.fetch_add(1,Ordering::Relaxed);
+        let (grant,completion)=permit.split();
+        if request_id.set(id).is_err() {
+            completion.no_wire();let _=reply.send(Err(HostError::ShuttingDown));return;
+        }
+        let frame=match encode(&Request::new(id,"messages.send_file",grant.params())) {
+            Ok(frame)=>frame,Err(error)=>{completion.no_wire();let _=reply.send(Err(HostError::Json(error)));return;}
+        };
+        let (tx,rx)=oneshot::channel();let (done_tx,done_rx)=oneshot::channel();
+        let timeout=self.config.request_timeout("messages.send_file");
+        conn.pending().insert(id,Pending {owner:PendingOwner::default(),kind:PendingKind::ManagedFile(Box::new(completion)),
+            method:"messages.send_file",deadline:Instant::now()+timeout,timeout,reply:tx,_done:Some(done_tx)});
+        if !grant.publish(|producer|!cancel.is_cancelled() && producer.same_connection(&conn.producer) && conn.send_frame(frame)) {
+            if let Some(pending)=conn.pending().remove(&id)
+                && let PendingKind::ManagedFile(completion)=pending.kind {completion.no_wire();}
+            let _=reply.send(Err(HostError::code(ErrorCode::Internal,"managed frame was not queued")));return;
+        }
+        let connection=conn.clone();
+        tokio::spawn(async move {tokio::select! {
+            _=cancel.cancelled()=>{if connection.pending().contains_key(&id) {connection.send_cancel(id);}},
+            _=done_rx=>{},
+        }});
+        tokio::spawn(async move {
+            let result=match rx.await {Ok(Ok(value))=>Ok(value),Ok(Err(error))=>Err(HostError::rpc(error)),Err(_)=>Err(HostError::ShuttingDown)};
+            let _=reply.send(result);
+        });
+    }
     // The ordinary raw/typed/tracked Call paths converge here at the actual
     // writer queue. A local refusal leaves this connection healthy and sends no
     // request/cancellation. Managed admission takes the same short reservation.
@@ -835,6 +891,12 @@ impl Supervisor {
                         return Idle::Shutdown(tx);
                     };
                     match cmd {
+                        #[cfg(target_os = "linux")]
+                        Command::SourceProducer {reply,..} => {let _=reply.send(Err(self.not_running()));},
+                        #[cfg(target_os="linux")]
+                        Command::ManagedFile {permit,reply,..} => {
+                            permit.split().1.no_wire();let _=reply.send(Err(self.not_running()));
+                        },
                         Command::Shutdown { reply } => return Idle::Shutdown(reply),
                         Command::Restart { reply } => return Idle::Restart(reply),
                         Command::StartAccount { account_id, spec, scope, reply } => {
@@ -956,6 +1018,10 @@ impl Supervisor {
             self.config.stderr_lines_per_sec,
         ));
         let conn = Arc::new(Conn {
+            #[cfg(target_os="linux")]
+            late:Mutex::default(),
+            #[cfg(target_os = "linux")]
+            producer:super::managed::Instance::spawned(child.id()),
             #[cfg(target_os = "linux")]
             origins: self.owned_sink.as_ref().map(|_| super::origins::Origins::new()),
             plugin_id: self.plugin_id.clone(),
@@ -1047,6 +1113,12 @@ impl Supervisor {
                             }
                             let _ = reply.send(outcome);
                         }
+                        #[cfg(target_os = "linux")]
+                        Some(Command::SourceProducer {reply,..}) => {let _=reply.send(Err(self.not_running()));},
+                        #[cfg(target_os="linux")]
+                        Some(Command::ManagedFile {permit,reply,..}) => {
+                            permit.split().1.no_wire();let _=reply.send(Err(self.not_running()));
+                        },
                         Some(Command::Call { reply, .. }) => {
                             let _ = reply.send(Err(self.not_running()));
                         }
@@ -1150,6 +1222,22 @@ impl Supervisor {
                     Some(Command::StartAccount { account_id, spec, scope, reply }) => {
                         self.handle_start(&conn, account_id, spec, scope, reply).await;
                     }
+                    #[cfg(target_os = "linux")]
+                    Some(Command::SourceProducer {account,reply}) => {
+                        let captured=(|| {
+                            let origin=conn.origins.as_ref()?.freeze(&account)?;
+                            let run=self.registry.running_account_token(&self.plugin_id,&account)?;
+                            let state=self.registry.lock();
+                            let PluginState::Running {capabilities,..}=&state.get(&self.plugin_id)?.state else {return None;};
+                            super::NativeProducer::capture(&conn.producer,origin,run,capabilities)
+                        })();
+                        let _=reply.send(captured.ok_or_else(||HostError::code(ErrorCode::NotSupported,
+                            "native source release promise is unavailable")));
+                    }
+                    #[cfg(target_os="linux")]
+                    Some(Command::ManagedFile {permit,cancel,request_id,reply}) => {
+                        self.managed_file(&conn,*permit,cancel,request_id,reply);
+                    }
                     Some(Command::StopAccount { account_id, reply }) => {
                         self.handle_stop(&conn, account_id, reply);
                     }
@@ -1251,6 +1339,15 @@ impl Supervisor {
         for (id, p) in expired {
             fail_lifecycle(conn, &self.registry, id, &p.kind);
             match p.kind {
+                #[cfg(target_os="linux")]
+                PendingKind::ManagedFile(completion) => {
+                    conn.send_cancel(id);
+                    completion.timeout();
+                    // Keep the exact actual observer after the ordinary RPC
+                    // deadline. No re-read/re-send or replacement producer.
+                    if conn.late().len()<4 {conn.late().insert(id,completion);}
+                    let _=p.reply.send(Err(timeout_error(p.method)));
+                }
                 PendingKind::Ping => {
                     if conn.stalled.load(Ordering::Acquire) {
                         debug!(plugin = %self.plugin_id, "ping unanswered while the event queue is full; not counted");
@@ -1894,6 +1991,11 @@ fn resolve(
         return;
     };
     let Some(p) = conn.pending().remove(&n) else {
+        #[cfg(target_os="linux")]
+        {
+            let completion={conn.late().remove(&n)};
+            if let Some(completion)=completion {completion.observe(result);return;}
+        }
         trace!(plugin = %conn.plugin_id, id = n, "late response for a finished request");
         return;
     };
@@ -1941,6 +2043,8 @@ fn resolve(
         }
         _ => {}
     }
+    #[cfg(target_os="linux")]
+    if let PendingKind::ManagedFile(completion)=p.kind {completion.observe(result.clone());}
     let _ = p.reply.send(result);
 }
 

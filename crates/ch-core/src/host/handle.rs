@@ -74,6 +74,31 @@ impl FileAdmissionScope {
 }
 
 impl HostHandle {
+    #[cfg(target_os="linux")]
+    pub(crate) async fn call_managed(&self,permit:crate::outbox::ManagedPermit,cancel:CancellationToken,
+        request_id:Arc<OnceLock<i64>>)->Result<Value,HostError> {
+        let plugin=permit.producer().plugin().to_owned();
+        let cmd={let registry=self.0.registry.lock();registry.get(&plugin).and_then(|entry|entry.cmd.clone())};
+        let Some(cmd)=cmd else {permit.split().1.no_wire();return Err(HostError::ShuttingDown);};
+        let (reply,receive)=oneshot::channel();
+        if let Err(error)=cmd.send(Command::ManagedFile {permit:Box::new(permit),cancel,request_id,reply}).await {
+            if let Command::ManagedFile {permit,..}=error.0 {permit.split().1.no_wire();}
+            return Err(HostError::ShuttingDown);
+        }
+        receive.await.map_err(|_|HostError::ShuttingDown)?
+    }
+    #[cfg(target_os="linux")]
+    pub(crate) async fn source_producer(&self,plugin:&str,account:&str) -> Result<super::NativeProducer,HostError> {
+        if self.0.source_inputs.is_none() {return Err(HostError::ShuttingDown);}
+        let cmd={
+            let registry=self.0.registry.lock();
+            registry.get(plugin).filter(|entry|entry.state.is_running()).and_then(|entry|entry.cmd.clone())
+                .ok_or(HostError::ShuttingDown)?
+        };
+        let (reply,receive)=oneshot::channel();
+        cmd.send(Command::SourceProducer {account:account.into(),reply}).await.map_err(|_|HostError::ShuttingDown)?;
+        receive.await.map_err(|_|HostError::ShuttingDown)?
+    }
     fn visible(&self, record: &super::supervisor::AccountRecord) -> bool {
         #[cfg(target_os = "linux")]
         if self.0.owned_sink.is_some() { return record.logical_origin().is_some_and(|origin| !origin.is_revoked()); }

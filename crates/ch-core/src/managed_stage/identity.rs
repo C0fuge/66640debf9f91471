@@ -55,6 +55,9 @@ impl StageIdentity {
 
     pub(crate) fn manifest(&self) -> &Manifest { &self.0.manifest }
     pub(crate) fn path(&self) -> &Path { Path::new(&self.0.path) }
+    pub(crate) fn request(&self) -> Result<crate::outbox::OutboxRequest> {
+        super::claim::canonical_request(self.manifest(),self.path())
+    }
 
     pub(crate) fn to_persisted_json(&self) -> Result<String> {
         let json = serde_json::to_string(&self.0).map_err(|_| Error::Integrity)?;

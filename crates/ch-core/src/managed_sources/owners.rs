@@ -11,6 +11,7 @@ struct Record {
     owner: AccountStorageObservation,
     id: Option<i64>,
     identity: Option<StageIdentity>,
+    dispatched: bool,
 }
 
 #[derive(Default)]
@@ -33,6 +34,20 @@ pub(crate) struct OwnerBarriers(Arc<Mutex<State>>,Arc<PrivateByteCatalog>);
 
 impl OwnerBarriers {
     pub(super) fn new(catalog:Arc<PrivateByteCatalog>) -> Self { Self(Arc::new(Mutex::new(State::default())),catalog) }
+    pub(crate) fn take_dispatch(&self,client:&str) -> Result<SourceInput,Error> {
+        let mut state=self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.stopped || !state.recovered.is_empty() {return Err(Error::Closed);}
+        let stage=state.records.iter().find_map(|(stage,record)|record.identity.as_ref()
+            .filter(|identity|identity.manifest().client_id==client).map(|_|stage.clone())).ok_or(Error::Conflict)?;
+        let record=state.records.get(&stage).ok_or(Error::Conflict)?;
+        if record.dispatched || record.owner.is_revoked() || state.closing.contains_key(record.owner.namespace()) {
+            return Err(Error::Busy);
+        }
+        let input=SourceInput {barriers:self.clone(),stage:stage.clone(),owner:record.owner.clone(),
+            id:record.id.ok_or(Error::Conflict)?,identity:record.identity.clone().ok_or(Error::Conflict)?};
+        state.records.get_mut(&stage).ok_or(Error::Conflict)?.dispatched=true;
+        Ok(input)
+    }
     pub(super) fn restore(&self,recovered:super::restore::Recovered) -> Result<(),Error> {
         let mut state=self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if state.stopped || !state.pending.is_empty() || !state.records.is_empty() || !state.recovered.is_empty() {
@@ -223,13 +238,13 @@ impl Reservation {
             }
             return Err(Error::Conflict);
         }
-        state.records.insert(self.stage.clone(),Record {owner:self.owner.clone(),id:Some(id),identity:Some(identity)});
+        state.records.insert(self.stage.clone(),Record {owner:self.owner.clone(),id:Some(id),identity:Some(identity),dispatched:false});
         self.settled=true;Ok(())
     }
     pub(crate) fn quarantine(&mut self,identity:Option<StageIdentity>) {
         if let Some(shared)=self.state.upgrade() {
             shared.lock().unwrap_or_else(PoisonError::into_inner).records.entry(self.stage.clone())
-                .or_insert_with(||Record {owner:self.owner.clone(),id:None,identity});
+                .or_insert_with(||Record {owner:self.owner.clone(),id:None,identity,dispatched:true});
             self.settled=true;
         }
     }
@@ -242,10 +257,29 @@ impl Drop for Reservation {
             let mut state=shared.lock().unwrap_or_else(PoisonError::into_inner);
             if !self.settled {
                 state.records.entry(self.stage.clone()).or_insert_with(||Record {
-                    owner:self.owner.clone(),id:None,identity:None,
+                    owner:self.owner.clone(),id:None,identity:None,dispatched:true,
                 });
             }
             if state.pending.get(&self.stage)==Some(&self.owner) { state.pending.remove(&self.stage); }
         }
+    }
+}
+
+// One native selection from the live Core registry. Parsing DB metadata, an
+// old Gate, a restored namespace or another transport cannot construct this.
+pub(crate) struct SourceInput {
+    barriers:OwnerBarriers,stage:String,owner:AccountStorageObservation,id:i64,identity:StageIdentity,
+}
+impl SourceInput {
+    pub(crate) fn owner(&self) -> &AccountStorageObservation {&self.owner}
+    pub(crate) fn identity(&self) -> &StageIdentity {&self.identity}
+    pub(crate) fn id(&self) -> i64 {self.id}
+    pub(crate) fn publish<R>(self,publish:impl FnOnce()->R) -> Result<R,Error> {
+        let state=self.barriers.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let matches=state.records.get(&self.stage).is_some_and(|record|record.dispatched
+            && record.id==Some(self.id) && record.owner==self.owner && record.identity.as_ref()==Some(&self.identity));
+        if state.stopped || !state.recovered.is_empty() || self.owner.is_revoked()
+            || state.closing.contains_key(self.owner.namespace()) || !matches {return Err(Error::Closed);}
+        let result=publish();drop(state);Ok(result)
     }
 }

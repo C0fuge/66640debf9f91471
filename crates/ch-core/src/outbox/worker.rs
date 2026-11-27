@@ -123,7 +123,31 @@ fn pass(
         // Managed dispatch is not implemented yet. Neither a missing in-memory
         // gate nor a plain Outbox::new transport may turn a durable owned row
         // into an ordinary send/reconciliation. Keep its lane parked, unchanged.
-        if super::managed_row(conn, &row)? { continue; }
+        if super::managed_row(conn, &row)? {
+            #[cfg(target_os="linux")]
+            if row.state==outbox_state::QUEUED && online && count<inner.policy.max_parallel_per_account.max(1)
+                && let Some(context)=&inner.managed {
+                let ticket=match context.sources.proofs().reserve_native() {
+                    Ok(ticket)=>ticket,
+                    Err(_)=>{wake=Some(wake.map_or(inner.now()+250,|w|w.min(inner.now()+250)));continue;},
+                };
+                let Ok(input)=context.sources.owner_barriers().take_dispatch(&row.client_id) else {continue;};
+                let cancel=CancellationToken::new();let request_id=Arc::new(OnceLock::new());
+                active.insert(row.client_id.clone(),Inflight {row_id:row.id,plugin_id:plugin.into(),request_id:request_id.clone(),
+                    account_id:account.into(),chat_id:row.chat_id.clone(),kind:super::OutboxKind::SendFile,cancel:cancel.clone(),reconciling:false});
+                count+=1;
+                let slot=Slot(inner.clone(),row.client_id.clone());
+                tasks.spawn(async move {
+                    let failed=row.clone();let source=input.id();let failure_ticket=ticket.clone();
+                    if let Err(error)=super::managed_dispatch::dispatch(slot.0.clone(),row,input,ticket,cancel,request_id).await {
+                        warn!(error=%error,"managed source dispatch stayed local or unresolved");
+                        super::managed_dispatch::local_failure(&slot.0,failed,source,failure_ticket);
+                    }
+                    drop(slot);
+                });
+            }
+            continue;
+        }
         let Some(kind) = OutboxKind::parse(&row.kind)
             .filter(|k| k.method() == row.method && row.params["account_id"] == row.account_id)
         else {

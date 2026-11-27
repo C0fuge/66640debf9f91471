@@ -26,6 +26,10 @@ mod worker;
 mod text_admission;
 #[cfg(target_os = "linux")]
 mod managed_admission;
+#[cfg(target_os="linux")]
+mod managed_dispatch;
+#[cfg(target_os="linux")]
+pub(crate) use managed_dispatch::{ManagedPermit,Completion as ManagedCompletion};
 pub use text_admission::{TextAdmissionError, TextAdmissionLifetime, TextAdmissionTarget};
 #[cfg(target_os = "linux")]
 pub use managed_admission::ManagedAdmissionError;
@@ -1344,10 +1348,12 @@ impl Inner {
     /// Set the echo row's `delivery` (when the echo still carries its `local:` id or has been
     /// adopted but not marked). Returns the change to publish.
     fn set_echo_delivery(g: &Ingest, row: &OutboxRow, delivery: &str) -> Result<Option<Applied>> {
+        Self::set_echo_delivery_in(g.db().conn(),row,delivery)
+    }
+    fn set_echo_delivery_in(conn:&rusqlite::Connection,row:&OutboxRow,delivery:&str)->Result<Option<Applied>> {
         let Some(echo_id) = row.echo_message_id else {
             return Ok(None);
         };
-        let conn = g.db().conn();
         let Some(mut m) = ch_db::get_message_by_id(conn, echo_id)? else {
             return Ok(None);
         };

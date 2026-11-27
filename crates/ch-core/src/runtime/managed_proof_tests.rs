@@ -201,6 +201,55 @@ fn pause() -> (Release, impl FnOnce() + Send + 'static, oneshot::Receiver<()>) {
     }, recv)
 }
 
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn unpolled_native_receipt_cannot_cancel_already_admitted_proof_or_let_drain_finish_early() {
+    let (tmp,writer)=writer();
+    let (release,block,entered)=pause();
+    let receipt=writer.submit(move|scope| { block();Ok::<_,()>(write_bundle(scope)) }).unwrap();
+    // A native resolver can lose its waiter immediately, before any Future poll.
+    drop(receipt);
+    entered.await.unwrap();
+    writer.close();
+    assert!(matches!(writer.submit(|_|Ok::<_,()>(())),Err(ManagedProofError::Closed)));
+    let draining=writer.clone();
+    let mut drain=tokio::spawn(async move {draining.drain().await});
+    assert!(tokio::time::timeout(Duration::from_millis(40),&mut drain).await.is_err());
+    release.release();drain.await.unwrap().unwrap();
+    let db=Db::open(tmp.path().join("hub.db")).unwrap();
+    for table in ["managed_source","outbox","message"] {assert_eq!(count(db.conn(),table),1);}
+    assert_eq!(count(db.conn(),"managed_ref"),2);
+}
+
+#[cfg(target_os="linux")]
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn reserved_native_reply_survives_busy_ordinary_writer_close_and_cancelled_drain() {
+    let (tmp,writer)=writer();
+    let ticket=writer.reserve_native().unwrap();
+    let (release,block,entered)=pause();
+    let first=writer.submit(move|_|{block();Ok::<_,()>(())}).unwrap();
+    entered.await.unwrap();
+    let mut ordinary=vec![first];
+    for _ in 1..JOB_LIMIT {ordinary.push(writer.submit(|_|Ok::<_,()>(())).unwrap());}
+    writer.close();
+    assert!(matches!(writer.reserve_native(),Err(ManagedProofError::Closed)));
+    let receipt=writer.submit_native(ticket,|scope|Ok::<_,()>(write_bundle(scope))).unwrap();
+    drop(receipt); // Native caller loss cannot cancel admitted queued work.
+    let closing=writer.clone();let first_drain=tokio::spawn(async move{closing.drain().await});
+    tokio::time::timeout(Duration::from_secs(2),async {
+        loop {if writer.inner.state.lock().unwrap().jobs.is_empty() {break;}
+            tokio::task::yield_now().await;}
+    }).await.unwrap();
+    first_drain.abort();assert!(first_drain.await.unwrap_err().is_cancelled());
+    let closing=writer.clone();let mut second=tokio::spawn(async move{closing.drain().await});
+    assert!(tokio::time::timeout(Duration::from_millis(40),&mut second).await.is_err());
+    release.release();second.await.unwrap().unwrap();
+    for receipt in ordinary {receipt.await.unwrap().unwrap().unwrap();}
+    let db=Db::open(tmp.path().join("hub.db")).unwrap();
+    assert_eq!(count(db.conn(),"managed_source"),1);
+    assert_eq!(count(db.conn(),"outbox"),1);
+    assert_eq!(count(db.conn(),"managed_ref"),2);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bounded_admission_rejects_overflow_and_close_without_queuing() {
     let (_tmp, writer) = writer();

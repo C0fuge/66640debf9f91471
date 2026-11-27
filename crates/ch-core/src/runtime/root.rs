@@ -315,6 +315,11 @@ impl Core {
             t.abort();
         }
         self.host.shutdown().await;
+        // Native replies may use tickets reserved before close. Host is now
+        // settled; drain their actual writes before revoking logical metadata.
+        if let Err(e) = self.managed_proofs.drain().await {
+            warn!("draining managed proof writes: {e}");
+        }
         if let Err(e) = self.accounts.resync_from_host().await {
             warn!("persisting account state at shutdown: {e}");
         }
@@ -334,9 +339,6 @@ impl Core {
         #[cfg(target_os = "linux")]
         if self.managed_sources.drain().await.is_err() {
             warn!("draining managed local admission jobs failed");
-        }
-        if let Err(e) = self.managed_proofs.drain().await {
-            warn!("draining managed proof writes: {e}");
         }
         match self.sink.with_ingest(|i| i.db().checkpoint()).await {
             Ok(Ok(())) => {}

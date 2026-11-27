@@ -7,6 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Condvar;
 use std::time::Duration;
 use tokio::sync::oneshot;
+use rusqlite::OptionalExtension;
 
 const STAGE: &str = "11111111111111111111111111111111";
 const CLIENT: &str = "22222222222222222222222222222222";
@@ -15,6 +16,9 @@ struct Fixture { temp: tempfile::TempDir, core: Arc<Core>, outbox: Outbox, secre
 
 impl Fixture {
     async fn new(start: bool) -> Self {
+        Self::with_mode(start,None).await
+    }
+    async fn with_mode(start:bool,mode:Option<&str>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let plugin = temp.path().join("plugins/fixture");
         std::fs::create_dir_all(&plugin).unwrap();
@@ -31,6 +35,7 @@ impl Fixture {
             config.host.env.insert(key.into(), temp.path().join(key).to_string_lossy().into_owned());
         }
         config.host.env.insert("CH_TEST_MANAGED_WIRE".into(), temp.path().join("wire").to_string_lossy().into_owned());
+        if let Some(mode)=mode {config.host.env.insert("CH_TEST_SOURCE_MODE".into(),mode.into());}
         config.autostart = false;
         let core = Arc::new(Core::open(config).await.unwrap());
         let owner = core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
@@ -311,6 +316,88 @@ async fn actual_managed_admission_reopens_without_replay_or_false_closure_from_s
         assert_eq!(f.count("managed_dispatch"),0);
         outbox.shutdown().await;core.shutdown().await;
     }
+}
+
+async fn wait_native_state(f:&Fixture,id:i64,state:OutboxState) {
+    tokio::time::timeout(Duration::from_secs(20),async {
+        while f.outbox.get(id).unwrap().state!=state {tokio::time::sleep(Duration::from_millis(10)).await;}
+    }).await.unwrap();
+}
+async fn wait_attempt_state(f:&Fixture,state:&str) {
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let db=f.core.open_db().unwrap();
+            let actual:Option<String>=db.conn().query_row("SELECT state FROM managed_dispatch ORDER BY id DESC LIMIT 1",[],|r|r.get(0))
+                .optional().unwrap();
+            if actual.as_deref()==Some(state) {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_native_managed_file_has_durable_exposure_before_read_and_atomic_success() {
+    let f=Fixture::with_mode(true,Some("success")).await;
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    f.outbox.start().unwrap();wait_native_state(&f,item.id,OutboxState::Sent).await;
+    wait_attempt_state(&f,"positive").await;
+    let wire:serde_json::Value=serde_json::from_slice(&std::fs::read(f.temp.path().join("wire")).unwrap()).unwrap();
+    assert_eq!(wire["request"]["method"],"messages.send_file");
+    assert_eq!(wire["request"]["params"]["path"],f.stage().join("bytes").to_str().unwrap());
+    assert!(wire["request"]["params"].get("source_release").is_none());
+    assert_eq!(wire["exposure"][0],"exposed");
+    assert_eq!(wire["exposure"][1],wire["pid"]);
+    assert_eq!(wire["exposure"][2],"on_success");
+    let db=f.core.open_db().unwrap();
+    let source_sha:String=serde_json::from_slice::<Manifest>(&std::fs::read(f.stage().join("manifest.json")).unwrap()).unwrap().sha256;
+    assert_eq!(wire["sha256"],source_sha);
+    let (attempts,positive,settled):(i64,i64,i64)=db.conn().query_row(
+        "SELECT (SELECT count(*) FROM managed_dispatch),(SELECT count(*) FROM managed_dispatch WHERE state='positive'),
+            (SELECT count(*) FROM managed_source WHERE settled_dispatch_id IS NOT NULL)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!((attempts,positive,settled),(1,1,1));
+    assert_eq!(f.outbox.get(item.id).unwrap().result_message_ids,Some(vec!["remote-file".into()]));
+    assert_eq!(f.count("message"),1,"native settlement adopts the original echo without duplication");
+    assert_eq!(std::fs::read_to_string(f.temp.path().join("wire.closed")).unwrap(),"True");
+    let producer:String=db.conn().query_row("SELECT state FROM managed_producer",[],|r|r.get(0)).unwrap();
+    assert_eq!(producer,"unresolved","success closes its own readers, not the whole helper scope");
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_native_wrong_destination_and_malformed_success_never_certify_source_closure() {
+    for mode in ["wrong-topic","malformed"] {
+        let f=Fixture::with_mode(true,Some(mode)).await;
+        let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+        f.outbox.start().unwrap();wait_native_state(&f,item.id,OutboxState::Failed).await;
+        wait_attempt_state(&f,"unknown").await;
+        assert_eq!(f.count("message"),1);
+        let db=f.core.open_db().unwrap();
+        assert_eq!(db.conn().query_row("SELECT count(*) FROM managed_dispatch WHERE state='positive'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert!(f.stage().join("bytes").exists());
+        assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+        assert!(matches!(f.outbox.retry(item.id),Err(OutboxError::ManagedUnavailable)));
+        f.close().await;
+    }
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_native_late_success_after_timeout_and_storage_rearm_settles_without_new_read_or_send() {
+    let f=Fixture::with_mode(true,Some("late")).await;
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    f.outbox.start().unwrap();wait_native_state(&f,item.id,OutboxState::Failed).await;
+    let observed=f.outbox.get(item.id).unwrap();
+    assert_eq!(observed.last_error.as_ref().unwrap().data.as_ref().unwrap().reason.as_deref(),Some("outcome_unknown"));
+    assert_eq!(f.count("managed_dispatch"),1);
+    let before=std::fs::read(f.temp.path().join("wire")).unwrap();
+    assert!(!f.temp.path().join("wire.closed").exists(),"the native peer still holds its actual source reader");
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(3),f.core.accounts().remove("owner")).await.unwrap(),
+        Err(RuntimeError::SourceInUse)),"network lifetime cannot retain a Rust storage read lease");
+    std::fs::write(f.temp.path().join("wire.release"),b"release actual reader").unwrap();
+    wait_native_state(&f,item.id,OutboxState::Sent).await;wait_attempt_state(&f,"positive").await;
+    assert_eq!(std::fs::read(f.temp.path().join("wire")).unwrap(),before,"late observation never sends or reads again");
+    assert_eq!(f.count("managed_dispatch"),1);assert_eq!(f.count("message"),1);
+    assert_eq!(std::fs::read_to_string(f.temp.path().join("wire.closed")).unwrap(),"True");
+    f.close().await;
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]

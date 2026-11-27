@@ -27,17 +27,31 @@ impl VerifiedStageBinding {
         owner: &AccountStorageBinding,
         stage_id: &str,
         limit: u64,
-        mut checkpoint: impl FnMut(u64) -> Result<()>,
+        checkpoint: impl FnMut(u64) -> Result<()>,
     ) -> Result<Self> {
+        Self::verify_stage(owner,stage_id,limit,None,checkpoint)
+    }
+
+    pub(crate) fn check_retained(owner:&AccountStorageBinding,expected:&super::StageIdentity,
+        checkpoint:impl FnMut(u64)->Result<()>) -> Result<()> {
+        // No reader/guard/flock escapes this bounded synchronous verification.
+        Self::verify_stage(owner,&expected.manifest().stage_id,MAX_BYTES,Some(expected),checkpoint).map(drop)
+    }
+
+    fn verify_stage(owner:&AccountStorageBinding,stage_id:&str,limit:u64,
+        expected:Option<&super::StageIdentity>,mut checkpoint:impl FnMut(u64)->Result<()>) -> Result<Self> {
         if owner.is_revoked() { return Err(Error::TargetChanged); }
         if !hex(stage_id, 32) { return Err(Error::Integrity); }
         let dir = open_stage(owner, stage_id)?;
         let stage_lock = dir.lock()?;
         let manifest = read_manifest(&dir)?;
         let row = owner.owner();
+        let phase_matches=if expected.is_some() {matches!(manifest.phase,Phase::Claimed(_)|Phase::Consumed(_))}
+            else {manifest.phase==Phase::Ready};
         if manifest.stage_id != stage_id || manifest.scope.account != row.account_id
             || manifest.scope.plugin != row.plugin_id || manifest.scope.account_created != row.created_at
-            || manifest.phase != Phase::Ready { return Err(Error::Integrity); }
+            || !phase_matches
+        { return Err(Error::Integrity); }
         if manifest.size > limit.min(MAX_BYTES) { return Err(Error::TooLarge); }
         check_layout(&dir)?;
         let probe = fd::openat(dir.fd(), c"bytes", libc::O_PATH, 0)?;
@@ -46,6 +60,8 @@ impl VerifiedStageBinding {
         check_bytes(&dir, &manifest, &bytes)?;
         let proof = Self { dir, manifest, bytes, _stage_lock: stage_lock,
             owner: owner.retain_binding() };
+        if let Some(expected)=expected
+            && super::StageIdentity::capture(&proof)?!=*expected { return Err(Error::StageChanged); }
         proof.recheck_ready()?;
         checkpoint(0)?;
         let mut hash = Sha256::new();

@@ -13,12 +13,13 @@ mod work;
 mod owners;
 mod restore;
 pub(crate) use work::{OwnedJobs,BlockingWork};
-pub(crate) use owners::{OwnerBarriers,OwnerClose, Reservation};
+pub(crate) use owners::{OwnerBarriers,OwnerClose, Reservation,SourceInput};
 
 #[derive(Debug)]
 pub(crate) enum Error { Closed, Busy, Conflict, Task }
 
 pub(crate) struct ManagedSources {
+    core_nonce:Option<String>,
     catalog: Arc<PrivateByteCatalog>,
     proofs: ManagedProofWriter,
     owners: OwnerBarriers,
@@ -32,7 +33,7 @@ pub(crate) struct ManagedSources {
 impl ManagedSources {
     pub(crate) fn new(proofs: ManagedProofWriter, config: &HostConfig) -> Arc<Self> {
         let catalog=PrivateByteCatalog::for_core(config);
-        Arc::new(Self { owners: OwnerBarriers::new(catalog.clone()),catalog, proofs,
+        Arc::new(Self { core_nonce:crate::host::managed_nonce(),owners: OwnerBarriers::new(catalog.clone()),catalog, proofs,
             admissions: OwnedJobs::new(), lookups: OwnedJobs::new(), owner_jobs:OwnedJobs::new(),
             directory_jobs:OwnedJobs::new(),closed: CancellationToken::new() })
     }
@@ -66,6 +67,7 @@ impl ManagedSources {
     pub(crate) fn catalog(&self) -> Arc<PrivateByteCatalog> { self.catalog.clone() }
 
     pub(crate) fn proofs(&self) -> &ManagedProofWriter { &self.proofs }
+    pub(crate) fn core_nonce(&self) -> Option<&str> {self.core_nonce.as_deref()}
     pub(crate) fn stopped(&self) -> CancellationToken { self.closed.clone() }
     pub(crate) fn lookups(&self) -> Arc<OwnedJobs> { Arc::clone(&self.lookups) }
 
