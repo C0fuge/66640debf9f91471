@@ -68,7 +68,7 @@ async fn malformed_sources_in_every_state_stop_autostart_and_empty_store_still_r
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
-async fn publication_metadata_alone_stops_before_discovery_until_protected_restore_exists() {
+async fn malformed_publication_metadata_stops_before_discovery() {
     let env=Env::new();
     env.plugin_dir("fixture",&["python3","-I","-c","pass"],json!({}));
     let db=seed(&env);

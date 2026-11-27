@@ -24,9 +24,11 @@ pub struct CopyDescription {
 /// Accounts binding. Call only inside the counted local FS job. The checkpoint
 /// validates the original input and cancellation at each chunk/publication edge.
 /// All created byte descriptors/flocks drop before returning metadata. This is
-/// exclusive creation, not proof that generic source readers have been excluded.
+/// exclusive creation; the Core publisher records protected birth before Ready.
 pub(super) fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDescription,
-    reader:&mut impl CopyInput,mut checkpoint:impl FnMut(u64)->Result<()>)->Result<Manifest> {
+    reader:&mut impl CopyInput,mut checkpoint:impl FnMut(u64)->Result<()>,
+    before_ready:impl FnOnce(&fd::Dir,&Manifest)->std::result::Result<(),super::publisher::PublicationWriteError>)
+    ->Result<Manifest> {
     let CopyDescription {stage_id,scope,created,name,size,limit}=description;
     let account=owner.owner();
     if !hex(&stage_id,32) || created<0 || scope.account!=account.account_id
@@ -50,7 +52,7 @@ pub(super) fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDesc
     let dir=uploads.child(&name,fd::Policy::Private)?;
     if dir.identity.mount!=uploads.identity.mount {return Err(Error::Integrity);}
     let _flock=dir.lock()?;
-    let mut published=None;
+    let mut published=None;let mut birth_committed=false;
     let operation=(|| {
         uploads.file.sync_all()?;
         let mut bytes=fd::temp(&dir)?;
@@ -77,6 +79,11 @@ pub(super) fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDesc
             name:display_name,size,format:Format::detect(&prefix),
             fingerprint:Fingerprint::from(bytes.metadata()?),sha256:format!("{:x}",hash.finalize()),phase:Phase::Ready};
         manifest.check()?;dir.bind(c"bytes",&bytes)?;dir.file.sync_all()?;
+        match before_ready(&dir,&manifest) {
+            Ok(())=>birth_committed=true,
+            Err(super::publisher::PublicationWriteError::Refused(error))=>return Err(error),
+            Err(super::publisher::PublicationWriteError::Unknown)=>{birth_committed=true;return Err(Error::Unknown);},
+        }
         let encoded=serde_json::to_vec(&manifest).map_err(|_|Error::Integrity)?;
         if encoded.len()>64*1024 {return Err(Error::Integrity);}
         let mut metadata=fd::temp(&dir)?;metadata.write_all(&encoded)?;
@@ -89,6 +96,9 @@ pub(super) fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDesc
         dir.bind(c"manifest.json",&metadata).map_err(|_|Error::Unknown)?;
         Ok(manifest)
     })();
+    // Once the birth may have committed, retain the exact bytes/fact for local
+    // recovery. A lost/closed waiter cannot manufacture quota-free cancellation.
+    if birth_committed && operation.is_err() {return Err(Error::Unknown);}
     if matches!(&operation,Err(error) if *error!=Error::Unknown) {
         if let Some(identity)=published {fd::unlink(&dir,c"bytes",identity,false)?;}
         dir.file.sync_all()?;fd::unlink(&uploads,&name,dir.identity,true)?;

@@ -75,6 +75,11 @@ impl FileAdmissionScope {
 
 impl HostHandle {
     #[cfg(target_os="linux")]
+    pub(crate) fn protected_inputs(&self)->Result<super::ProtectedInputs,HostError> {
+        self.0.source_inputs.as_ref().map(|(barriers,_)|super::ProtectedInputs::attached(barriers.clone()))
+            .ok_or(HostError::ShuttingDown)
+    }
+    #[cfg(target_os="linux")]
     pub(crate) async fn call_managed(&self,permit:crate::outbox::ManagedPermit,cancel:CancellationToken,
         request_id:Arc<OnceLock<i64>>)->Result<Value,HostError> {
         let plugin=permit.producer().plugin().to_owned();

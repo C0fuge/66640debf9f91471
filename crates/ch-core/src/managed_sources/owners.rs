@@ -36,7 +36,7 @@ impl OwnerBarriers {
     pub(super) fn new(catalog:Arc<PrivateByteCatalog>) -> Self { Self(Arc::new(Mutex::new(State::default())),catalog) }
     pub(crate) fn take_dispatch(&self,client:&str) -> Result<SourceInput,Error> {
         let mut state=self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.stopped || !state.recovered.is_empty() {return Err(Error::Closed);}
+        if state.stopped {return Err(Error::Closed);}
         let stage=state.records.iter().find_map(|(stage,record)|record.identity.as_ref()
             .filter(|identity|identity.manifest().client_id==client).map(|_|stage.clone())).ok_or(Error::Conflict)?;
         let record=state.records.get(&stage).ok_or(Error::Conflict)?;
@@ -64,7 +64,6 @@ impl OwnerBarriers {
             let state=self.0.lock().unwrap_or_else(PoisonError::into_inner);
             if state.stopped { return Err(Error::Closed); }
             if !state.recovered.is_empty() { return Err(Error::Busy); }
-            if state.pending.is_empty() && state.records.is_empty() { return Ok(None); }
         }
         let paths=input_paths(method,params)?;
         let catalog=self.1.clone();
@@ -72,8 +71,8 @@ impl OwnerBarriers {
             .map(Some).map_err(|_|Error::Busy)
     }
 
-    // No path/inode or reader authority follows from an empty registry. Legacy
-    // unregistered flow is unchanged. Outside inputs require a fresh observation.
+    // Protection precedes the first source birth: an empty registry never bypasses
+    // private-input checks. Outside inputs require a fresh actual observation.
     // Publication is the actual nonblocking writer.try_send, under the SAME
     // reservation lock as pending admission. No DB/FS/await runs in this closure.
     pub(crate) fn generic_frame<R>(&self, method: &str, params: &serde_json::Value,
@@ -83,16 +82,19 @@ impl OwnerBarriers {
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if state.stopped { return Err(Error::Closed); }
         if !state.recovered.is_empty() { return Err(Error::Busy); }
-        if !state.pending.is_empty() || !state.records.is_empty() {
-            let paths=input_paths(method,params)?;
-            let result=self.1.external_frame(external.ok_or(Error::Busy)?, &paths,publish)
-                .map_err(|_|Error::Busy);
-            drop(state);
-            return result;
-        }
-        let result = publish();
+        let paths=input_paths(method,params)?;
+        let result=self.1.external_frame(external.ok_or(Error::Busy)?, &paths,publish)
+            .map_err(|_|Error::Busy);
         drop(state);
-        Ok(result)
+        result
+    }
+
+    pub(crate) fn check_creation(&self,binding:&crate::runtime::AccountStorageBinding)->Result<(),Error> {
+        let state=self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.stopped || binding.is_revoked() || state.closing.contains_key(binding.observation().namespace()) {
+            return Err(Error::Closed);
+        }
+        self.1.mutations().check_binding(binding).map_err(|_|Error::Conflict)
     }
 
     pub(super) fn reserve(&self, owner: AccountStorageObservation, stage: String) -> Result<Reservation, Error> {
@@ -278,7 +280,7 @@ impl SourceInput {
         let state=self.barriers.0.lock().unwrap_or_else(PoisonError::into_inner);
         let matches=state.records.get(&self.stage).is_some_and(|record|record.dispatched
             && record.id==Some(self.id) && record.owner==self.owner && record.identity.as_ref()==Some(&self.identity));
-        if state.stopped || !state.recovered.is_empty() || self.owner.is_revoked()
+        if state.stopped || self.owner.is_revoked()
             || state.closing.contains_key(self.owner.namespace()) || !matches {return Err(Error::Closed);}
         let result=publish();drop(state);Ok(result)
     }

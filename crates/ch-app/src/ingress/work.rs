@@ -1,4 +1,4 @@
-use super::storage::{budget, request, unreferenced};
+use super::storage::{budget, unreferenced};
 use super::*;
 use crate::SaveDialogError;
 use futures_util::FutureExt;
@@ -420,7 +420,7 @@ impl Job {
                     j.copy(&store, &a, source.ok_or(fs::Error::UnsafeSource)?, &life, binding)
                 }
                 Action::Send(i) => j.admit(&store, &a, &i, &life, &binding),
-                Action::Discard => j.discard(&store, &a, &life),
+                Action::Discard => j.discard(&store, &a, &life, &binding),
             }
         })
         .await
@@ -555,7 +555,7 @@ impl Job {
             e.state = State::Enqueuing;
         }
         self.s.notify(self.seq);
-        let mut claim: fs::LiveClaim = verified.claim(i.clone())?;
+        let claim: fs::LiveClaim = verified.claim(i.clone())?;
         self.s.inventory_changed();
         self.update(|e| {
             e.bound = Some(Binding {
@@ -571,12 +571,9 @@ impl Job {
         #[cfg(test)]
         self.s.at("claimed")?;
         self.check(life)?;
-        let checked = claim.checked_path()?;
-        let req = request(claim.manifest(), i, &checked)?;
-        self.s
-            .outbox
-            .enqueue_with_id(&self.owner, &m.client_id, req, None)
-            .map_err(|_| Problem::unknown())?;
+        let claim=claim.into_core()?;
+        tokio::runtime::Handle::current().block_on(self.s.outbox.enqueue_managed_file_checked(claim))
+            .map_err(|_|Problem::unknown())?;
         self.update(|e| {
             e.proven = true;
             e.state = State::Enqueued;
@@ -585,7 +582,8 @@ impl Job {
         });
         #[cfg(test)]
         self.s.at("committed")?;
-        let consumed = claim.consume(&self.s.outbox)?;
+        // Core already consumed the live claim after the known durable receipt.
+        let consumed=store.recover(owner,&self.stage)?;
         self.s.inventory_changed();
         self.update(|e| {
             e.bind(Binding {
@@ -593,16 +591,19 @@ impl Job {
                 path: consumed.managed_path(),
             })
         });
-        // consume recorded local proof; return the last matching row observation to this caller.
-        self.update(|e| e.outbox_row = Some("present"));
+        // A local phase update cannot erase the known exact durable receipt.
+        self.update(|e| {
+            e.state=State::Enqueued;e.proven=true;e.problem=None;e.outbox_row=Some("present");
+        });
         Ok(())
     }
-    fn discard(&self, store: &fs::Store, owner: &fs::Owner, life: &CancellationToken) -> Work<()> {
+    fn discard(&self, store: &fs::Store, owner: &fs::Owner, life: &CancellationToken,
+        binding:&ch_core::runtime::AccountStorageBinding) -> Work<()> {
         let stage = self.stage(store, owner)?;
         let db = self.s.core.open_db().map_err(|_| fs::Error::Storage)?;
         let mut tx = None;
         let mut refused = false;
-        let result = stage.discard_ready(|m, path| {
+        let result = stage.discard_bound_ready(binding,self.s.core.stage_publisher(),|m, path| {
             self.check(life)?;
             self.s
                 .current_owner(&self.owner)
@@ -650,6 +651,10 @@ impl Job {
                         e.state = State::Ready;
                     }
                     e.intent = None;
+                } else if problem.outcome_unknown {
+                    // A protected birth/Ready write may survive cancellation.
+                    // Its unknown charged copy cannot be shown as a free cancel.
+                    e.state = State::Failed;
                 } else if e.state == State::Cancelling || problem.reason == "interrupted" {
                     e.state = State::Cancelled;
                 } else {

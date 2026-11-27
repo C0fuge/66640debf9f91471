@@ -103,7 +103,8 @@ fn unknown_default_and_real_scan_cover_ready_and_regular_metadata_without_granti
     assert!(known(&f.catalog, &bytes));
     assert!(known(&f.catalog, &bytes.with_file_name("manifest.json")));
     assert_eq!(f.catalog.view().inode_count(), 2);
-    assert!(f.catalog.legacy_candidates().is_empty());
+    assert!(f.catalog.legacy_candidates().iter().any(|c|c.kind()==StageKind::Ready),
+        "Ready metadata never proves an older reader has closed");
     let ordinary = f._temp.path().join("ordinary");
     fs::write(&ordinary, b"external").unwrap();
     let metadata = fs::metadata(ordinary).unwrap();

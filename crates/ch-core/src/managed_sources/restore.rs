@@ -14,11 +14,10 @@ fn unavailable() -> RuntimeError { RuntimeError::ManagedLifetimeRecoveryUnavaila
 pub(super) fn load(conn:&Connection,config:&HostConfig) -> Result<Recovered> {
     let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Deferred)
         .map_err(ch_db::Error::from)?;
-    // Metadata foundation only: no protected-birth restore/input composition is
-    // active yet. Even an unlinked publication fact must stop before Host startup.
-    let unpublished:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_stage_publication LIMIT 1)",
-        [],|row|row.get(0)).map_err(ch_db::Error::from)?;
-    if unpublished {return Err(unavailable());}
+    // Descriptive publication facts may survive interrupted Ready publication.
+    // Restore validates bounded metadata only; no reader/claim/dispatch is minted.
+    // A later explicit admission must independently verify the actual Ready inode.
+    publications(&tx,config)?;
     let noncanonical:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_source WHERE id<=0)
         OR EXISTS(SELECT 1 FROM managed_dispatch WHERE id<=0)
         OR EXISTS(SELECT 1 FROM managed_retirement WHERE source_id<=0)",[],|row|row.get(0))
@@ -72,4 +71,45 @@ pub(super) fn load(conn:&Connection,config:&HostConfig) -> Result<Recovered> {
     }
     tx.commit().map_err(ch_db::Error::from)?;
     Ok(Recovered { roots })
+}
+
+fn publications(conn:&Connection,config:&HostConfig)->Result<()> {
+    use crate::managed_stage::{PublicationIdentity,StageIdentity};
+    let mut query=conn.prepare_cached("SELECT stage_id,client_id,account_id,plugin_id,account_created_at,path,
+        CASE WHEN length(CAST(identity_json AS BLOB))<=65536 THEN identity_json END,source_id
+        FROM managed_stage_publication ORDER BY stage_id LIMIT 257").map_err(ch_db::Error::from)?;
+    let mut rows=query.query([]).map_err(ch_db::Error::from)?;let mut count=0;let mut bytes=0;
+    while let Some(row)=rows.next().map_err(ch_db::Error::from)? {
+        count+=1;if count>SOURCES {return Err(unavailable());}
+        let stage:String=row.get(0).map_err(ch_db::Error::from)?;
+        let client:String=row.get(1).map_err(ch_db::Error::from)?;
+        let account:String=row.get(2).map_err(ch_db::Error::from)?;
+        let plugin:String=row.get(3).map_err(ch_db::Error::from)?;
+        let birth:i64=row.get(4).map_err(ch_db::Error::from)?;
+        let path:String=row.get(5).map_err(ch_db::Error::from)?;
+        let json:Option<String>=row.get(6).map_err(ch_db::Error::from)?;
+        let source:Option<i64>=row.get(7).map_err(ch_db::Error::from)?;
+        let json=json.ok_or_else(unavailable)?;bytes+=json.len();
+        if bytes>1_048_576 {return Err(unavailable());}
+        let identity=PublicationIdentity::from_persisted_json(&json).map_err(|_|unavailable())?;
+        let m=identity.manifest();
+        let owner=ch_db::get_account(conn,&account)?.ok_or_else(unavailable)?;
+        if m.stage_id!=stage || m.client_id!=client || m.scope.account!=account || m.scope.plugin!=plugin
+            || m.scope.account_created!=birth || owner.plugin_id!=plugin || owner.created_at!=birth
+            || identity.path()!=Path::new(&path)
+            || Path::new(&path)!=config.upload_dir(&account).join(&stage).join("bytes").as_path()
+        {return Err(unavailable());}
+        if let Some(source)=source {
+            let stored:Option<String>=conn.query_row("SELECT CASE
+                WHEN length(CAST(fingerprint_json AS BLOB))<=65536 THEN fingerprint_json END
+                FROM managed_source WHERE id=?1 AND stage_id=?2 AND client_id=?3 AND account_id=?4
+                AND plugin_id=?5 AND account_created_at=?6 AND path=?7",
+                params![source,stage,client,account,plugin,birth,path],|r|r.get(0))
+                .map_err(|_|unavailable())?;
+            let stored=StageIdentity::from_persisted_json(&stored.ok_or_else(unavailable)?)
+                .map_err(|_|unavailable())?;
+            if PublicationIdentity::from_source(&stored).map_err(|_|unavailable())?!=identity {return Err(unavailable());}
+        }
+    }
+    Ok(())
 }

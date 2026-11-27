@@ -15,7 +15,7 @@ mod publisher;
 pub use publisher::StagePublisher;
 pub use mutations::{StageMutations, StageMutation};
 pub(crate) use claim::PreparedStageClaim;
-pub(crate) use identity::StageIdentity;
+pub(crate) use identity::{StageIdentity,PublicationIdentity};
 pub use claim::LiveStageClaim;
 pub use verify::VerifiedStageBinding;
 

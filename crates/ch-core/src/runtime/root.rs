@@ -214,7 +214,7 @@ impl Core {
         host.bind_storage(accounts.host_storage_view()?)?;
         #[cfg(target_os="linux")]
         let stage_publisher=crate::managed_stage::StagePublisher::for_core(
-            accounts.host_storage_view()?,managed_sources.copy_jobs());
+            accounts.host_storage_view()?,managed_sources.copy_jobs(),managed_proofs.clone(),host.protected_inputs()?);
         accounts.sync_plugins().await?;
 
         let mut tasks = vec![tokio::spawn(forward_host(

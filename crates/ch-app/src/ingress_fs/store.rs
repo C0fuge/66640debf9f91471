@@ -511,6 +511,20 @@ impl Stage {
         if proof.manifest() != &self.manifest { return Err(Error::StageChanged); }
         Ok(Verified { stage: self.clone(), handles: Verification::Core(Box::new(proof)) })
     }
+    /// Production Ready discard first verifies actual protected birth through
+    /// this Core's publisher. Legacy Ready without that fact remains retained.
+    pub fn discard_bound_ready(&self,owner:&ch_core::runtime::AccountStorageBinding,
+        publisher:&ch_core::managed_stage::StagePublisher,
+        unreferenced:impl FnOnce(&Manifest,&Path)->Result<bool>)->Result<()> {
+        let verified=self.verify_bound(owner,super::MAX_BYTES,|_|Ok(()))?;
+        let Verification::Core(proof)=&verified.handles else {return Err(Error::Integrity);};
+        tokio::runtime::Handle::current().block_on(publisher.check_unadmitted_ready(proof))?;
+        self.current()?;
+        drop(verified);
+        // Reacquire the actual flock and recheck the original manifest/inode.
+        // Any intervening Ready -> Claimed transition causes this to refuse.
+        self.discard_ready(unreferenced)
+    }
     /// proof must check absence of the fixed outbox row AND rule out other
     /// stored references under the single-writer invariant. Ambiguity retains.
     pub fn discard_ready(
@@ -589,7 +603,15 @@ impl Verified {
 impl LiveClaim {
     pub fn manifest(&self) -> &Manifest { self.stage.manifest() }
 
+    /// Transfer the actual unspent claim. No extra filesystem or posting check may
+    /// hide the Core's lookup-first handling of an existing exact receipt.
+    pub fn into_core(self)->Result<ch_core::managed_stage::LiveStageClaim> {
+        let ClaimHandles::Core(claim)=self.handles else {return Err(Error::Integrity);};
+        Ok(*claim)
+    }
+
     /// Callable once on the unique task that completed the actual durable transition.
+    #[cfg(test)]
     pub fn checked_path(&mut self) -> Result<PathBuf> {
         match &mut self.handles {
             ClaimHandles::Core(claim) => {
@@ -606,14 +628,6 @@ impl LiveClaim {
                 Ok(self.stage.managed_path())
             }
         }
-    }
-
-    /// Core independently confirms the exact canonical retained request.
-    pub fn consume(self, outbox: &ch_core::outbox::Outbox) -> Result<Stage> {
-        let Self { mut stage, handles } = self;
-        let ClaimHandles::Core(claim) = handles else { return Err(Error::Integrity); };
-        stage.manifest = (*claim).consume(outbox)?;
-        Ok(stage)
     }
 
     #[cfg(test)]

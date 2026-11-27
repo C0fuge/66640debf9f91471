@@ -10,15 +10,17 @@ use tokio::sync::oneshot;
 use rusqlite::OptionalExtension;
 
 const STAGE: &str = "11111111111111111111111111111111";
-const CLIENT: &str = "22222222222222222222222222222222";
 
-struct Fixture { temp: tempfile::TempDir, core: Arc<Core>, outbox: Outbox, secrets:Arc<MemorySecretStore> }
+struct Fixture { temp: tempfile::TempDir, core: Arc<Core>, outbox: Outbox, secrets:Arc<MemorySecretStore>, client:String }
 
 impl Fixture {
     async fn new(start: bool) -> Self {
         Self::with_mode(start,None).await
     }
     async fn with_mode(start:bool,mode:Option<&str>) -> Self {
+        Self::setup(start,mode,true).await
+    }
+    async fn setup(start:bool,mode:Option<&str>,publish:bool)->Self {
         let temp = tempfile::tempdir().unwrap();
         let plugin = temp.path().join("plugins/fixture");
         std::fs::create_dir_all(&plugin).unwrap();
@@ -47,28 +49,16 @@ impl Fixture {
         ch_db::insert_topic(db.conn(), &ch_db::TopicRow {
             conversation_id:conversation,topic_id:"topic".into(),title:"Topic".into(),..Default::default()
         }).unwrap();
-        let uploads = core.host().config().upload_dir("owner");
-        let stage = uploads.join(STAGE);
-        std::fs::create_dir_all(&stage).unwrap();
-        for dir in [&uploads, &stage] {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let bytes = stage.join("bytes");
-        let content = b"synthetic bytes";
-        std::fs::write(&bytes, content).unwrap();
-        std::fs::set_permissions(&bytes, std::fs::Permissions::from_mode(0o400)).unwrap();
-        let manifest = Manifest {
-            version:1,stage_id:STAGE.into(),client_id:CLIENT.into(),
-            scope:Scope {account:"owner".into(),plugin:"fixture".into(),account_created:owner.created_at,
-                chat:"chat".into(),topic:Some("topic".into())},
-            created:1,name:"original.bin".into(),size:content.len() as u64,format:Format::Other,
-            fingerprint:Fingerprint::from(std::fs::metadata(&bytes).unwrap()),
-            sha256:format!("{:x}",Sha256::digest(content)),phase:Phase::Ready,
-        };
-        std::fs::write(stage.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
-        std::fs::set_permissions(stage.join("manifest.json"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let client=if publish {
+            let binding=core.accounts().storage_binding_for("owner").await.unwrap();
+            core.stage_publisher().copy(binding,crate::managed_stage::CopyDescription {
+                stage_id:STAGE.into(),scope:Scope {account:"owner".into(),plugin:"fixture".into(),
+                    account_created:owner.created_at,chat:"chat".into(),topic:Some("topic".into())},
+                created:1,name:"original.bin".into(),size:15,limit:1024,
+            },memory_copy(b"synthetic bytes"),|_|Ok(())).await.unwrap().client_id
+        } else {String::new()};
         let outbox = Outbox::for_core(&core, OutboxPolicy::default());
-        let fixture = Self { temp, core, outbox, secrets };
+        let fixture = Self { temp, core, outbox, secrets, client };
         if start {
             fixture.core.accounts().start("owner").await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -82,6 +72,13 @@ impl Fixture {
             if mode.is_none() {fixture.disconnect().await;}
         }
         fixture
+    }
+
+    async fn empty()->Self {
+        let f=Self::setup(false,None,false).await;
+        std::fs::create_dir_all(f.root()).unwrap();
+        std::fs::write(f.root().join("marker"),b"synthetic bytes").unwrap();
+        f
     }
 
     fn stage(&self) -> std::path::PathBuf { self.core.host().config().upload_dir("owner").join(STAGE) }
@@ -103,7 +100,7 @@ impl Fixture {
         let request=claim.canonical_request().unwrap();
         let g=self.outbox.inner.ingest();
         let tx=g.db().transaction().unwrap();
-        let (_,item)=self.outbox.insert_in(&g,&tx,&owner.account_id,CLIENT,&request,None).unwrap();
+        let (_,item)=self.outbox.insert_in(&g,&tx,&owner.account_id,&self.client,&request,None).unwrap();
         tx.commit().unwrap();item
     }
     async fn disconnect(&self) {
@@ -189,10 +186,8 @@ async fn actual_core_copy_exclusively_publishes_ready_without_source_registratio
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn publication_metadata_cannot_make_ordinary_owner_removal_forget_unproved_history() {
-    let f=Fixture::new(false).await;
-    // Remove this synthetic legacy stage so the publication-only guard, rather
-    // than the existing unknown-stage catalog veto, must prevent removal.
-    std::fs::remove_dir_all(f.stage()).unwrap();
+    // Empty actual namespace: the metadata-only guard must independently refuse.
+    let f=Fixture::setup(false,None,false).await;
     f.core.open_db().unwrap().conn().execute("INSERT INTO managed_stage_publication(stage_id,nonce,client_id,
         account_id,plugin_id,account_created_at,path,identity_json,created_at)
         SELECT ?1,?1,?1,account_id,plugin_id,created_at,'/synthetic/unproved/bytes','{}',0
@@ -377,15 +372,20 @@ async fn admitted_source_blocks_all_generic_file_routes_and_aliases_without_harm
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
-async fn unregistered_legacy_file_flow_stays_explicitly_unchanged() {
+async fn private_inputs_are_denied_before_initial_admission_and_empty_registry_is_not_a_bypass() {
     let f=Fixture::new(true).await;
     for method in ["messages.send_file","x-fixture.upload"] {
         let error=f.core.host().call_raw("fixture",method,
             serde_json::json!({"account_id":"owner","path":f.stage().join("bytes")}),None).await.unwrap_err();
-        assert_eq!(error.error_code(),Some(ch_protocol::ErrorCode::MethodNotFound));
-        assert_eq!(std::fs::read_to_string(f.temp.path().join("wire")).unwrap(),method);
+        assert_ne!(error.error_code(),Some(ch_protocol::ErrorCode::MethodNotFound));
+        f.assert_no_wire();
     }
     assert_eq!(f.count("managed_source"),0);
+    let outside=f.temp.path().join("independent.bin");std::fs::write(&outside,b"outside").unwrap();
+    let error=f.core.host().call_raw("fixture","messages.send_file",
+        serde_json::json!({"account_id":"owner","path":outside}),None).await.unwrap_err();
+    assert_eq!(error.error_code(),Some(ch_protocol::ErrorCode::MethodNotFound));
+    assert_eq!(std::fs::read_to_string(f.temp.path().join("wire")).unwrap(),"messages.send_file");
     f.close().await;
 }
 
@@ -682,6 +682,7 @@ async fn actual_native_process_exit_never_certifies_helper_scope_or_replays_a_so
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn exact_legacy_receipt_precedes_spent_changed_bytes_and_missing_run() {
     let f=Fixture::new(false).await;
+    f.core.open_db().unwrap().conn().execute("DELETE FROM managed_stage_publication",[]).unwrap();
     let mut claim=f.claim().await;
     claim.checked_path().unwrap(); // Already spent, but retained lookup must still work.
     let item=f.legacy_receipt(&claim);
@@ -771,11 +772,11 @@ async fn fallback_lookup_cannot_follow_a_rearmed_generation_with_identical_owner
     let receipt={
         let g=f.outbox.inner.ingest();
         let tx=g.db().transaction().unwrap();
-        let (_,item)=f.outbox.insert_in(&g,&tx,"owner",CLIENT,&request,None).unwrap();
+        let (_,item)=f.outbox.insert_in(&g,&tx,"owner",&f.client,&request,None).unwrap();
         tx.commit().unwrap();item
     };
     // All persisted comparator fields match; only the original Gate distinguishes owners.
-    assert_eq!(f.outbox.get_matching_admission(&new,CLIENT,&request).unwrap(),Some(receipt.clone()));
+    assert_eq!(f.outbox.get_matching_admission(&new,&f.client,&request).unwrap(),Some(receipt.clone()));
     release.release();
     assert!(matches!(caller.await.unwrap(),Err(ManagedAdmissionError::Rejected(OutboxError::AdmissionConflict))));
     assert_eq!(f.outbox.get(receipt.id).unwrap(),receipt);
@@ -1022,7 +1023,7 @@ async fn failed_root_capture_cannot_fall_through_to_unanchored_removal() {
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn deleting_transaction_refuses_a_source_inserted_after_preflight() {
-    let f=Fixture::new(false).await;
+    let f=Fixture::empty().await;
     f.secrets.set("fixture","owner","session","synthetic").await.unwrap();
     let old=f.core.accounts().storage_observation_for("owner").await.unwrap();
     let (release,hook,entered)=pause("before-delete-tx");
@@ -1034,12 +1035,12 @@ async fn deleting_transaction_refuses_a_source_inserted_after_preflight() {
     f.core.open_db().unwrap().conn().execute("INSERT INTO managed_source(stage_id,client_id,
         account_id,plugin_id,account_created_at,chat_id,path,fingerprint_json,intent_json,created_at,updated_at)
         VALUES(?1,?2,'owner','fixture',?3,'chat',?4,'{}','{}',0,0)",
-        rusqlite::params![STAGE,CLIENT,old.owner().created_at,f.stage().join("bytes").to_str()]).unwrap();
+        rusqlite::params![STAGE,"22222222222222222222222222222222",old.owner().created_at,f.stage().join("bytes").to_str()]).unwrap();
     release.release();
     assert!(matches!(caller.await.unwrap(),Err(RuntimeError::SourceInUse)));
     assert!(f.core.accounts().get("owner").await.unwrap().is_some());
     assert_eq!(f.count("managed_source"),1);
-    assert!(f.stage().join("bytes").exists());
+    assert!(f.root().join("marker").exists());
     assert_eq!(f.secrets.snapshot("fixture","owner")["session"],"synthetic");
     assert!(old.is_revoked());
     assert!(f.core.accounts().storage_observation_for("owner").await.is_ok());
@@ -1061,7 +1062,7 @@ async fn unknown_registry_survives_hookless_factory_and_closed_core_accounts_clo
     assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
     assert!(f.stage().join("bytes").exists());
     let accounts=f.core.accounts().clone();let root=f.root();let path=f.core.db_path().to_owned();
-    let Fixture {temp,core,outbox,secrets}=f;
+    let Fixture {temp,core,outbox,secrets,..}=f;
     outbox.shutdown().await;core.shutdown().await;drop(outbox);drop(core);
     assert!(matches!(accounts.remove("owner").await,Err(RuntimeError::Host(HostError::ShuttingDown))));
     assert!(ch_db::get_account(ch_db::Db::open(path).unwrap().conn(),"owner").unwrap().is_some());
@@ -1072,7 +1073,7 @@ async fn unknown_registry_survives_hookless_factory_and_closed_core_accounts_clo
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn cancelled_remove_and_shutdown_wait_for_actual_destructive_worker() {
-    let f=Fixture::new(false).await;
+    let f=Fixture::empty().await;
     let root=f.root();let (release,hook,entered)=pause("before-root-delete");
     f.core.accounts().owner_close_checkpoint(hook);
     let accounts=f.core.accounts().clone();
@@ -1095,7 +1096,7 @@ async fn cancelled_remove_and_shutdown_wait_for_actual_destructive_worker() {
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn root_replacement_after_committed_account_delete_preserves_both_directories() {
-    let f=Fixture::new(false).await;
+    let f=Fixture::empty().await;
     let old=f.core.accounts().storage_observation_for("owner").await.unwrap();
     let root=f.root();let previous=root.with_file_name("removed-owner");
     let current=root.clone();let keep=previous.clone();
@@ -1109,7 +1110,7 @@ async fn root_replacement_after_committed_account_delete_preserves_both_director
     f.core.accounts().remove("owner").await.unwrap();
     assert!(f.core.accounts().get("owner").await.unwrap().is_none());
     assert!(old.is_revoked());
-    assert_eq!(std::fs::read(previous.join("uploads").join(STAGE).join("bytes")).unwrap(),b"synthetic bytes");
+    assert_eq!(std::fs::read(previous.join("marker")).unwrap(),b"synthetic bytes");
     assert_eq!(std::fs::read(root.join("replacement")).unwrap(),b"preserve replacement");
     // A committed row deletion is not proof of root cleanup. Existing bytes
     // continue to veto ID reuse, and the original observation stays revoked.
@@ -1121,7 +1122,7 @@ async fn root_replacement_after_committed_account_delete_preserves_both_director
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn ordinary_no_source_removal_with_parent_anchored_absence_clears_close_state() {
-    let f=Fixture::new(false).await;
+    let f=Fixture::empty().await;
     std::fs::remove_dir_all(f.root().parent().unwrap()).unwrap();
     f.core.accounts().remove("owner").await.unwrap();
     assert!(f.core.accounts().get("owner").await.unwrap().is_none());
@@ -1181,7 +1182,7 @@ async fn failed_fresh_scan_retains_data_and_later_ready_hint_does_not_clear_unkn
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn actual_other_owner_claim_invalidates_final_delete_epoch_but_not_folder_identity() {
-    let f=Fixture::new(false).await;
+    let f=Fixture::empty().await;
     f.secrets.set("fixture","owner","session","synthetic").await.unwrap();
     let other=f.core.accounts().add(NewAccount::new("fixture").id("other").no_start()).await.unwrap();
     let uploads=f.core.host().config().upload_dir("other");
@@ -1191,10 +1192,11 @@ async fn actual_other_owner_claim_invalidates_final_delete_epoch_but_not_folder_
     for dir in [&uploads,&stage] {std::fs::set_permissions(dir,std::fs::Permissions::from_mode(0o700)).unwrap();}
     let bytes=stage.join("bytes");std::fs::write(&bytes,b"synthetic bytes").unwrap();
     std::fs::set_permissions(&bytes,std::fs::Permissions::from_mode(0o400)).unwrap();
-    let mut manifest:Manifest=serde_json::from_slice(&std::fs::read(f.stage().join("manifest.json")).unwrap()).unwrap();
-    manifest.stage_id=id.into();manifest.client_id="44444444444444444444444444444444".into();
-    manifest.scope.account="other".into();manifest.scope.account_created=other.created_at;
-    manifest.fingerprint=Fingerprint::from(std::fs::metadata(&bytes).unwrap());
+    let manifest=Manifest {version:1,stage_id:id.into(),client_id:"44444444444444444444444444444444".into(),
+        scope:Scope {account:"other".into(),plugin:"fixture".into(),account_created:other.created_at,
+            chat:"chat".into(),topic:None},created:1,name:"other.bin".into(),size:15,format:Format::Other,
+        fingerprint:Fingerprint::from(std::fs::metadata(&bytes).unwrap()),
+        sha256:format!("{:x}",Sha256::digest(b"synthetic bytes")),phase:Phase::Ready};
     let metadata=stage.join("manifest.json");std::fs::write(&metadata,serde_json::to_vec(&manifest).unwrap()).unwrap();
     std::fs::set_permissions(&metadata,std::fs::Permissions::from_mode(0o600)).unwrap();drop(mutation);
     let (release,hook,entered)=pause("before-delete-tx");f.core.accounts().owner_close_checkpoint(hook);
@@ -1208,14 +1210,62 @@ async fn actual_other_owner_claim_invalidates_final_delete_epoch_but_not_folder_
     drop(binding);release.release();
     assert!(matches!(tokio::time::timeout(Duration::from_secs(5),deleting).await.unwrap().unwrap(),Err(RuntimeError::SourceInUse)));
     assert!(f.core.accounts().get("owner").await.unwrap().is_some());
-    assert!(f.stage().join("bytes").exists());
+    assert!(f.root().join("marker").exists());
     assert_eq!(f.secrets.snapshot("fixture","owner")["session"],"synthetic");
     drop(claim);
     f.core.accounts().owner_close_checkpoint(Arc::new(|_|{}));
-    // A fresh stable Ready-only target is removable. Other's Claimed bytes stay
+    // A fresh stable empty target is removable. Other's Claimed bytes stay
     // retained in their actual physical folder rather than globally misattributed.
     tokio::time::timeout(Duration::from_secs(5),f.core.accounts().remove("owner")).await.unwrap().unwrap();
     assert!(f.core.accounts().get("owner").await.unwrap().is_none());
     assert!(bytes.exists());assert!(f.core.accounts().get("other").await.unwrap().is_some());
     f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn fresh_admission_never_retrofits_legacy_ready_without_actual_protected_birth() {
+    let f=Fixture::new(true).await;
+    f.core.open_db().unwrap().conn().execute("DELETE FROM managed_stage_publication",[]).unwrap();
+    assert!(matches!(f.outbox.enqueue_managed_file_checked(f.claim().await).await,
+        Err(ManagedAdmissionError::Rejected(OutboxError::AdmissionConflict))));
+    f.assert_no_admission();f.assert_no_wire();assert!(f.stage().join("bytes").exists());
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_unadmitted_publication_reopens_without_reading_or_automatically_sending() {
+    let f=Fixture::new(false).await;
+    f.outbox.shutdown().await;f.core.shutdown().await;
+    let mut config=CoreConfig::new(f.temp.path(),f.secrets.clone());
+    config.host=f.core.host().config().clone();config.autostart=false;
+    let core=Core::open(config).await.unwrap();
+    assert_eq!(core.managed_sources().census(),(0,0,0));
+    f.assert_no_admission();f.assert_no_wire();
+    let binding=core.accounts().storage_binding_for("owner").await.unwrap();
+    let proof=VerifiedStageBinding::verify_ready(&binding,STAGE,1024,|_|Ok(())).unwrap();
+    core.stage_publisher().check_unadmitted_ready(&proof).await.unwrap();drop(proof);drop(binding);
+    assert!(matches!(core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+    assert!(f.stage().join("bytes").exists());
+    core.shutdown().await;f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn cancellation_after_actual_birth_retains_bytes_and_reports_unknown_instead_of_free_cancel() {
+    let f=Fixture::empty().await;
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let scope=Scope {account:"owner".into(),plugin:"fixture".into(),account_created:binding.owner().created_at,
+        chat:"chat".into(),topic:None};
+    let path=f.core.db_path().to_owned();
+    let result=f.core.stage_publisher().copy(binding,crate::managed_stage::CopyDescription {
+        stage_id:STAGE.into(),scope,created:1,name:"cancelled.bin".into(),size:15,limit:1024,
+    },memory_copy(b"synthetic bytes"),move|_| {
+        let db=ch_db::Db::open(&path).map_err(|_|crate::managed_stage::Error::Storage)?;
+        let count:i64=db.conn().query_row("SELECT count(*) FROM managed_stage_publication",[],|r|r.get(0))
+            .map_err(|_|crate::managed_stage::Error::Storage)?;
+        if count>0 {Err(crate::managed_stage::Error::Cancelled)} else {Ok(())}
+    }).await;
+    assert!(matches!(result,Err(crate::managed_stage::Error::Unknown)));
+    assert_eq!(f.count("managed_stage_publication"),1);
+    assert!(f.stage().join("bytes").exists());assert!(!f.stage().join("manifest.json").exists());
+    f.assert_no_admission();f.assert_no_wire();f.close().await;
 }

@@ -129,7 +129,7 @@ impl Scan {
         // Stored phase/hash are hints only. No scan can certify physical reader closure.
         let candidate = LegacyCandidate { key: key.clone(), directory: inode, kind,
             scope: Some(manifest.scope), client: Some(manifest.client_id.clone()),
-            unproved: matches!(kind, StageKind::Claimed | StageKind::Consumed) || !valid };
+            unproved: true };
         self.stages.insert(key.clone(), candidate);
         let duplicates = [self.seen_stage.insert(manifest.stage_id, key.clone()),
             self.seen_client.insert(manifest.client_id, key.clone())];

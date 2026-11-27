@@ -4,7 +4,7 @@
 use super::*;
 use crate::host::HostHandle;
 use crate::managed_sources::{self, ManagedSources};
-use crate::managed_stage::{LiveStageClaim, StageIdentity};
+use crate::managed_stage::{LiveStageClaim, PublicationIdentity, StageIdentity};
 use crate::runtime::{Accounts, AccountStorageObservation, ManagedProofError};
 
 #[derive(Clone)]
@@ -120,8 +120,8 @@ impl Outbox {
     /// WIP native owned local admission from a real one-use Core claim.
     /// Requires this Core's actual Accounts issuer and configured upload namespace.
     /// Plain Outbox::new retains its separate descriptive get_matching_admission API.
-    /// No App/RPC route calls this. Generic workers park its rows until the
-    /// complete managed Host/catalog/dispatch chain is implemented and reviewed.
+    /// Fresh admission requires the exclusive creator's durable publication fact.
+    /// A retained exact receipt remains lookup-first, including legacy receipts.
     pub async fn enqueue_managed_file_checked(&self, claim: LiveStageClaim) -> AdmissionResult {
         // Intrinsic composition identity precedes every lookup. This is not a
         // fresh run/posting/byte eligibility check that could hide an old receipt.
@@ -245,6 +245,9 @@ impl Outbox {
             };
             request.validate()?;
             fresh()?;
+            let publication=PublicationIdentity::from_source(&identity)
+                .map_err(|_|OutboxError::AdmissionConflict)?;
+            publication.require_unlinked_in(tx).map_err(|_|OutboxError::AdmissionConflict)?;
             let now = outbox.inner.now();
             tx.execute("INSERT INTO managed_source(stage_id,client_id,account_id,plugin_id,
                 account_created_at,chat_id,topic_id,path,fingerprint_json,intent_json,created_at,updated_at)
@@ -253,6 +256,10 @@ impl Outbox {
                     request.chat_id(),request.topic_id(),identity.path().to_str(),fingerprint,intent,now])
                 .map_err(ch_db::Error::from)?;
             let source = tx.last_insert_rowid();
+            if tx.execute("UPDATE managed_stage_publication SET source_id=?1 WHERE stage_id=?2 AND source_id IS NULL",
+                rusqlite::params![source,stage]).map_err(ch_db::Error::from)?!=1 {
+                return Err(OutboxError::AdmissionConflict);
+            }
             let (applied, item) = outbox.insert_with_echo_in(tx, &owner.account_id, &client,
                 &request, None, |echo| Ok(full.apply_local_echo(&owner.account_id, echo)?))?;
             #[cfg(test)] outbox.at_managed("in-writer");

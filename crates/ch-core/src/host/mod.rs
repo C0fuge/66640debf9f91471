@@ -34,6 +34,8 @@ mod inputs;
 mod managed;
 #[cfg(target_os = "linux")]
 pub(crate) use managed::{NativeProducer,nonce as managed_nonce};
+#[cfg(target_os="linux")]
+pub(crate) use inputs::ProtectedInputs;
 #[cfg(target_os = "linux")]
 pub(crate) use owned::{OwnedAccountSnapshot, OwnedStateChange};
 #[cfg(target_os = "linux")]

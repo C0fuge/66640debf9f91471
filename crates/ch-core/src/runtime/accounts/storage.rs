@@ -24,6 +24,13 @@ impl HostStorageView {
     pub(crate) fn current(&self, observed: &AccountStorageObservation) -> bool {
         self.0.upgrade().is_some_and(|inner| Accounts(inner).owns_storage_observation(observed))
     }
+    pub(crate) fn check_in(&self,conn:&Connection,observed:&AccountStorageObservation)->Result<()> {
+        let inner=self.0.upgrade().ok_or_else(||unknown(&observed.owner.account_id))?;
+        if !Accounts(inner.clone()).owns_storage_observation(observed) {return Err(unknown(&observed.owner.account_id));}
+        observed.check(conn)?;
+        if !exclusive(conn,inner.host.config(),&observed.owner,&observed.root)? {return Err(unknown(&observed.owner.account_id));}
+        observed.check(conn)
+    }
     // Called only on the actual counted directory metadata worker. No read
     // lease is acquired, so a removal writer can never strand this capture.
     pub(crate) fn capture(&self, plugin: &str, account: &str) -> Result<(AccountStorageObservation, super::LogicalOwnerObservation)> {
