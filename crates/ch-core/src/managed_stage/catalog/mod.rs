@@ -113,19 +113,36 @@ impl State {
 }
 
 /// Core-owned metadata. Contains no Gate, account guard, FD or network handle.
-pub(crate) struct PrivateByteCatalog { data_dir: PathBuf, state: Mutex<State>, issuer:Arc<()> }
+#[cfg(test)]
+type Probe=Arc<dyn Fn(&std::fs::Metadata)+Send+Sync>;
+
+pub(crate) struct PrivateByteCatalog {
+    data_dir:PathBuf,state:Mutex<State>,issuer:Arc<()>,readers:super::readers::ReaderSet,
+    #[cfg(test)] probe:Mutex<Option<Probe>>,
+}
 impl PrivateByteCatalog {
     /// Private Core composition factory; no caller-vouched completeness or inode list.
     pub(crate) fn for_core(config: &HostConfig) -> Arc<Self> {
-        Arc::new(Self { data_dir: config.data_dir.clone(), state: Mutex::new(State::default()), issuer:Arc::new(()) })
+        Arc::new(Self { data_dir: config.data_dir.clone(), state: Mutex::new(State::default()), issuer:Arc::new(()),readers:super::readers::ReaderSet::new(),
+            #[cfg(test)] probe:Mutex::new(None) })
     }
     pub(crate) fn mutations(self: &Arc<Self>) -> super::StageMutations {
         super::StageMutations { catalog: self.clone() }
+    }
+    pub(super) fn read_scope(&self)->Result<super::StageReadScope> {self.readers.enter()}
+    #[cfg(test)]
+    pub(crate) fn probe_for_test(&self,probe:Probe) {
+        *self.probe.lock().unwrap_or_else(std::sync::PoisonError::into_inner)=Some(probe);
+    }
+    #[cfg(test)]
+    pub(crate) fn exclude_readers_for_test(&self)->Result<tokio::sync::OwnedRwLockWriteGuard<()>> {
+        self.readers.exclude()
     }
     pub(super) fn check_accounts_root(&self, root: &std::path::Path) -> Result<()> {
         if root == self.data_dir.join("accounts") { Ok(()) } else { Err(Error::Integrity) }
     }
     pub(crate) fn close(&self) {
+        self.readers.close();
         let mut state = self.lock();
         state.closed = true;
         state.complete = false;
@@ -193,6 +210,7 @@ impl PrivateByteCatalog {
     }
 
     fn refresh_with(&self, before_scan: impl FnOnce(), after_scan: impl FnOnce()) -> Result<CatalogView> {
+        let _readers=self.read_scope()?;
         let epoch = {
             let mut state = self.lock();
             if state.closed { return Err(Error::Cancelled); }
@@ -200,7 +218,12 @@ impl PrivateByteCatalog {
             state.advance()?
         };
         before_scan();
+        #[cfg(not(test))]
         let scanned = scan::walk(&self.data_dir);
+        #[cfg(test)]
+        let probe=self.probe.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        #[cfg(test)]
+        let scanned = scan::walk_with_probe(&self.data_dir,probe);
         after_scan();
         let mut state = self.lock();
         // Partial negative evidence remains useful, even when publication is refused.

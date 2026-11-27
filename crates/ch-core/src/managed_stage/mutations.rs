@@ -23,6 +23,11 @@ impl StageMutations {
         Ok(())
     }
 
+    /// Account for already-authorized filesystem work, including O_PATH metadata
+    /// and directory descriptions. Retain through their actual drop, not merely
+    /// a caller reply. This does not grant IO or prove historical reader closure.
+    pub fn read_scope(&self)->Result<super::StageReadScope> {self.catalog.read_scope()}
+
     /// Retain inside the actual synchronous operation through all FS settlement.
     /// Bookkeeping failure leaves Unknown; a closed Core permanently vetoes start.
     pub fn begin(&self) -> Result<StageMutation> {

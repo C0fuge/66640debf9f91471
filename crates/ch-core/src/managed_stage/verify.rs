@@ -18,6 +18,8 @@ pub struct VerifiedStageBinding {
     pub(super) bytes: File,
     _stage_lock: File,
     pub(super) owner: AccountStorageBinding,
+    // Declared last so actual files/dirs/leases drop before accounting releases.
+    _readers:super::StageReadScope,
 }
 
 impl VerifiedStageBinding {
@@ -40,6 +42,7 @@ impl VerifiedStageBinding {
 
     fn verify_stage(owner:&AccountStorageBinding,stage_id:&str,limit:u64,
         expected:Option<&super::StageIdentity>,checkpoint:impl FnMut(u64)->Result<()>) -> Result<Self> {
+        let readers=owner.stage_mutations()?.read_scope()?;
         if owner.is_revoked() { return Err(Error::TargetChanged); }
         if !hex(stage_id, 32) { return Err(Error::Integrity); }
         let dir = open_stage(owner, stage_id)?;
@@ -59,7 +62,7 @@ impl VerifiedStageBinding {
         let bytes = fd::openat(dir.fd(), c"bytes", libc::O_RDONLY, 0)?;
         check_bytes(&dir, &manifest, &bytes)?;
         let proof = Self { dir, manifest, bytes, _stage_lock: stage_lock,
-            owner: owner.retain_binding() };
+            owner: owner.retain_binding(),_readers:readers };
         if let Some(expected)=expected
             && super::StageIdentity::capture(&proof)?!=*expected { return Err(Error::StageChanged); }
         proof.recheck_ready()?;
@@ -96,6 +99,7 @@ impl VerifiedStageBinding {
     pub(super) fn restore_ready(owner:&AccountStorageBinding,expected:&super::PublicationIdentity,
         mut checkpoint:impl FnMut(u64)->Result<()>,before:impl FnOnce()->Result<()>)->Result<Manifest> {
         use std::io::Write;
+        let readers=owner.stage_mutations()?.read_scope()?;
         let manifest=expected.manifest();let row=owner.owner();
         if manifest.scope.account!=row.account_id || manifest.scope.plugin!=row.plugin_id
             || manifest.scope.account_created!=row.created_at {return Err(Error::TargetChanged);}
@@ -104,7 +108,7 @@ impl VerifiedStageBinding {
         match fd::openat(dir.fd(),c"manifest.json",libc::O_PATH,0) {
             Ok(_)=>{
                 // Never overwrite/reverse a Claim/Consumed/Discarded publication.
-                drop(stage_lock);drop(dir);
+                drop(stage_lock);drop(dir);drop(readers);
                 let proof=Self::verify_ready(owner,&manifest.stage_id,MAX_BYTES,checkpoint)?;
                 if super::PublicationIdentity::capture(owner,&proof.dir,proof.manifest())?!=*expected {
                     return Err(Error::StageChanged);
@@ -132,7 +136,7 @@ impl VerifiedStageBinding {
         let bytes=fd::openat(dir.fd(),c"bytes",libc::O_RDONLY,0)?;
         check_bytes(&dir,manifest,&bytes)?;
         let proof=Self {dir:dir.clone(),manifest:manifest.clone(),bytes,_stage_lock:stage_lock,
-            owner:owner.retain_binding()};
+            owner:owner.retain_binding(),_readers:readers};
         proof.check_contents(&mut checkpoint)?;only_bytes()?;
         let encoded=serde_json::to_vec(manifest).map_err(|_|Error::Integrity)?;
         if encoded.len() as u64>MANIFEST_CAP {return Err(Error::Integrity);}

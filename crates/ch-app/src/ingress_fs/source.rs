@@ -76,8 +76,16 @@ pub(crate) struct Source {
     pub(super) display_name: String,
     #[cfg(test)]
     pub(super) test_mounts: Option<Mounts>,
+    // Metadata rejection probes may still pin a private inode. The actual input
+    // worker retains accounting until every selected-source handle has closed.
+    _readers:Option<ch_core::managed_stage::StageReadScope>,
 }
 impl Source {
+    pub fn open_counted(path:&Path,roots:&[PathBuf],limit:u64,
+        readers:ch_core::managed_stage::StageReadScope)->Result<Self> {
+        Self::open_inner(path,roots,limit,&Mounts::read().map_err(|_|Error::UnsafeSource)?,Some(readers))
+    }
+    #[cfg(test)]
     pub fn open(path: &Path, private_roots: &[PathBuf], limit: u64) -> Result<Self> {
         Self::open_with(
             path,
@@ -86,12 +94,12 @@ impl Source {
             &Mounts::read().map_err(|_| Error::UnsafeSource)?,
         )
     }
-    pub(super) fn open_with(
-        path: &Path,
-        roots: &[PathBuf],
-        limit: u64,
-        mounts: &Mounts,
-    ) -> Result<Self> {
+    #[cfg(test)]
+    pub(super) fn open_with(path:&Path,roots:&[PathBuf],limit:u64,mounts:&Mounts)->Result<Self> {
+        Self::open_inner(path,roots,limit,mounts,None)
+    }
+    fn open_inner(path:&Path,roots:&[PathBuf],limit:u64,mounts:&Mounts,
+        readers:Option<ch_core::managed_stage::StageReadScope>)->Result<Self> {
         if roots.is_empty() || roots.len() > 64 {
             return Err(Error::UnsafeSource);
         }
@@ -152,6 +160,7 @@ impl Source {
             display_name: sanitize(std::str::from_utf8(last).ok()),
             #[cfg(test)]
             test_mounts: None,
+            _readers:readers,
         };
         source.check()?;
         Ok(source)

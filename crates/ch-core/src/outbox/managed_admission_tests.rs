@@ -824,11 +824,11 @@ async fn same_root_foreign_accounts_issuer_and_unbound_outbox_are_not_managed_co
     assert!(binding.observation()!=actual);
     assert_eq!(binding.owner().created_at,actual.owner().created_at);
     let before=std::fs::read(f.stage().join("manifest.json")).unwrap();
-    let claim=VerifiedStageBinding::verify_ready(&binding,STAGE,crate::managed_stage::MAX_BYTES,|_|Ok(())).unwrap()
-        .claim(Intent {caption:" exact caption ".into(),as_file:true,spoiler:false});
-    // Standalone Accounts has no Core-owned writer hook: refuse before any
-    // Ready -> Claimed publication, rather than manufacturing one for admission.
-    assert!(matches!(claim,Err(crate::managed_stage::Error::TargetChanged)));
+    let proof=VerifiedStageBinding::verify_ready(&binding,STAGE,crate::managed_stage::MAX_BYTES,
+        |_|panic!("standalone binding cannot begin a Core byte reader"));
+    // Standalone Accounts has no Core-owned reader/writer hook: refuse before
+    // any byte scan or Ready -> Claimed publication, rather than minting a claim.
+    assert!(matches!(proof,Err(crate::managed_stage::Error::TargetChanged)));
     drop(binding);
     assert_eq!(std::fs::read(f.stage().join("manifest.json")).unwrap(),before);
     let manifest:Manifest=serde_json::from_slice(&before).unwrap();
@@ -1410,4 +1410,87 @@ async fn orphaned_pending_ready_identity_refuses_before_any_new_copy_allocation(
     assert!(!f.stage().exists());assert_eq!(f.count("managed_stage_publication"),0);
     assert_eq!(f.count("managed_ready_retirement"),1);f.assert_no_admission();f.assert_no_wire();
     f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_verifier_descriptors_retain_negative_reader_accounting_until_real_drop() {
+    let f=Fixture::new(false).await;
+    let catalog=f.core.managed_sources().catalog();
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let proof=VerifiedStageBinding::verify_ready(&binding,STAGE,1024,|_|Ok(())).unwrap();
+    drop(binding);
+    assert!(catalog.exclude_readers_for_test().is_err());
+    drop(proof);
+    let exclusion=catalog.exclude_readers_for_test().unwrap();
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    assert!(matches!(VerifiedStageBinding::verify_ready(&binding,STAGE,1024,
+        |_|panic!("reader exclusion must refuse before any byte scan")),Err(crate::managed_stage::Error::Busy)));
+    drop(exclusion);
+    drop(VerifiedStageBinding::verify_ready(&binding,STAGE,1024,|_|Ok(())).unwrap());
+    assert!(catalog.exclude_readers_for_test().is_ok());
+    drop(binding);f.assert_no_admission();f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn cancelled_catalog_waiter_and_interrupted_drain_keep_actual_metadata_fd_accounted() {
+    use std::os::unix::fs::MetadataExt;
+    let f=Fixture::new(false).await;
+    let catalog=f.core.managed_sources().catalog();
+    let inode=std::fs::metadata(f.stage().join("bytes")).unwrap().ino();
+    let (release,paused,entered)=pause("metadata-probe");
+    catalog.probe_for_test(Arc::new(move|metadata| {
+        if metadata.is_file() && metadata.ino()==inode {paused("metadata-probe");}
+    }));
+    let jobs=f.core.managed_sources().lookups();let active=jobs.clone();let scanning=catalog.clone();
+    let caller=tokio::spawn(async move {active.run(move||scanning.refresh()).await});
+    tokio::time::timeout(Duration::from_secs(5),entered).await.unwrap().unwrap();
+    // The actual production scanner is paused with its real private O_PATH
+    // descriptor open. The observation callback grants no IO/closure result.
+    assert!(catalog.exclude_readers_for_test().is_err());
+    caller.abort();assert!(matches!(caller.await,Err(error) if error.is_cancelled()));
+    let waiting=jobs.clone();let mut first=tokio::spawn(async move{waiting.drain().await});
+    assert!(tokio::time::timeout(Duration::from_millis(30),&mut first).await.is_err());
+    first.abort();assert!(first.await.unwrap_err().is_cancelled());
+    assert!(catalog.exclude_readers_for_test().is_err());
+    let mut second=tokio::spawn(async move{jobs.drain().await});
+    assert!(tokio::time::timeout(Duration::from_millis(30),&mut second).await.is_err());
+    release.release();tokio::time::timeout(Duration::from_secs(5),second).await.unwrap().unwrap().unwrap();
+    assert!(catalog.exclude_readers_for_test().is_ok());
+    f.assert_no_admission();f.assert_no_wire();f.close().await;
+}
+
+struct CloseAfterActualCopy {
+    input:MemoryCopy,
+    sources:Arc<crate::managed_sources::ManagedSources>,
+}
+impl std::io::Read for CloseAfterActualCopy {
+    fn read(&mut self,buffer:&mut [u8])->std::io::Result<usize> {std::io::Read::read(&mut self.input,buffer)}
+}
+impl crate::managed_stage::CopyInput for CloseAfterActualCopy {
+    fn check(&self)->crate::managed_stage::Result<()> {Ok(())}
+    fn publication_check(&self)->crate::managed_stage::Result<()> {Ok(())}
+}
+impl Drop for CloseAfterActualCopy {
+    fn drop(&mut self) {
+        // Real input ownership ends AFTER the actual Core copy body returned.
+        // Its output descriptors must already be closed; no synthetic success
+        // or caller-supplied closure flag can substitute this native gate check.
+        assert!(self.sources.catalog().exclude_readers_for_test().is_ok());
+        self.sources.close();
+    }
+}
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn known_copy_receipt_survives_reader_admission_closing_after_actual_output_fd_drop() {
+    let f=Fixture::empty().await;
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let scope=Scope {account:"owner".into(),plugin:"fixture".into(),account_created:binding.owner().created_at,
+        chat:"chat".into(),topic:None};
+    let result=f.core.stage_publisher().copy(binding,crate::managed_stage::CopyDescription {
+        stage_id:STAGE.into(),scope,created:1,name:"known.bin".into(),size:15,limit:1024,
+    },CloseAfterActualCopy {input:memory_copy(b"synthetic bytes"),sources:f.core.managed_sources()},|_|Ok(())).await.unwrap();
+    assert_eq!(result.stage_id,STAGE);assert!(result.phase==Phase::Ready);
+    assert!(matches!(f.core.stage_mutations().read_scope(),Err(crate::managed_stage::Error::Cancelled)));
+    assert_eq!(std::fs::read(f.stage().join("bytes")).unwrap(),b"synthetic bytes");
+    assert_eq!(f.count("managed_stage_publication"),1);
+    f.assert_no_admission();f.assert_no_wire();f.close().await;
 }

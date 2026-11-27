@@ -29,6 +29,7 @@ pub(super) fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDesc
     reader:&mut impl CopyInput,mut checkpoint:impl FnMut(u64)->Result<()>,
     before_ready:impl FnOnce(&fd::Dir,&Manifest)->std::result::Result<(),super::publisher::PublicationWriteError>)
     ->Result<Manifest> {
+    let _readers=owner.stage_mutations()?.read_scope()?;
     let CopyDescription {stage_id,scope,created,name,size,limit}=description;
     let account=owner.owner();
     if !hex(&stage_id,32) || created<0 || scope.account!=account.account_id

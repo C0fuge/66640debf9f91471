@@ -19,13 +19,23 @@ pub(super) struct Scan {
     metadata: u64,
     seen_stage: BTreeMap<String, StageKey>,
     seen_client: BTreeMap<String, StageKey>,
+    #[cfg(test)] probe:Option<super::Probe>,
 }
 
-pub(super) fn walk(data_dir: &Path) -> Scan {
-    let mut scan = Scan { complete: true, inodes: BTreeSet::new(), stages: BTreeMap::new(), root: None,
-        remaining: MANAGED, metadata: METADATA, seen_stage: BTreeMap::new(), seen_client: BTreeMap::new() };
-    if scan.run(data_dir).is_err() { scan.complete = false; }
-    scan
+fn empty()->Scan {
+    Scan {complete:true,inodes:BTreeSet::new(),stages:BTreeMap::new(),root:None,
+        remaining:MANAGED,metadata:METADATA,seen_stage:BTreeMap::new(),seen_client:BTreeMap::new(),
+        #[cfg(test)] probe:None}
+}
+#[cfg(not(test))]
+pub(super) fn walk(data_dir:&Path)->Scan {
+    let mut scan=empty();
+    if scan.run(data_dir).is_err() {scan.complete=false;}scan
+}
+#[cfg(test)]
+pub(super) fn walk_with_probe(data_dir:&Path,probe:Option<super::Probe>)->Scan {
+    let mut scan=empty();scan.probe=probe;
+    if scan.run(data_dir).is_err() {scan.complete=false;}scan
 }
 
 fn name(value: &OsString) -> Result<CString> { fd::cname(value.as_bytes()) }
@@ -101,6 +111,8 @@ impl Scan {
             let file = fd::openat(dir.fd(), &name(&child)?, libc::O_PATH, 0)?;
             dir.bind(&name(&child)?, &file)?;
             let metadata = file.metadata()?;
+            #[cfg(test)]
+            if let Some(probe)=&self.probe {probe(&metadata);}
             if metadata.is_file() {
                 self.record(&file)?;
                 if metadata.uid() != fd::uid() || metadata.nlink() != 1

@@ -435,7 +435,8 @@ impl Job {
         binding: ch_core::runtime::AccountStorageBinding,
     ) -> Work<()> {
         let limit = self.effective(None)?;
-        let source = fs::Source::open(&path, &self.s.private_roots(), limit)?;
+        let readers=self.s.core.stage_mutations().read_scope()?;
+        let source = fs::Source::open_counted(&path,&self.s.private_roots(),limit,readers)?;
         drop(path);
         let size = source.len();
         // The one scan permit covers inventory, reservation, temporary allocation, and settlement.
@@ -489,11 +490,11 @@ impl Job {
         if matches!(staged, Err(fs::Error::Unknown)) {
             lock(&self.s.ledger).unsettled_charge = true;
         }
-        let stage = staged?;
+        let manifest = staged?;
         self.s.inventory_changed();
         let b = Binding {
-            manifest: stage.manifest().clone(),
-            path: stage.managed_path(),
+            path:owner.uploads.join(&manifest.stage_id).join("bytes"),
+            manifest,
         };
         self.update(|e| {
             e.problem = None;

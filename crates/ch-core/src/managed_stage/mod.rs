@@ -9,6 +9,8 @@ mod account_root;
 pub(crate) use account_root::{AccountRootAnchor, AccountRootIdentity};
 pub(crate) mod catalog;
 mod mutations;
+mod readers;
+pub use readers::StageReadScope;
 mod copy;
 pub use copy::{CopyDescription,CopyInput};
 mod publisher;

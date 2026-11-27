@@ -28,6 +28,7 @@ impl PrivateByteCatalog {
     // Called ONLY by the counted blocking input worker; every O_PATH/directory
     // handle drops before returning. The immutable result contains no FD/Gate.
     pub(crate) fn external_inputs(&self, paths: Vec<String>) -> Result<ExternalInputs> {
+        let _readers=self.read_scope()?;
         if paths.is_empty() || paths.len() > 10 { return Err(Error::Integrity); }
         let data = fd::data_dir(&self.data_dir)?;
         let epoch = {

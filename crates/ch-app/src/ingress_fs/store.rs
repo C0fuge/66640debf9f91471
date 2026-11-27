@@ -128,12 +128,13 @@ impl Store {
         Ok(uploads)
     }
     pub fn recover(&self, owner: &Owner, stage_id: &str) -> Result<Stage> {
+        let readers=self.mutations.as_ref().map(|hook|hook.read_scope().map(Arc::new)).transpose()?;
         if !hex(stage_id, 32) {
             return Err(Error::Integrity);
         }
         let uploads = self.uploads(owner, false)?;
         let dir = uploads.child(&fd::cname(stage_id.as_bytes())?, Policy::Private)?;
-        Stage::load(dir, owner, stage_id, self.mutations.clone())
+        Stage::load(dir, owner, stage_id, self.mutations.clone(),readers.clone())
     }
 
     /// Production copying delegates actual exclusive creation to Core. Source
@@ -141,7 +142,7 @@ impl Store {
     pub fn stage_bound(&self,owner:&Owner,binding:ch_core::runtime::AccountStorageBinding,
         publisher:&ch_core::managed_stage::StagePublisher,
         description:ch_core::managed_stage::CopyDescription,source:Source,
-        checkpoint:impl FnMut(u64)->Result<()>+Send+'static)->Result<Stage> {
+        checkpoint:impl FnMut(u64)->Result<()>+Send+'static)->Result<Manifest> {
         let actual=binding.owner();
         if actual.account_id!=owner.account || actual.plugin_id!=owner.plugin
             || actual.created_at!=owner.account_created
@@ -153,9 +154,10 @@ impl Store {
         let stage_id=description.stage_id.clone();
         let manifest=tokio::runtime::Handle::current().block_on(
             publisher.copy(binding,description,source,checkpoint))?;
-        let stage=self.recover(owner,&stage_id)?;
-        if stage.manifest()!=&manifest {return Err(Error::StageChanged);}
-        Ok(stage)
+        if manifest.stage_id!=stage_id || !owner.matches(&manifest.scope) {return Err(Error::Unknown);}
+        // A known publication remains known after Core closes new reader admission.
+        // This method returns only metadata, never a byte FD, flock or Stage handle.
+        Ok(manifest)
     }
 
     /// Call after atomically charging source.len() and one slot. Re-inventory on
@@ -190,6 +192,7 @@ impl Store {
             return Err(Error::Integrity);
         }
         // Starts inside the actual synchronous writer, before even mkdir.
+        let readers=self.mutations.as_ref().map(|hook|hook.read_scope().map(Arc::new)).transpose()?;
         let _mutation = self.mutations.as_ref().map(|hook| hook.begin()).transpose()?;
         let uploads = self.uploads(owner, true)?;
         let name = fd::cname(stage_id.as_bytes())?;
@@ -241,6 +244,7 @@ impl Store {
                 dir: dir.clone(),
                 manifest,
                 mutations: self.mutations.clone(),
+                _readers:readers.clone(),
             };
             let held = stage.open_bytes()?;
             stage.publish(None, &stage.manifest, || {
@@ -297,18 +301,22 @@ pub(crate) struct Stage {
     pub(super) dir: Arc<Dir>,
     manifest: Manifest,
     mutations: Option<ch_core::managed_stage::StageMutations>,
+    // Stage clones share actual directory descriptions and their negative scope.
+    // Declared last so those handles close before the last reader owner releases.
+    _readers:Option<Arc<ch_core::managed_stage::StageReadScope>>,
 }
 pub(crate) struct Verified {
-    stage: Stage,
+    // Byte/flock handles close before Stage releases its directory/read scope.
     handles: Verification,
+    stage: Stage,
 }
 enum Verification {
     Local { held: File, _lease: File },
     Core(Box<ch_core::managed_stage::VerifiedStageBinding>),
 }
 pub(crate) struct LiveClaim {
-    stage: Stage,
     handles: ClaimHandles,
+    stage: Stage,
 }
 enum ClaimHandles {
     Core(Box<ch_core::managed_stage::LiveStageClaim>),
@@ -345,11 +353,13 @@ pub(super) fn read_manifest(dir: &Dir) -> Result<(Manifest, File)> {
 }
 impl Stage {
     pub(super) fn from_inventory(dir: Arc<Dir>, manifest: Manifest,
-        mutations: Option<ch_core::managed_stage::StageMutations>) -> Self {
-        Self { dir, manifest, mutations }
+        mutations: Option<ch_core::managed_stage::StageMutations>) -> Result<Self> {
+        let readers=mutations.as_ref().map(|hook|hook.read_scope().map(Arc::new)).transpose()?;
+        Ok(Self {dir,manifest,mutations,_readers:readers})
     }
     pub(super) fn load(dir: Arc<Dir>, owner: &Owner, stage_id: &str,
-        mutations: Option<ch_core::managed_stage::StageMutations>) -> Result<Self> {
+        mutations: Option<ch_core::managed_stage::StageMutations>,
+        readers:Option<Arc<ch_core::managed_stage::StageReadScope>>) -> Result<Self> {
         if dir.identity.mount != dir.parent().ok_or(Error::Integrity)?.identity.mount {
             return Err(Error::Integrity);
         }
@@ -357,10 +367,10 @@ impl Stage {
         if manifest.stage_id != stage_id || !owner.matches(&manifest.scope) {
             return Err(Error::Integrity);
         }
-        let stage = Self { dir, manifest, mutations };
+        let stage = Self { dir, manifest, mutations,_readers:readers };
         if stage.manifest.phase == Phase::Ready {
             stage.check_layout()?;
-            stage.open_bytes()?;
+            stage.check_bytes_metadata()?;
         }
         Ok(stage)
     }

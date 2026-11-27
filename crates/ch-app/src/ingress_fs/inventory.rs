@@ -56,6 +56,11 @@ impl Store {
             per_directory: BTreeMap::new(),
             manifests: Vec::new(),
         };
+        // Actual metadata descriptors can pin unlinked storage too. Caller loss
+        // cannot release this scope while the synchronous scan still owns them.
+        let Ok(_readers)=self.mutations.as_ref().map(|hook|hook.read_scope()).transpose() else {
+            scan.complete=false;return scan;
+        };
         let mut budget = Budget {
             accounts: 4096,
             managed: 256,
@@ -171,7 +176,7 @@ impl Store {
                 }
                 // Keep proven local admission/claim evidence visible even when
                 // damage to the retained bytes freezes further allocations.
-                let stage = Stage::from_inventory(dir.clone(), m, self.mutations.clone());
+                let stage = Stage::from_inventory(dir.clone(), m, self.mutations.clone())?;
                 valid &= if has_bytes {
                     stage.check_bytes_metadata().is_ok()
                 } else {
