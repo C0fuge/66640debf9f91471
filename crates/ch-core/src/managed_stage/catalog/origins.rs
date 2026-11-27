@@ -15,7 +15,7 @@ pub(super) struct Location {
     pub(super) file:Identity,
 }
 #[derive(Clone,PartialEq,Eq)]
-pub(super) enum Observation { At(Location),Ambiguous }
+pub(super) enum Observation { At(Box<Location>),Ambiguous }
 impl Observation {
     fn charge(&self)->Option<usize> {
         match self {

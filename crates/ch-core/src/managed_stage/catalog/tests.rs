@@ -409,3 +409,22 @@ fn same_actual_inode_moved_between_stages_stays_ambiguous_after_names_disappear(
     let state=f.catalog.lock();assert!(matches!(state.origins.get(&inode),Some(Observation::Ambiguous)));
     assert_eq!(state.origins.len(),4,"all original byte and manifest negatives remain");
 }
+
+#[test]
+fn same_inode_and_same_names_under_a_replaced_actual_stage_directory_are_ambiguous() {
+    use super::origins::Observation;
+    let f=Fixture::new();let bytes=f.stage("owner",FIRST,CLIENT1,Phase::Ready);
+    f.catalog.refresh().unwrap();
+    let meta=fs::metadata(&bytes).unwrap();let inode=Inode {dev:meta.dev(),ino:meta.ino()};
+    let directory=bytes.parent().unwrap();let old=f._temp.path().join("original-stage-kept");
+    fs::rename(directory,&old).unwrap();fs::create_dir(directory).unwrap();
+    fs::set_permissions(directory,fs::Permissions::from_mode(0o700)).unwrap();
+    fs::rename(old.join("bytes"),&bytes).unwrap();
+    let mut manifest:Manifest=serde_json::from_slice(&fs::read(old.join("manifest.json")).unwrap()).unwrap();
+    manifest.fingerprint=Fingerprint::from(fs::metadata(&bytes).unwrap());
+    fs::write(directory.join("manifest.json"),serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert!(f.catalog.refresh().is_err(),"original stage-directory identity changed");
+    assert!(known(&f.catalog,&bytes));
+    assert!(matches!(f.catalog.lock().origins.get(&inode),Some(Observation::Ambiguous)),
+        "matching account/stage/file strings cannot replace the actual anchored origin");
+}

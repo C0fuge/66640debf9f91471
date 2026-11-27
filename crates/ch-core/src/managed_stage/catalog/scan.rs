@@ -117,10 +117,10 @@ impl Scan {
             if metadata.is_file() {
                 let id=fd::id(&file)?;
                 let owned=metadata.uid()==fd::uid() && metadata.nlink()==1 && id.mount==dir.identity.mount;
-                let observed=if owned {Observation::At(Location {
+                let observed=if owned {Observation::At(Box::new(Location {
                     namespace:[namespace[0],namespace[1],namespace[2],namespace[3],dir.identity],
                     key:key.clone(),name:child.as_bytes().to_vec(),file:id,
-                })} else {Observation::Ambiguous};
+                }))} else {Observation::Ambiguous};
                 self.record(&file,observed)?;
                 if !owned { valid=false; }
             } else { valid = false; }
