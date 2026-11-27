@@ -41,6 +41,43 @@ impl StagePublisher {
         })?
     }
 
+    /// Complete only local Ready publication from an actual unadmitted birth.
+    /// This never copies replacement bytes, spends a claim, enqueues or dispatches.
+    /// The owned bounded worker independently checks the actual namespace/inode,
+    /// hash and original owner. Parsed publication metadata alone grants no IO.
+    pub async fn recover_ready(&self,binding:AccountStorageBinding,stage:String)->Result<Manifest> {
+        if !super::manifest::hex(&stage,32) || !self.issuer.current(&binding.observation()) {
+            return Err(Error::TargetChanged);
+        }
+        self.protection.check(&binding)?;
+        let journal=self.clone();let stopped=self.jobs.stopped();
+        self.jobs.run(move|| {
+            use rusqlite::OptionalExtension;
+            let observed=binding.observation();let issuer=journal.issuer.clone();
+            let row_stage=stage.clone();
+            let result=tokio::runtime::Handle::current().block_on(journal.proofs.with_transaction(move|scope| {
+                let tx=scope.transaction();issuer.check_in(tx,&observed).map_err(|_|Error::TargetChanged)?;
+                let row:Option<Option<String>>=tx.query_row("SELECT CASE
+                    WHEN length(CAST(identity_json AS BLOB))<=65536 THEN identity_json END
+                    FROM managed_stage_publication WHERE stage_id=?1 AND account_id=?2 AND source_id IS NULL",
+                    rusqlite::params![row_stage,observed.owner().account_id],|r|r.get(0))
+                    .optional().map_err(|_|Error::Storage)?;
+                let identity=super::PublicationIdentity::from_persisted_json(&row.flatten().ok_or(Error::Integrity)?)?;
+                if identity.manifest().stage_id!=row_stage
+                    || identity.path()!=observed.namespace().join("uploads").join(&row_stage).join("bytes").as_path()
+                {return Err(Error::Integrity);}
+                identity.require_unlinked_in(tx)?;Ok(identity)
+            }));
+            let expected=match result {Ok(result)=>result?,Err(_)=>return Err(Error::Storage)};
+            super::VerifiedStageBinding::restore_ready(&binding,&expected,|_| {
+                if stopped.is_cancelled() || !journal.issuer.current(&binding.observation()) {
+                    return Err(Error::TargetChanged);
+                }
+                Ok(())
+            },||journal.check_identity_unadmitted(&binding,expected.clone()))
+        }).await.map_err(|_|Error::Unknown)?
+    }
+
     // Bounded negative check before allocating/copying any output bytes. The
     // final birth writer repeats capacity/history checks after actual byte sync;
     // an absent row here never grants provenance or reserves an inode.
@@ -78,21 +115,18 @@ impl StagePublisher {
         self.protection.check(&proof.owner)?;proof.recheck_ready()?;
         let identity=super::PublicationIdentity::capture(&proof.owner,&proof.dir,proof.manifest())?;
         let observed=proof.owner.observation();let issuer=self.issuer.clone();let stopped=self.jobs.stopped();
-        let result=self.proofs.with_transaction(move|scope| {
-            let tx=scope.transaction();issuer.check_in(tx,&observed).map_err(|_|Error::TargetChanged)?;
-            if stopped.is_cancelled() {return Err(Error::Cancelled);}
-            identity.require_unlinked_in(tx)?;
-            let m=identity.manifest();
-            let referenced:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_source
-                WHERE stage_id=?1 OR client_id=?2 OR path=?3)
-                OR EXISTS(SELECT 1 FROM outbox WHERE client_id=?2)",
-                rusqlite::params![m.stage_id,m.client_id,identity.path().to_str()],|r|r.get(0)).map_err(|_|Error::Storage)?;
-            if referenced {return Err(Error::Integrity);}
-            issuer.check_in(tx,&observed).map_err(|_|Error::TargetChanged)?;
-            Ok(())
-        }).await;
-        match result {Ok(result)=>result,Err(_)=>Err(Error::Unknown)}?;
+        self.proofs.with_transaction(move|scope|check_unadmitted(scope.transaction(),&issuer,&observed,&stopped,&identity))
+            .await.map_err(|_|Error::Unknown)??;
         proof.recheck_ready()
+    }
+
+    fn check_identity_unadmitted(&self,binding:&AccountStorageBinding,identity:super::PublicationIdentity)->Result<()> {
+        self.protection.check(binding)?;
+        let observed=binding.observation();let issuer=self.issuer.clone();let stopped=self.jobs.stopped();
+        let result=tokio::runtime::Handle::current().block_on(self.proofs.with_transaction(move|scope|
+            check_unadmitted(scope.transaction(),&issuer,&observed,&stopped,&identity)));
+        match result {Ok(result)=>result,Err(_)=>Err(Error::Unknown)}?;
+        Ok(())
     }
 
     fn record(&self,binding:&AccountStorageBinding,dir:&super::fd::Dir,manifest:&Manifest)
@@ -131,4 +165,20 @@ impl StagePublisher {
         }
     }
 
+}
+
+fn check_unadmitted(tx:&rusqlite::Connection,issuer:&HostStorageView,
+    observed:&crate::runtime::AccountStorageObservation,stopped:&tokio_util::sync::CancellationToken,
+    identity:&super::PublicationIdentity)->Result<()> {
+    issuer.check_in(tx,observed).map_err(|_|Error::TargetChanged)?;
+    if stopped.is_cancelled() {return Err(Error::Cancelled);}
+    identity.require_unlinked_in(tx)?;
+    let m=identity.manifest();
+    let referenced:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_source
+        WHERE stage_id=?1 OR client_id=?2 OR path=?3)
+        OR EXISTS(SELECT 1 FROM outbox WHERE client_id=?2)",
+        rusqlite::params![m.stage_id,m.client_id,identity.path().to_str()],|r|r.get(0)).map_err(|_|Error::Storage)?;
+    if referenced {return Err(Error::Integrity);}
+    issuer.check_in(tx,observed).map_err(|_|Error::TargetChanged)?;
+    Ok(())
 }

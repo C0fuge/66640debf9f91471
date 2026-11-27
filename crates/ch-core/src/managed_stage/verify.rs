@@ -39,7 +39,7 @@ impl VerifiedStageBinding {
     }
 
     fn verify_stage(owner:&AccountStorageBinding,stage_id:&str,limit:u64,
-        expected:Option<&super::StageIdentity>,mut checkpoint:impl FnMut(u64)->Result<()>) -> Result<Self> {
+        expected:Option<&super::StageIdentity>,checkpoint:impl FnMut(u64)->Result<()>) -> Result<Self> {
         if owner.is_revoked() { return Err(Error::TargetChanged); }
         if !hex(stage_id, 32) { return Err(Error::Integrity); }
         let dir = open_stage(owner, stage_id)?;
@@ -63,27 +63,89 @@ impl VerifiedStageBinding {
         if let Some(expected)=expected
             && super::StageIdentity::capture(&proof)?!=*expected { return Err(Error::StageChanged); }
         proof.recheck_ready()?;
+        proof.check_contents(checkpoint)?;
+        proof.recheck_ready()?;
+        Ok(proof)
+    }
+
+    // Shared actual byte scan. Missing-manifest recovery uses exactly the same
+    // hash/format/EOF and held-inode checks as ordinary Ready verification.
+    fn check_contents(&self,mut checkpoint:impl FnMut(u64)->Result<()>)->Result<()> {
         checkpoint(0)?;
         let mut hash = Sha256::new();
         let mut prefix = Vec::with_capacity(8);
         let mut buf = [0u8; 64 * 1024];
         let mut count = 0;
-        let mut reader = &proof.bytes;
-        while count < proof.manifest.size {
-            let size = (proof.manifest.size - count).min(buf.len() as u64) as usize;
+        let mut reader = &self.bytes;
+        while count < self.manifest.size {
+            let size = (self.manifest.size - count).min(buf.len() as u64) as usize;
             let n = reader.read(&mut buf[..size])?;
             if n == 0 { return Err(Error::Integrity); }
             count += n as u64;
-            proof.check_bytes()?;
+            self.check_bytes()?;
             checkpoint(count)?;
             hash.update(&buf[..n]);
             prefix.extend_from_slice(&buf[..n.min(8 - prefix.len())]);
         }
         if reader.read(&mut buf[..1])? != 0 { return Err(Error::Integrity); }
-        if format!("{:x}", hash.finalize()) != proof.manifest.sha256
-            || Format::detect(&prefix) != proof.manifest.format { return Err(Error::StageChanged); }
-        proof.recheck_ready()?;
-        Ok(proof)
+        if format!("{:x}", hash.finalize()) != self.manifest.sha256
+            || Format::detect(&prefix) != self.manifest.format { return Err(Error::StageChanged); }
+        self.check_bytes()
+    }
+
+    pub(super) fn restore_ready(owner:&AccountStorageBinding,expected:&super::PublicationIdentity,
+        mut checkpoint:impl FnMut(u64)->Result<()>,before:impl FnOnce()->Result<()>)->Result<Manifest> {
+        use std::io::Write;
+        let manifest=expected.manifest();let row=owner.owner();
+        if manifest.scope.account!=row.account_id || manifest.scope.plugin!=row.plugin_id
+            || manifest.scope.account_created!=row.created_at {return Err(Error::TargetChanged);}
+        let dir=open_stage(owner,&manifest.stage_id)?;
+        let stage_lock=dir.lock()?;
+        match fd::openat(dir.fd(),c"manifest.json",libc::O_PATH,0) {
+            Ok(_)=>{
+                // Never overwrite/reverse a Claim/Consumed/Discarded publication.
+                drop(stage_lock);drop(dir);
+                let proof=Self::verify_ready(owner,&manifest.stage_id,MAX_BYTES,checkpoint)?;
+                if super::PublicationIdentity::capture(owner,&proof.dir,proof.manifest())?!=*expected {
+                    return Err(Error::StageChanged);
+                }
+                before()?;proof.recheck_ready()?;
+                return Ok(proof.manifest.clone());
+            }
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+            Err(_)=>return Err(Error::Integrity),
+        }
+        let _mutation=owner.stage_mutations()?.begin()?;
+        let only_bytes=||->Result<()> {
+            let mut count=0;
+            for item in std::fs::read_dir(format!("/proc/self/fd/{}",dir.fd()))? {
+                if item?.file_name().as_bytes()!=b"bytes" || count!=0 {return Err(Error::Integrity);}
+                count+=1;
+            }
+            if count!=1 {return Err(Error::Integrity);}
+            dir.check()
+        };
+        only_bytes()?;
+        if super::PublicationIdentity::capture(owner,&dir,manifest)?!=*expected {return Err(Error::StageChanged);}
+        let probe=fd::openat(dir.fd(),c"bytes",libc::O_PATH,0)?;
+        check_bytes(&dir,manifest,&probe)?;
+        let bytes=fd::openat(dir.fd(),c"bytes",libc::O_RDONLY,0)?;
+        check_bytes(&dir,manifest,&bytes)?;
+        let proof=Self {dir:dir.clone(),manifest:manifest.clone(),bytes,_stage_lock:stage_lock,
+            owner:owner.retain_binding()};
+        proof.check_contents(&mut checkpoint)?;only_bytes()?;
+        let encoded=serde_json::to_vec(manifest).map_err(|_|Error::Integrity)?;
+        if encoded.len() as u64>MANIFEST_CAP {return Err(Error::Integrity);}
+        let mut metadata=fd::temp(&dir)?;metadata.write_all(&encoded)?;
+        metadata.flush()?;metadata.sync_all()?;
+        // Actual proof holds the original storage lease, byte FD and flock while
+        // the FULL writer performs metadata-only checks. No IO runs in that tx.
+        before()?;checkpoint(manifest.size)?;proof.check_bytes()?;only_bytes()?;
+        fd::link(&dir,&metadata,c"manifest.json")?;
+        dir.file.sync_all().map_err(|_|Error::Unknown)?;
+        dir.bind(c"manifest.json",&metadata).map_err(|_|Error::Unknown)?;
+        proof.recheck_ready().map_err(|_|Error::Unknown)?;
+        Ok(manifest.clone())
     }
 
     pub fn manifest(&self) -> &Manifest { &self.manifest }

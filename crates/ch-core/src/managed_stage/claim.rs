@@ -559,7 +559,9 @@ mod tests {
         assert!(f.disk().phase == Phase::Ready);
         assert!(f.outbox.get_by_client_id(CLIENT).unwrap().is_none());
         drop(binding);
-        tokio::time::timeout(std::time::Duration::from_secs(5), remove).await.unwrap().unwrap().unwrap();
+        assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5), remove).await.unwrap().unwrap(),
+            Err(crate::runtime::RuntimeError::SourceInUse)));
+        assert!(f.core.host().config().upload_dir("owner").join(STAGE).join("bytes").exists());
         f.close().await;
     }
 

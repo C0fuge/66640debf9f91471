@@ -50,9 +50,14 @@ async fn actual_writer_boundary_rechecks_pending_quarantined_and_closed_source_a
     let mut reservation=sources.reserve(observed.clone(),"pending-stage".into()).unwrap();
     assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone(),None).is_err());
     assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
-    // Only a definite no-new-source result removes this pending barrier.
+    // Clearing a pending reservation never grants an unobserved file input.
     reservation.no_new_source();drop(reservation);
-    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone(),None).unwrap());
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone(),None).is_err());
+    assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
+    // Text remains an independent positive control. The separate actual external
+    // frame test exercises a genuine catalog observation and original native run.
+    let text=serde_json::json!({"account_id":"owner","text":"synthetic text"});
+    assert!(sup.queue_call(&conn,"messages.edit",&text,encode(&Request::new(18,"messages.edit",&text)).unwrap(),None).unwrap());
     assert!(matches!(frames.try_recv(),Ok(Out::Frame(_))));
     let mut reservation=sources.reserve(observed,"unknown-stage".into()).unwrap();
     reservation.quarantine(None);drop(reservation);

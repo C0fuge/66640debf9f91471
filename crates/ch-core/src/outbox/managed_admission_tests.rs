@@ -50,6 +50,10 @@ impl Fixture {
             conversation_id:conversation,topic_id:"topic".into(),title:"Topic".into(),..Default::default()
         }).unwrap();
         let client=if publish {
+            // Create the account namespace through the real Host directory
+            // service. The exclusive publisher must not invent a missing owner root.
+            core.accounts().start("owner").await.unwrap();
+            core.host().stop_account("fixture","owner").await.unwrap();
             let binding=core.accounts().storage_binding_for("owner").await.unwrap();
             core.stage_publisher().copy(binding,crate::managed_stage::CopyDescription {
                 stage_id:STAGE.into(),scope:Scope {account:"owner".into(),plugin:"fixture".into(),
@@ -189,7 +193,7 @@ async fn actual_core_copy_exclusively_publishes_ready_without_source_registratio
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn publication_metadata_cannot_make_ordinary_owner_removal_forget_unproved_history() {
     // Empty actual namespace: the metadata-only guard must independently refuse.
-    let f=Fixture::setup(false,None,false).await;
+    let f=Fixture::empty().await;
     f.core.open_db().unwrap().conn().execute("INSERT INTO managed_stage_publication(stage_id,nonce,client_id,
         account_id,plugin_id,account_created_at,path,identity_json,created_at)
         SELECT ?1,?1,?1,account_id,plugin_id,created_at,'/synthetic/unproved/bytes','{}',0
@@ -1231,6 +1235,10 @@ async fn actual_other_owner_claim_invalidates_final_delete_epoch_but_not_folder_
 async fn fresh_admission_never_retrofits_legacy_ready_without_actual_protected_birth() {
     let f=Fixture::new(true).await;
     f.core.open_db().unwrap().conn().execute("DELETE FROM managed_stage_publication",[]).unwrap();
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let proof=VerifiedStageBinding::verify_ready(&binding,STAGE,1024,|_|Ok(())).unwrap();
+    assert!(f.core.stage_publisher().check_unadmitted_ready(&proof).await.is_err());drop(proof);
+    assert!(f.core.stage_publisher().recover_ready(binding,STAGE.into()).await.is_err());
     assert!(matches!(f.outbox.enqueue_managed_file_checked(f.claim().await).await,
         Err(ManagedAdmissionError::Rejected(OutboxError::AdmissionConflict))));
     f.assert_no_admission();f.assert_no_wire();assert!(f.stage().join("bytes").exists());
@@ -1272,7 +1280,25 @@ async fn cancellation_after_actual_birth_retains_bytes_and_reports_unknown_inste
     assert!(matches!(result,Err(crate::managed_stage::Error::Unknown)));
     assert_eq!(f.count("managed_stage_publication"),1);
     assert!(f.stage().join("bytes").exists());assert!(!f.stage().join("manifest.json").exists());
-    f.assert_no_admission();f.assert_no_wire();f.close().await;
+    f.assert_no_admission();f.assert_no_wire();
+    // Cold restore itself never reads/sends a source. Explicit Core-owned local
+    // recovery can finish this actual birth only after full independent checking.
+    f.outbox.shutdown().await;f.core.shutdown().await;
+    let mut config=CoreConfig::new(f.temp.path(),f.secrets.clone());
+    config.host=f.core.host().config().clone();config.autostart=false;
+    let core=Core::open(config).await.unwrap();
+    assert!(!f.stage().join("manifest.json").exists());
+    let binding=core.accounts().storage_binding_for("owner").await.unwrap();
+    let recovered=core.stage_publisher().recover_ready(binding.retain_binding(),STAGE.into()).await.unwrap();
+    assert_eq!(recovered.stage_id,STAGE);assert!(recovered.phase==Phase::Ready);
+    let again=core.stage_publisher().recover_ready(binding.retain_binding(),STAGE.into()).await.unwrap();
+    assert!(again==recovered);f.assert_no_admission();f.assert_no_wire();
+    let proof=VerifiedStageBinding::verify_ready(&binding,STAGE,1024,|_|Ok(())).unwrap();
+    let claimed=proof.claim(Intent {caption:String::new(),as_file:true,spoiler:false}).unwrap();drop(claimed);
+    let prior=std::fs::read(f.stage().join("manifest.json")).unwrap();
+    assert!(core.stage_publisher().recover_ready(binding.retain_binding(),STAGE.into()).await.is_err());
+    assert_eq!(std::fs::read(f.stage().join("manifest.json")).unwrap(),prior);
+    f.assert_no_admission();f.assert_no_wire();drop(binding);core.shutdown().await;f.close().await;
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
@@ -1296,5 +1322,27 @@ async fn full_publication_budget_refuses_before_reading_input_or_allocating_a_st
     },memory_copy(b"synthetic bytes"),|_|panic!("full budget must refuse before copy checkpoint")).await;
     assert!(matches!(result,Err(crate::managed_stage::Error::Busy)));
     assert!(!f.stage().exists());assert_eq!(f.count("managed_stage_publication"),256);
+    f.assert_no_admission();f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn local_recovery_never_replaces_changed_bytes_or_bridges_another_core_issuer() {
+    let f=Fixture::new(false).await;
+    let foreign=Fixture::new(false).await;
+    let binding=foreign.core.accounts().storage_binding_for("owner").await.unwrap();
+    assert!(matches!(f.core.stage_publisher().recover_ready(binding,STAGE.into()).await,
+        Err(crate::managed_stage::Error::TargetChanged)));
+    foreign.close().await;
+    // Synthetic interrupted local publication followed by byte corruption.
+    // The historical fact cannot manufacture a fresh matching inode/hash.
+    std::fs::remove_file(f.stage().join("manifest.json")).unwrap();
+    let path=f.stage().join("bytes");
+    std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&path,b"changed payload").unwrap();
+    std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o400)).unwrap();
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    assert!(f.core.stage_publisher().recover_ready(binding,STAGE.into()).await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(),b"changed payload");
+    assert!(!f.stage().join("manifest.json").exists());assert_eq!(f.count("managed_stage_publication"),1);
     f.assert_no_admission();f.assert_no_wire();f.close().await;
 }
