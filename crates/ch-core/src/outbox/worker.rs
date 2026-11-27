@@ -30,7 +30,9 @@ pub(super) async fn run(
         if stop.is_cancelled() {
             break;
         }
-        let due = match pass(&inner, &account_id, &plugin_id, &mut tasks) {
+        let (result,next_tasks)=pass_owned(inner.clone(),account_id.clone(),plugin_id.clone(),tasks).await;
+        tasks=next_tasks;
+        let due = match result {
             Ok(due) => due,
             Err(e) => {
                 warn!(error = %e, "outbox scheduling failed");
@@ -216,8 +218,10 @@ fn pass(
             }
             let result = if recovery {
                 if kind.is_idempotent() {
-                    let g = inner.ingest();
-                    requeue(inner, &g, &row, None, None)
+                    let recovery=row.clone();
+                    metadata_work(inner.clone(),move|owner| {
+                        let g=owner.ingest();requeue(owner,&g,&recovery,None,None)
+                    }).await
                 } else {
                     reconcile(
                         inner,
@@ -278,21 +282,41 @@ fn owned_attempt(g: &Ingest, row: &OutboxRow, plugin: &str) -> Result<Option<Out
 }
 
 
-// Core-bound result persistence belongs to the service once admitted, including
-// when shutdown aborts its network task. No queue scope follows network work.
+// Core-bound metadata persistence belongs to the service once admitted. The
+// actual blocking callback holds the queue only for finite local DB work.
+async fn metadata_work<T,F>(inner:Arc<Inner>,work:F)->Result<T>
+where T:Send+'static,F:FnOnce(&Arc<Inner>)->Result<T>+Send+'static {
+    #[cfg(target_os="linux")]
+    if let Some(metadata)=&inner.metadata {
+        let owner=inner.clone();let queue=metadata.queue.clone();
+        return metadata.jobs.run_wait_until(&inner.stopping,move|| {
+            let _scope=queue.read();work(&owner)
+        }).await.map_err(|_|super::OutboxError::Stopped)?;
+    }
+    work(&inner)
+}
+
+async fn pass_owned(inner:Arc<Inner>,account:String,plugin:String,tasks:JoinSet<()>)
+    ->(Result<Option<i64>>,JoinSet<()>) {
+    // Admission failure must return the original running task set so the actual
+    // scheduler can await shutdown. Dropping a rejected callback is not a drain.
+    let tasks=Arc::new(std::sync::Mutex::new(Some(tasks)));let owned=tasks.clone();
+    let result=metadata_work(inner,move|inner| {
+        // A queued scheduling pass may be revoked; an already accepted result
+        // write must still finish. Never share this veto with finish_owned.
+        if inner.stopping.is_cancelled() {return Err(super::OutboxError::Stopped);}
+        let mut tasks=owned.lock().unwrap_or_else(|error|error.into_inner());
+        pass(inner,&account,&plugin,tasks.as_mut().expect("owned scheduler task set"))
+    }).await;
+    let tasks=tasks.lock().unwrap_or_else(|error|error.into_inner()).take().expect("returned scheduler task set");
+    (result,tasks)
+}
+
 async fn finish_owned(
     inner:Arc<Inner>,plugin:String,row:OutboxRow,kind:OutboxKind,
     res:std::result::Result<serde_json::Value,HostError>,cancel:CancellationToken,
 )->Result<Option<&'static str>> {
-    #[cfg(target_os="linux")]
-    if let Some(results)=&inner.results {
-        let owner=inner.clone();let queue=results.queue.clone();
-        return results.jobs.run_wait_until(&inner.stopping,move|| {
-            let _scope=queue.read();
-            finish(&owner,&plugin,&row,kind,res,&cancel)
-        }).await.map_err(|_|super::OutboxError::Stopped)?;
-    }
-    finish(&inner,&plugin,&row,kind,res,&cancel)
+    metadata_work(inner,move|owner|finish(owner,&plugin,&row,kind,res,&cancel)).await
 }
 
 fn finish(
@@ -556,7 +580,7 @@ fn apply_success(
 }
 
 async fn reconcile(
-    inner: &Inner,
+    inner: &Arc<Inner>,
     row: &OutboxRow,
     kind: OutboxKind,
     plugin: &str,
@@ -574,19 +598,20 @@ async fn reconcile(
             since = None;
             false
         };
-        {
-            let g = inner.ingest();
-            if owned_attempt(&g, row, plugin)?.is_none() {
-                return Ok(());
-            }
-            if let Some(mid) = Inner::adopted_id(&g, row)? {
-                return confirm(inner, &g, row, &mid);
+        let observed=row.clone();let plugin=plugin.to_owned();let reason=reason.to_owned();
+        let finished=metadata_work(inner.clone(),move|owner| {
+            let g=owner.ingest();
+            if owned_attempt(&g,&observed,&plugin)?.is_none() {return Ok(true);}
+            if let Some(mid)=Inner::adopted_id(&g,&observed)? {
+                confirm(owner,&g,&observed,&mid)?;return Ok(true);
             }
             // Only text has a client_id field in the v1 wire contract.
-            if kind != OutboxKind::SendText || expired {
-                return fail(inner, &g, row, &Inner::unknown_outcome_error(reason));
+            if kind!=OutboxKind::SendText || expired {
+                fail(owner,&g,&observed,&Inner::unknown_outcome_error(&reason))?;return Ok(true);
             }
-        }
+            Ok(false)
+        }).await?;
+        if finished {return Ok(());}
         tokio::time::sleep(inner.policy.reconcile_poll.max(Duration::from_millis(1))).await;
     }
 }
@@ -622,6 +647,10 @@ mod result_queue_tests {
             ch_db::get_outbox(conn,id).unwrap().unwrap()
         };
         let queue=core.ingest().reference_queue();let guard=queue.exclusive_for_test().await;
+        let scheduler={let inner=outbox.inner.clone();tokio::spawn(async move {
+            let mut tasks=JoinSet::new();tasks.spawn(std::future::pending::<()>());
+            pass_owned(inner,"a".into(),"fixture".into(),tasks).await
+        })};
         let caller={let inner=outbox.inner.clone();let row=row.clone();tokio::spawn(async move {
             finish_owned(inner,"fixture".into(),row,OutboxKind::SendText,Ok(json!({"message":{
                 "id":"sent","chat_id":"chat","direction":"out","sent_at":"2026-01-01T00:00:00Z",
@@ -629,7 +658,7 @@ mod result_queue_tests {
             }})),CancellationToken::new()).await
         })};
         tokio::time::timeout(Duration::from_secs(2),async {
-            while queue.waiting_for_test()==0 {tokio::task::yield_now().await;}
+            while queue.waiting_for_test()<2 {tokio::task::yield_now().await;}
         }).await.unwrap();
         assert!(outbox.inner.ingest.try_lock().is_ok(),"queued result never holds ingest mutex");
         assert_eq!(outbox.get(row.id).unwrap().state,OutboxState::Sending);
@@ -640,6 +669,10 @@ mod result_queue_tests {
         let mut retry=Box::pin(outbox.shutdown());
         assert!(tokio::time::timeout(Duration::from_millis(30),&mut retry).await.is_err());
         drop(guard);tokio::time::timeout(Duration::from_secs(2),retry).await.unwrap();
+        let (result,mut tasks)=tokio::time::timeout(Duration::from_secs(2),scheduler).await.unwrap().unwrap();
+        assert!(matches!(result,Err(super::super::OutboxError::Stopped)));
+        assert_eq!(tasks.len(),1,"revoked scheduling returns the actual existing task set");
+        tasks.abort_all();assert!(tasks.join_next().await.unwrap().unwrap_err().is_cancelled());
         assert_eq!(outbox.get(row.id).unwrap().state,OutboxState::Sent);
         let conn=core.open_db().unwrap();
         let count:i64=conn.conn().query_row("SELECT COUNT(*) FROM message WHERE message_id='sent'",[],|r|r.get(0)).unwrap();

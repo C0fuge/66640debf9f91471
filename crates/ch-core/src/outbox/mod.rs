@@ -577,14 +577,14 @@ impl Drop for Lifetime {
 }
 
 #[cfg(target_os="linux")]
-struct ResultJobs {
+struct MetadataJobs {
     queue:crate::runtime::reference_queue::ReferenceQueue,
     jobs:Arc<crate::managed_sources::OwnedJobs>,
 }
 
 pub(crate) struct Inner {
     #[cfg(target_os="linux")]
-    results:Option<ResultJobs>,
+    metadata:Option<MetadataJobs>,
     ingest: Arc<Mutex<Ingest>>,
     transport: Arc<dyn SendTransport>,
     policy: OutboxPolicy,
@@ -678,7 +678,7 @@ impl Outbox {
             _lifetime: Arc::new(Lifetime(stopping.clone())),
             inner: Arc::new(Inner {
                 #[cfg(target_os="linux")]
-                results:None,
+                metadata:None,
                 ingest,
                 transport,
                 policy,
@@ -713,7 +713,7 @@ impl Outbox {
         {
             let sources = core.managed_sources();
             let inner = Arc::get_mut(&mut outbox.inner).expect("new outbox");
-            inner.results=Some(ResultJobs {queue:core.ingest().reference_queue(),jobs:crate::managed_sources::OwnedJobs::new()});
+            inner.metadata=Some(MetadataJobs {queue:core.ingest().reference_queue(),jobs:crate::managed_sources::OwnedJobs::new()});
             inner.managed = Some(managed_admission::Context {
                 sources, host: core.host().clone(), accounts: core.accounts().clone(),
             });
@@ -811,9 +811,9 @@ impl Outbox {
             let _ = worker.task.await;
         }
         #[cfg(target_os="linux")]
-        if let Some(results)=&self.inner.results
-            && results.jobs.drain().await.is_err() {
-            tracing::warn!("draining accepted outbox result writes failed");
+        if let Some(metadata)=&self.inner.metadata
+            && metadata.jobs.drain().await.is_err() {
+            tracing::warn!("draining accepted outbox metadata writes failed");
         }
     }
 
