@@ -31,6 +31,8 @@ const LIFECYCLE: &[&str] = &[
 
 struct Inner {
     #[cfg(target_os = "linux")]
+    source_inputs: Option<crate::managed_sources::OwnerBarriers>,
+    #[cfg(target_os = "linux")]
     directories: Option<Arc<super::directories::AccountDirectories>>,
     #[cfg(target_os = "linux")]
     owned_sink: Option<Arc<dyn super::OwnedEventSink>>,
@@ -153,6 +155,8 @@ impl HostHandle {
     ) -> HostHandle {
         let handle = HostHandle(Arc::new(Inner {
             #[cfg(target_os = "linux")]
+            source_inputs: None,
+            #[cfg(target_os = "linux")]
             directories: None,
             #[cfg(target_os = "linux")]
             owned_sink: None,
@@ -169,11 +173,12 @@ impl HostHandle {
     // supply its own negative catalog hook and counted directory-work lane.
     #[cfg(target_os = "linux")]
     pub(crate) fn for_core(config: HostConfig, sink: Arc<crate::runtime::IngestSink>, secrets: Arc<dyn SecretStore>,
-        mutations: crate::managed_stage::StageMutations, jobs: Arc<crate::managed_sources::OwnedJobs>,
-        captures: Arc<crate::managed_sources::OwnedJobs>) -> Self {
+        sources: &crate::managed_sources::ManagedSources) -> Self {
         let mut host = Self::new(config, sink.clone(), secrets);
         let inner = Arc::get_mut(&mut host.0).expect("new Host is uniquely owned");
-        inner.directories = Some(super::directories::AccountDirectories::new(mutations, jobs, captures));
+        inner.directories = Some(super::directories::AccountDirectories::new(
+            sources.stage_mutations(), sources.directory_jobs(), sources.lookups()));
+        inner.source_inputs = Some(sources.owner_barriers());
         inner.owned_sink = Some(sink);
         host
     }
@@ -628,6 +633,8 @@ impl HostHandle {
         // Set synchronously so a caller never observes `Stopped` with a live supervisor.
         e.state = PluginState::Starting;
         let sup = Supervisor {
+            #[cfg(target_os = "linux")]
+            source_inputs: self.0.source_inputs.clone(),
             #[cfg(target_os = "linux")]
             directories: self.0.directories.clone(),
             #[cfg(target_os = "linux")]

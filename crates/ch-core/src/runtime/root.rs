@@ -187,7 +187,7 @@ impl Core {
         managed_sources.initialize_catalog().await;
         #[cfg(target_os = "linux")]
         let host = HostHandle::for_core(host_config, sink.clone(), Arc::clone(&config.secrets),
-            managed_sources.stage_mutations(), managed_sources.directory_jobs(), managed_sources.lookups());
+            &managed_sources);
         #[cfg(not(target_os = "linux"))]
         let host = HostHandle::new(host_config, sink.clone(), Arc::clone(&config.secrets));
         #[cfg(target_os = "linux")]

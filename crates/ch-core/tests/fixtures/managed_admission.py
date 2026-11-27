@@ -19,13 +19,17 @@ for line in sys.stdin:
     if method == "initialize":
         result = {"api_version": "1.2.0", "capabilities": {
             "send.file": {"max_bytes": 1024}, "send.as_file": True, "send.spoiler": True,
+            "send.album": True, "edit": True, "edit.media": True,
+            "group.photo": True, "profile.edit": True,
         }}
     elif method == "messages.fetch_recent" and params.get("chat_id") == "disconnect":
         write({"jsonrpc": "2.0", "method": "status", "params": {
             "account_id": params["account_id"], "state": "disconnected", "reconnecting": False,
         }})
         result = {"messages": []}
-    elif method.startswith("messages."):
+    elif method.startswith("messages.") or method.startswith("x-fixture.") or method in (
+        "group.edit_photo", "profile.update",
+    ):
         Path(os.environ["CH_TEST_MANAGED_WIRE"]).write_text(method)
         write({"jsonrpc": "2.0", "id": frame["id"], "error": {
             "code": -32601, "message": "unexpected raw request", "data": {"code": "METHOD_NOT_FOUND"},

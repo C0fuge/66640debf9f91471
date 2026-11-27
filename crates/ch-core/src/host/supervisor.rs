@@ -667,6 +667,8 @@ struct DeliveryTarget {
 
 pub(crate) struct Supervisor {
     #[cfg(target_os = "linux")]
+    pub(super) source_inputs: Option<crate::managed_sources::OwnerBarriers>,
+    #[cfg(target_os = "linux")]
     pub(super) directories: Option<Arc<super::directories::AccountDirectories>>,
     #[cfg(target_os = "linux")]
     pub(super) owned_sink: Option<Arc<dyn OwnedEventSink>>,
@@ -705,6 +707,21 @@ enum Idle {
 }
 
 impl Supervisor {
+    // The ordinary raw/typed/tracked Call paths converge here at the actual
+    // writer queue. A local refusal leaves this connection healthy and sends no
+    // request/cancellation. Managed admission takes the same short reservation.
+    fn queue_call(&self, conn: &Conn, method: &str, params: &Value, frame: Vec<u8>)
+        -> Result<bool, HostError> {
+        #[cfg(target_os = "linux")]
+        if let Some(inputs) = &self.source_inputs {
+            return inputs.generic_frame(method, params, || conn.send_frame(frame))
+                .map_err(|_| HostError::code(ErrorCode::NotSupported,
+                    "generic file inputs are unavailable while managed sources are retained"));
+        }
+        let _ = (method, params);
+        Ok(conn.send_frame(frame))
+    }
+
     pub async fn run(mut self) {
         let (deliver_tx, deliver_rx) = mpsc::channel::<Delivery>(self.config.event_queue);
         let delivery = tokio::spawn(delivery_loop(
@@ -1153,7 +1170,7 @@ impl Supervisor {
                         }
                         let (tx, rx) = oneshot::channel();
                         let (done_tx, done_rx) = oneshot::channel::<()>();
-                        match encode(&Request::new(id, frame_method, params)) {
+                        match encode(&Request::new(id, &frame_method, &params)) {
                             Err(e) => { let _ = reply.send(Err(HostError::Json(e))); }
                             Ok(frame) => {
                                 conn.pending().insert(id, Pending {
@@ -1162,7 +1179,15 @@ impl Supervisor {
                                     deadline: Instant::now() + timeout, timeout,
                                     reply: tx, _done: Some(done_tx),
                                 });
-                                if !conn.send_frame(frame) {
+                                let queued = match self.queue_call(&conn, &frame_method, &params, frame) {
+                                    Ok(queued) => queued,
+                                    Err(error) => {
+                                        conn.pending().remove(&id);
+                                        let _ = reply.send(Err(error));
+                                        continue;
+                                    }
+                                };
+                                if !queued {
                                     conn.pending().remove(&id);
                                     let _ = reply.send(Err(HostError::code(ErrorCode::Internal, "plugin is not reading stdin")));
                                     break Outcome::Failed("plugin is not reading stdin".into());

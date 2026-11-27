@@ -165,6 +165,82 @@ async fn actual_claim_commits_source_echo_outbox_refs_and_parked_worker() {
     f.close().await;
 }
 
+fn assert_input_barrier(error: HostError) {
+    let HostError::Rpc(error) = error else { panic!("expected local source-input refusal"); };
+    assert_eq!(error.code(), ch_protocol::ErrorCode::NotSupported);
+    assert!(error.message.starts_with("generic file inputs are unavailable"), "{error:?}");
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn admitted_source_blocks_all_generic_file_routes_and_aliases_without_harming_text_calls() {
+    let f=Fixture::new(true).await;
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    let outside=f.temp.path().join("outside.bin");
+    let hardlink=f.temp.path().join("alias.bin");
+    let symlink=f.temp.path().join("link.bin");
+    std::fs::write(&outside,b"independent synthetic bytes").unwrap();
+    std::fs::hard_link(f.stage().join("bytes"),&hardlink).unwrap();
+    std::os::unix::fs::symlink(f.stage().join("bytes"),&symlink).unwrap();
+    // This deny-only first boundary deliberately refuses even independent input.
+    // No lexical, alias, existence, relative-path or account hint can grant access.
+    for path in [f.stage().join("bytes"),hardlink,symlink,outside,f.temp.path().join("missing"),"relative.bin".into()] {
+        for (method,params) in [
+            ("messages.send_file",serde_json::json!({"account_id":"owner","chat_id":"chat","path":path})),
+            ("messages.send_album",serde_json::json!({"account_id":"other","items":[{"path":path}]})),
+            ("messages.edit",serde_json::json!({"account_id":"owner","path":path})),
+            ("group.edit_photo",serde_json::json!({"account_id":"owner","path":path})),
+            ("profile.update",serde_json::json!({"account_id":"owner","photo_path":path})),
+            ("x-fixture.upload",serde_json::json!({"nested":[{"arbitrary":path}]})),
+        ] {
+            assert_input_barrier(f.core.host().call_raw("fixture",method,params,None).await.unwrap_err());
+            f.assert_no_wire();
+        }
+    }
+    for (method,params) in [
+        ("messages.send_file",serde_json::json!({})),
+        ("messages.send_file",serde_json::json!({"path":null})),
+        ("messages.send_album",serde_json::json!({"items":"malformed"})),
+        ("messages.edit",serde_json::json!({"path":{}})),
+        ("profile.update",serde_json::json!({"photo_path":false})),
+    ] {
+        assert_input_barrier(f.core.host().call_raw("fixture",method,params,None).await.unwrap_err());
+    }
+    let params=serde_json::json!({"account_id":"owner","path":f.stage().join("bytes")});
+    let error=f.core.host().call::<_,serde_json::Value>("fixture","messages.send_file",&params).await.unwrap_err();
+    assert_input_barrier(error);
+    let id=Arc::new(std::sync::OnceLock::new());
+    assert_input_barrier(f.core.host().call_raw_tracked("fixture","messages.send_file",params,None,Some(id)).await.unwrap_err());
+    f.assert_no_wire();
+    // Frozen protocol text/null-photo operations still reach the same healthy
+    // peer. Its METHOD_NOT_FOUND marker is a positive actual-wire control.
+    for (method,params) in [
+        ("messages.edit",serde_json::json!({"account_id":"owner","text":"/a/path/in/text"})),
+        ("group.edit_photo",serde_json::json!({"account_id":"owner","path":null})),
+        ("profile.update",serde_json::json!({"account_id":"owner","about":"/path","photo_path":null})),
+    ] {
+        let error=f.core.host().call_raw("fixture",method,params,None).await.unwrap_err();
+        assert_eq!(error.error_code(),Some(ch_protocol::ErrorCode::MethodNotFound));
+        assert_eq!(std::fs::read_to_string(f.temp.path().join("wire")).unwrap(),method);
+        std::fs::remove_file(f.temp.path().join("wire")).unwrap();
+    }
+    assert_eq!(f.outbox.get(item.id).unwrap().state,OutboxState::Queued);
+    assert_eq!(f.count("managed_dispatch"),0);
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn unregistered_legacy_file_flow_stays_explicitly_unchanged() {
+    let f=Fixture::new(true).await;
+    for method in ["messages.send_file","x-fixture.upload"] {
+        let error=f.core.host().call_raw("fixture",method,
+            serde_json::json!({"account_id":"owner","path":f.stage().join("bytes")}),None).await.unwrap_err();
+        assert_eq!(error.error_code(),Some(ch_protocol::ErrorCode::MethodNotFound));
+        assert_eq!(std::fs::read_to_string(f.temp.path().join("wire")).unwrap(),method);
+    }
+    assert_eq!(f.count("managed_source"),0);
+    f.close().await;
+}
+
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn exact_legacy_receipt_precedes_spent_changed_bytes_and_missing_run() {
     let f=Fixture::new(false).await;

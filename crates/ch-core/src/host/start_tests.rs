@@ -32,7 +32,37 @@ fn supervisor(core: &Core, registry: Arc<Registry>) -> Supervisor {
     let (_send, rx) = mpsc::channel(1);
     Supervisor { plugin_id: "fixture".into(), info: core.host().plugin("fixture").unwrap().info,
         config: Arc::new(core.host().config().clone()), registry, sink: Arc::new(NullSink),
-        secrets: Arc::new(MemorySecretStore::new()), directories: None, owned_sink: None, rx, failures: 0, last_failure: String::new() }
+        secrets: Arc::new(MemorySecretStore::new()), source_inputs: None, directories: None, owned_sink: None, rx, failures: 0, last_failure: String::new() }
+}
+
+#[tokio::test]
+async fn actual_writer_boundary_rechecks_pending_quarantined_and_closed_source_admission() {
+    let (_temp,core)=fixture().await;
+    let registry=core.host().test_registry();
+    let (conn,mut frames)=connection(&registry);
+    let mut sup=supervisor(&core,registry);
+    let sources=core.managed_sources();
+    sup.source_inputs=Some(sources.owner_barriers());
+    // Construct the frame before reserving, as with a previously queued Call.
+    let params=serde_json::json!({"account_id":"owner","path":"/synthetic/input"});
+    let frame=encode(&Request::new(17,"messages.send_file",&params)).unwrap();
+    let observed=core.accounts().storage_binding_for("owner").await.unwrap().observation();
+    let mut reservation=sources.reserve(observed.clone(),"pending-stage".into()).unwrap();
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone()).is_err());
+    assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
+    // Only a definite no-new-source result removes this pending barrier.
+    reservation.no_new_source();drop(reservation);
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone()).unwrap());
+    assert!(matches!(frames.try_recv(),Ok(Out::Frame(_))));
+    let mut reservation=sources.reserve(observed,"unknown-stage".into()).unwrap();
+    reservation.quarantine(None);drop(reservation);
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame).is_err());
+    assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
+    sources.close();
+    let params=serde_json::json!({"photo_path":"/synthetic/other"});
+    assert!(sup.queue_call(&conn,"profile.update",&params,vec![b'\n']).is_err());
+    assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
+    core.shutdown().await;
 }
 
 fn finish(kind: &str, core: &Core, registry: &Arc<Registry>, conn: &Arc<Conn>, id: i64) {

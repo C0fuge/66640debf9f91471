@@ -31,6 +31,23 @@ pub(crate) struct OwnerBarriers(Arc<Mutex<State>>,Arc<PrivateByteCatalog>);
 impl OwnerBarriers {
     pub(super) fn new(catalog:Arc<PrivateByteCatalog>) -> Self { Self(Arc::new(Mutex::new(State::default())),catalog) }
 
+    // Temporary deny-only boundary until the managed producer route and exact
+    // external-input classifier are composed. No path/inode or reader authority
+    // follows from an empty registry. Legacy unregistered flow is unchanged.
+    // Publication is the actual nonblocking writer.try_send, under the SAME
+    // reservation lock as pending admission. No DB/FS/await runs in this closure.
+    pub(crate) fn generic_frame<R>(&self, method: &str, params: &serde_json::Value,
+        publish: impl FnOnce() -> R) -> Result<R, Error> {
+        if !file_input(method, params) { return Ok(publish()); }
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.stopped || !state.pending.is_empty() || !state.records.is_empty() {
+            return Err(Error::Busy);
+        }
+        let result = publish();
+        drop(state);
+        Ok(result)
+    }
+
     pub(super) fn reserve(&self, owner: AccountStorageObservation, stage: String) -> Result<Reservation, Error> {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if state.stopped || owner.is_revoked() || state.closing.contains_key(owner.namespace()) {
@@ -66,6 +83,19 @@ impl OwnerBarriers {
     }
     #[cfg(test)]
     pub(crate) fn closing_count(&self) -> usize { self.0.lock().unwrap().closing.len() }
+}
+
+fn file_input(method: &str, params: &serde_json::Value) -> bool {
+    match method {
+        // Required inputs: malformed/missing/relative inputs do not bypass the
+        // barrier. Album members need not be traversed to deny this whole route.
+        "messages.send_file" | "messages.send_album" => true,
+        "messages.edit" | "group.edit_photo" => params.get("path").is_some_and(|v| !v.is_null()),
+        "profile.update" => params.get("photo_path").is_some_and(|v| !v.is_null()),
+        // Vendor inputs have no reviewed schema; never infer independence from
+        // a key name or allow arbitrary nesting to escape this deny boundary.
+        _ => method.starts_with("x-"),
+    }
 }
 
 pub(crate) struct OwnerClose {
