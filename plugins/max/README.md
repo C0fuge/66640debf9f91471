@@ -93,6 +93,12 @@ commit leaves uncertainty. It must be reconciled manually; it is never retried a
 a known-safe send. Error replies use `NETWORK` with `outcome: "unknown"` and
 `retry_safe: false`, never the safe pre-send `UNAVAILABLE` code.
 
+Basic reply acknowledgments must contain the observed REPLY link with the exact
+source message and parent chat; missing, foreign or contradictory metadata stays
+unknown. This check runs before correlation/journal confirmation and before reusing
+an older confirmed journal receipt. An old receipt without the observed relation
+never permits another send or a plain-text fallback.
+
 The upstream `send_message` generates its own `cid` and parses Markdown. The adapter
 instead uses `SendMessagePayload`/`SendMessagePayloadMessage` with empty elements,
 then the same `App.invoke(MSG_SEND)` and response model path. This preserves literal

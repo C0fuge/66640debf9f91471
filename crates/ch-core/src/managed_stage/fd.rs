@@ -184,3 +184,48 @@ impl Dir {
         Ok(())
     }
 }
+
+pub(super) fn temp(dir: &Dir) -> Result<File> {
+    Ok(openat(
+        dir.fd(),
+        c".",
+        libc::O_RDWR | libc::O_TMPFILE,
+        0o600,
+    )?)
+}
+pub(super) fn link(dir: &Dir, f: &File, name: &CStr) -> Result<()> {
+    let source = cname(format!("/proc/self/fd/{}", f.as_raw_fd()).as_bytes())?;
+    // SAFETY: link exactly the held, unnamed inode without replacing any name.
+    if unsafe {
+        libc::linkat(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            dir.fd(),
+            name.as_ptr(),
+            libc::AT_SYMLINK_FOLLOW,
+        )
+    } != 0
+    {
+        return Err(Error::Storage);
+    }
+    Ok(())
+}
+pub(super) fn unlink(dir: &Dir, name: &CStr, expected: Identity, directory: bool) -> Result<()> {
+    dir.check()?;
+    if named(dir, name)? != expected {
+        return Err(Error::StageChanged);
+    }
+    let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
+    // SAFETY: directory is held and only an identity-checked fixed entry is removed.
+    if unsafe { libc::unlinkat(dir.fd(), name.as_ptr(), flags) } != 0 {
+        return Err(Error::Storage);
+    }
+    Ok(())
+}
+pub(super) fn replace(dir: &Dir, from: &CStr, to: &CStr) -> Result<()> {
+    // SAFETY: both names are constants under the same held directory.
+    if unsafe { libc::renameat(dir.fd(), from.as_ptr(), dir.fd(), to.as_ptr()) } != 0 {
+        return Err(Error::Storage);
+    }
+    Ok(())
+}

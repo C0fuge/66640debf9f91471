@@ -50,7 +50,10 @@ def test_literal_text_send_uses_one_pinned_payload_and_no_markdown_parser(tmp_pa
 
         async def invoke(opcode, payload):
             calls.append((opcode, payload))
-            return SimpleNamespace(payload=raw_message().model_copy(update={"text": text}).model_dump(by_alias=True))
+            ack = raw_message().model_copy(update={"text": text}).model_dump(by_alias=True)
+            ack["link"] = {"type": "REPLY", "chatId": 10,
+                           "message": raw_message().model_copy(update={"id": 19}).model_dump(by_alias=True)}
+            return SimpleNamespace(payload=ack)
 
         adapter = PyMaxAdapter(None, store, Settings(30, None), None)
         adapter.me = 1

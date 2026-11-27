@@ -581,7 +581,7 @@ impl Job {
         });
         #[cfg(test)]
         self.s.at("committed")?;
-        let consumed = claim.consume()?;
+        let consumed = claim.consume(&self.s.outbox)?;
         self.s.inventory_changed();
         self.update(|e| {
             e.bind(Binding {

@@ -2,8 +2,6 @@ use super::{Error, MAX_BYTES, Result, fd::{self, Dir, Policy}, manifest::{Finger
 use crate::runtime::AccountStorageBinding;
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, os::{fd::BorrowedFd, unix::{ffi::OsStrExt, fs::MetadataExt}}, sync::Arc};
-use tokio::sync::OwnedRwLockReadGuard;
-use tokio_util::sync::CancellationToken;
 
 const MANIFEST_CAP: u64 = 64 * 1024;
 
@@ -15,12 +13,11 @@ const MANIFEST_CAP: u64 = 64 * 1024;
 /// fn duplicate(v: &VerifiedStageBinding) -> VerifiedStageBinding { v.clone() }
 /// ```
 pub struct VerifiedStageBinding {
-    dir: Arc<Dir>,
-    manifest: Manifest,
-    bytes: File,
+    pub(super) dir: Arc<Dir>,
+    pub(super) manifest: Manifest,
+    pub(super) bytes: File,
     _stage_lock: File,
-    _owner_guard: Arc<OwnedRwLockReadGuard<()>>,
-    revoked: CancellationToken,
+    pub(super) owner: AccountStorageBinding,
 }
 
 impl VerifiedStageBinding {
@@ -48,7 +45,7 @@ impl VerifiedStageBinding {
         let bytes = fd::openat(dir.fd(), c"bytes", libc::O_RDONLY, 0)?;
         check_bytes(&dir, &manifest, &bytes)?;
         let proof = Self { dir, manifest, bytes, _stage_lock: stage_lock,
-            _owner_guard: owner.retain_guard(), revoked: owner.revocation() };
+            owner: owner.retain_binding() };
         proof.recheck_ready()?;
         checkpoint(0)?;
         let mut hash = Sha256::new();
@@ -89,8 +86,8 @@ impl VerifiedStageBinding {
         Ok(())
     }
 
-    fn check_bytes(&self) -> Result<()> {
-        if self.revoked.is_cancelled() { return Err(Error::TargetChanged); }
+    pub(super) fn check_bytes(&self) -> Result<()> {
+        if self.owner.is_revoked() { return Err(Error::TargetChanged); }
         check_bytes(&self.dir, &self.manifest, &self.bytes)
     }
 }
@@ -120,7 +117,7 @@ fn open_stage(owner: &AccountStorageBinding, id: &str) -> Result<Arc<Dir>> {
     Ok(dir)
 }
 
-fn check_layout(dir: &Dir) -> Result<()> {
+pub(super) fn check_layout(dir: &Dir) -> Result<()> {
     let mut count = 0;
     for item in std::fs::read_dir(format!("/proc/self/fd/{}", dir.fd()))? {
         let name = item?.file_name();
@@ -143,6 +140,10 @@ fn check_bytes(dir: &Dir, manifest: &Manifest, file: &File) -> Result<()> {
 }
 
 fn read_manifest(dir: &Dir) -> Result<Manifest> {
+    read_manifest_file(dir).map(|(manifest, _)| manifest)
+}
+
+pub(super) fn read_manifest_file(dir: &Dir) -> Result<(Manifest, File)> {
     let probe = fd::openat(dir.fd(), c"manifest.json", libc::O_PATH, 0)?;
     let meta = probe.metadata()?;
     if fd::id(&probe)?.mount != dir.identity.mount || !meta.is_file()
@@ -159,5 +160,5 @@ fn read_manifest(dir: &Dir) -> Result<Manifest> {
     }
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| Error::Integrity)?;
     manifest.check()?;
-    Ok(manifest)
+    Ok((manifest, file))
 }

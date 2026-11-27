@@ -124,6 +124,18 @@ impl Ingest {
         Ok(self
             .local_tx(account_id, "local.sent", |conn, out, now| {
                 self.check_account(conn, plugin_id, account_id)?;
+                if let Some(cid) = client_id
+                    && let Some(item) = ch_db::get_outbox_by_client_id(conn, cid)?
+                    && item.method == "messages.send"
+                    && item.params.get("reply_to").is_some_and(|value| !value.is_null())
+                    && (item.account_id != account_id || messages.len() != 1
+                        || messages[0].direction != Direction::Out
+                        || !super::send_destination_matches(conn, &item, &messages[0])?)
+                {
+                    // Validate the actual observation before a requested local
+                    // echo can be rekeyed/merged, or a foreign stub can be made.
+                    return Err(ch_db::Error::Invalid("send result did not confirm the retained reply".into()).into());
+                }
                 if let (Some(cid), Some(first)) = (client_id, messages.first()) {
                     let (conv_id, _) =
                         self.conversation_or_stub(conn, account_id, &first.chat_id, now)?;

@@ -1,29 +1,35 @@
-# Verified Core stage proof; managed-reference metadata candidate
+# Source ownership and text-reply confirmation candidate
 
-Verified source `50705de51f323b66a882df8db8c6ebe823d816d2` passed
+Last verified source `50705de51f323b66a882df8db8c6ebe823d816d2` passed
 [Verify45863782700](https://github.com/C0fuge/66640debf9f91471/actions/runs/45863782700).
 Rust workspace350 including doctests, native/private-bus, no-default/Clippy/build,
-UI89, SDK89, fake9, MAX177, Telegram223, conformance145/0/71 and all eight Chromium
-scenarios passed. All427 source files matched. Production admission independently
-verifies private stage ancestry/inode/mode/hash in Core under an Accounts-issued
-opaque owner/Gate binding; bounded non-Clone proof remains with the one-use claim.
-App36 operations; Telegram43/120 methods. API1.2 source promise is verified.
+UI89, SDK89, fake9, MAX177, Telegram223, conformance145/0/71 and eight Chromium
+scenarios passed. App36 operations; Telegram43/120 methods. API1.2 source promise
+and Accounts-bound Core Ready-stage verification are verified.
 
-Current candidate adds migration0005 and conservative reverse-reference metadata.
-Path-bearing typed writers acknowledge exact revisions in their own savepoints;
-SQL triggers cover other connections/direct writes, leaving dirty/blocked rows
-when proof is incomplete. Resumable backfill visits at most128 rows/1MiB input;
-per-source reads use indices and at most256 actual refs/1MiB. Tests include100000
-unrelated synthetic messages, revision reuse, malformed payloads and cursor bounds.
-Root and independent FS-owner reviews found no blocker for this inert milestone;
-full exact-source Rust/Clippy/native/browser verification is pending.
+Current reviewed batch contains three saved stages and their regression fixes:
+- Migration0005 and conservative reverse-reference metadata. Snapshot comparison
+  now validates actual live slots/owner/revision relationships, then normalizes
+  surrogate keys and allocator revisions. Genuine thumb_path slots are recognized
+  structurally without stripping JSON path quotes. Semantic state still compares.
+- Core owns the actual durable Ready-to-Claimed transition and privately mints a
+  non-Clone live claim. Consumed bookkeeping requires exact canonical retained
+  admission; request paths, byte handles and original owner leases remain scoped.
+- Bare text replies require observed exact relation/topic before Telegram/MAX
+  correlation and Core adoption. Telegram sends once and reads at most one known
+  sent ID; MAX validates new acknowledgments and old journal receipts. Missing or
+  ambiguous relation remains unknown, with no resend or plain-text fallback.
+  Echo pointer ownership prevents a reused SQL row ID from confirming or changing
+  an unrelated message. Quote/comment/plain-send behavior remains unchanged.
 
-Literal refs remain unresolved: they are not inode/alias/reader or unlink proof.
-No production source registration, dispatch certificate, journaled deletion,
-cleanup command or UI control is enabled. Oversized/ambiguous payloads and aliases
-still require real Core reader/writer/source gates before activation. Atomic new
-source+outbox admission and existing Telegram/MAX reply-confirmation hardening
-remain separate development. Reply UI and mute are pending. All fixtures are
-synthetic and isolated; no real credentials/history/chooser/source modification
-or legacy migration. Heavy checks stay remote with power-saver unchanged. Separate
-platform threads, left-aligned bubbles and accent-only recoloring remain intact.
+Independent source reviews found no blocker. Full exact-source CI is pending;
+no candidate stage is claimed verified from source review alone. Reply UI and
+owner-bound history work are separate, unverified development.
+
+No production managed-source registration, dispatch certificate, journaled unlink,
+cleanup command/control or new operation is enabled. Literal refs are not inode/
+alias/source-lifetime proof. All fixtures are synthetic in temporary storage;
+no real account, credentials, history, chooser, original-source modification or
+legacy migration is included. Heavy gates run remotely; power-saver unchanged.
+Platform threads remain separate, bubbles left-aligned and accents limited to
+accent tokens. Docs-only source commits may not have a dedicated CI run.

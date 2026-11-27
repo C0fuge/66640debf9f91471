@@ -217,6 +217,24 @@ def test_send(core):
     assert core.shutdown() == 0
 
 
+def test_basic_reply_requires_observed_relation_before_correlation(core):
+    start(core)
+    p = {"account_id": "a", "chat_id": "17", "text": "literal", "client_id": "reply-ok",
+         "reply_to": {"message_id": "7"}}
+    sent = core.call("messages.send", p)["message"]
+    assert sent["reply_to"]["message_id"] == "7"
+    echo = core.event("messages.upsert", where=lambda e: e["messages"][0].get("ext") is not None)
+    assert echo["messages"][0] == sent
+    for text in ("reply-wrong", "reply-read-flood"):
+        key = "key-" + text
+        err = core.error("messages.send", {**p, "text": text, "client_id": key})
+        assert err["data"] == {"code": "NETWORK", "outcome": "unknown", "retry_safe": False}
+        assert not any(message.get("ext", {}).get("telegram", {}).get("client_id") == key
+                       for event in core.all_events if event["method"] == "messages.upsert"
+                       for message in event["params"]["messages"])
+    assert core.shutdown() == 0
+
+
 def test_eof_during_sign_in(core):
     start(core, mode=2)
     core.call("auth.begin", {"account_id": "a", "method": "phone_code"})

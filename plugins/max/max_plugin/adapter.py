@@ -327,9 +327,11 @@ class PyMaxAdapter:
         # actual payload models + same invoke/response path for literal plain text.
         # Exactly one request. cid is NOT claimed to provide server deduplication.
         from pymax.api.messages.payloads import ReplyLink, SendMessagePayload, SendMessagePayloadMessage
-        from pymax.api.response import require_payload_model
+        from pymax.api.response import require_payload_dict, require_payload_model
         from pymax.protocol import Opcode
         from pymax.types.domain.message import Message
+        if reply_to is not None and type(self.me) is not int:
+            raise AuthRequired("MAX account identity is unavailable")
         cid = max(int(time.time() * 1000), self.store.identity.get("last_cid", 0) + 1)
         self.store.identity["last_cid"] = cid
         self.store.save_identity()
@@ -337,6 +339,8 @@ class PyMaxAdapter:
                     message=SendMessagePayloadMessage(text=text, cid=cid, elements=[], attaches=[],
                               link=ReplyLink(message_id=reply_to) if reply_to is not None else None))
         response = await self.client._app.invoke(Opcode.MSG_SEND, payload.to_payload())
+        if reply_to is not None:
+            validate_reply_ack(require_payload_dict(response), chat_id, reply_to, self.me, cid)
         raw = require_payload_model(response, Message)
         result = mapping.message(raw, self.me, chat_id)
         if result.chat_id != str(chat_id) or raw.sender != self.me:
@@ -401,6 +405,31 @@ class PyMaxAdapter:
                 or not isinstance(rows, list) or not rows or len(rows) > 200
                 or {response_id(value) for value in rows} != set(message_ids)):
             raise PluginError("MAX deletion acknowledgment did not confirm the selected messages")
+
+
+def validate_reply_ack(row: Any, chat_id: int, reply_to: int, me: int, cid: int) -> None:
+    """Validate observed wire relation before models can coerce/omit its fields."""
+    if not isinstance(row, dict):
+        raise PluginError("MAX did not confirm the sent reply")
+    response_id(row.get("id"))
+    if (any(key in row for key in ("chat_id", "post_id", "delayed_attributes"))
+            or row.get("chatId") is not None and response_id(row["chatId"]) != chat_id
+            or response_id(row.get("sender")) != me
+            or row.get("type") != "USER" or row.get("postId") is not None
+            or row.get("delayedAttributes") is not None or row.get("status") == "REMOVED"
+            or row.get("cid") is not None and response_id(row["cid"]) != cid):
+        raise PluginError("MAX did not confirm the sent reply scope")
+    link = row.get("link")
+    if (not isinstance(link, dict) or link.get("type") != "REPLY" or "chat_id" in link
+            or response_id(link.get("chatId")) != chat_id):
+        raise PluginError("MAX did not confirm the reply conversation")
+    source = link.get("message")
+    if (not isinstance(source, dict) or response_id(source.get("id")) != reply_to
+            or any(key in source for key in ("chat_id", "post_id", "delayed_attributes"))
+            or source.get("chatId") is not None and response_id(source["chatId"]) != chat_id
+            or source.get("postId") is not None or source.get("delayedAttributes") is not None
+            or source.get("status") == "REMOVED"):
+        raise PluginError("MAX did not confirm the reply message")
 
 
 def response_id(value: Any) -> int:

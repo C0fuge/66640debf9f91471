@@ -279,7 +279,7 @@ fn restart_exact_scoping_one_live_claim_and_permanent_charge() {
     assert!(claimed.manifest().phase == Phase::Claimed(intent()));
     assert_eq!(claimed.checked_path().unwrap(), recovered.managed_path());
     assert!(claimed.checked_path().is_err());
-    let consumed = claimed.consume().unwrap();
+    let consumed = claimed.consume_for_test().unwrap();
     assert!(consumed.manifest().phase == Phase::Consumed(intent()));
     assert!(consumed.verify(MAX_BYTES, |_| Ok(())).is_err());
     assert!(consumed.discard_ready(|_, _| Ok(true)).is_err());

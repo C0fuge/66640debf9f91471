@@ -86,18 +86,19 @@ def test_live_updates_and_partial_payloads():
 
 
 def test_send_selects_only_correlated_update():
-    params = dto.MessagesSendParams(account_id="a", chat_id="17", text="fixture", client_id="key",
+    params = dto.MessagesSendParams(account_id="a", chat_id="-1000000000008", text="fixture", client_id="key",
                                     topic_id="4", reply_to=dto.ReplyTarget(message_id="7"))
     async def rpc_call(request):
         assert request.reply_to.reply_to_msg_id == 7 and request.reply_to.top_msg_id == 4
         assert request.random_id == random_id(params)
         return tl.Updates([tl.UpdateMessageID(52, request.random_id), tl.UpdateNewMessage(row(51), 1, 1),
                            tl.UpdateNewMessage(row(52, tl.PeerChannel(4)), 1, 1),
-                           tl.UpdateNewMessage(row(52, out=True), 1, 1)], [], [], datetime.now(UTC), 1)
+                           tl.UpdateNewChannelMessage(row(52, tl.PeerChannel(8), out=True,
+                               reply_to=tl.MessageReplyHeader(reply_to_msg_id=7, reply_to_top_id=4, forum_topic=True)), 1, 1)], [], [], datetime.now(UTC), 1)
     client = AsyncMock(side_effect=rpc_call)
-    client.get_input_entity.return_value = tl.InputPeerUser(17, 0)
+    client.get_input_entity.return_value = tl.InputPeerChannel(8, 0)
     result = asyncio.run(send(client, params))
-    assert (result.message.id, result.message.chat_id, result.message.ext) == ("52", "17", {"telegram": {"client_id": "key"}})
+    assert (result.message.id, result.message.chat_id, result.message.ext) == ("52", "-1000000000008", {"telegram": {"client_id": "key"}})
 
 def test_qr_refresh_subscribes_before_display():
     async def exercise():

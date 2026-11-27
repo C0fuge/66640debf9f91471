@@ -147,6 +147,30 @@ fn invalid_duplicate_oversize_and_extension_paths_are_blocked_without_data_loss(
 }
 
 #[test]
+fn thumbnail_slot_policy_uses_json_parent_and_key_not_fullkey_quoting() {
+    let db = database();
+    db.conn().execute(
+        "INSERT INTO message(conversation_id,message_id,direction,sent_at,created_at,updated_at,media_json,link_preview_json)
+         VALUES(1,'thumbnails','in',0,0,0,?1,?2)",
+        params![json!({"kind":"photo","path":"/ordinary/full","thumb_path":"/ordinary/thumb"}).to_string(),
+            json!({"thumb_path":"/ordinary/preview","media":{"path":"/ordinary/nested-full","thumb_path":"/ordinary/nested-thumb"}}).to_string()],
+    ).unwrap();
+    let id = db.conn().last_insert_rowid();
+    let coverage = drain(&db);
+    assert!(!coverage.blocked);
+    assert_eq!(state(db.conn(), "message", id), "clean");
+    let refs: i64 = db.conn().query_row(
+        "SELECT count(*) FROM managed_ref WHERE consumer_kind='message' AND consumer_key=?1",
+        [id.to_string()], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(refs, 5);
+    // An identically named field in an unknown parent remains unsupported.
+    db.conn().execute("UPDATE message SET media_json=?1 WHERE id=?2",
+        params![json!({"future":{"thumb_path":"/ordinary/unknown"}}).to_string(), id]).unwrap();
+    assert_eq!(state(db.conn(), "message", id), "blocked");
+}
+
+#[test]
 fn retired_literal_paths_reject_new_message_preview_album_and_scalar_refs() {
     let db = database();
     source(db.conn(),SOURCE);

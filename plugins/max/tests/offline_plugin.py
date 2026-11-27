@@ -84,6 +84,12 @@ class OfflineClient:
         if text == "uncertain":
             raise ConnectionError("synthetic-private-token-do-not-log")
         message = self.msg(str(100 + count), text)
+        if reply_to is not None:
+            if self.scenario == "reply-pending":
+                await self.event("conversation", T.Conversation(id="10", kind="dm", title="Reply pending"))
+                await asyncio.Future()
+            if self.scenario != "reply-missing":
+                message.reply_to = T.ReplyRef(message_id=str(reply_to), chat_id="99" if self.scenario == "reply-foreign" else str(chat_id))
         if text == "live":
             await self.event("message", self.msg("200", "live incoming", "in"))
             await self.event("conversation", T.Conversation(id="10", kind="dm", title="Updated"))

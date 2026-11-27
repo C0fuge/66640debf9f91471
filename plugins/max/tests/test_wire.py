@@ -1,6 +1,8 @@
 import json
 import time
 
+import pytest
+
 from max_plugin.state import PrivateState
 
 A = {"account_id": "max"}
@@ -98,6 +100,63 @@ def test_unknown_send_survives_process_restart_without_retry(core_factory, tmp_p
     assert state["send_count"] == 2
     assert "synthetic-private-token-do-not-log" not in core.stderr_text + again.stderr_text
     assert again.shutdown() == 0
+
+
+@pytest.mark.parametrize("relation", ["valid", "missing", "wrong-id", "foreign-chat", "malformed-time"])
+def test_confirmed_reply_journal_requires_observed_relation_before_reuse(core_factory, tmp_path, relation):
+    core = core_factory()
+    core.start()
+    core.event("status", state="auth_required")
+    sign_in(core)
+    params = {**A, "chat_id": "10", "text": "literal", "client_id": "reply-once", "reply_to": {"message_id": "19"}}
+    sent = core.call("messages.send", params)
+    assert sent["message"]["reply_to"] == {"message_id": "19", "chat_id": "10"}
+    assert core.shutdown() == 0
+    path = tmp_path / "accounts/max/state/sends.json"
+    journal = json.loads(path.read_text())
+    entry = next(iter(journal.values()))
+    if relation == "missing": entry["message"].pop("reply_to")
+    elif relation == "wrong-id": entry["message"]["reply_to"]["message_id"] = "18"
+    elif relation == "foreign-chat": entry["message"]["reply_to"]["chat_id"] = "99"
+    elif relation == "malformed-time": entry["message"]["sent_at"] = "999999999999999999999-01-01T00:00:00Z"
+    path.write_text(json.dumps(journal))
+    again = core_factory()
+    again.start()
+    again.event("status", state="connected")
+    if relation == "valid":
+        assert again.call("messages.send", params) == sent
+    else:
+        assert again.error("messages.send", params)["data"] == {"code": "NETWORK", "outcome": "unknown", "retry_safe": False}
+        assert not any(message.get("ext", {}).get("max", {}).get("client_id") == "reply-once"
+                       for event in again.all_events if event["method"] == "messages.upsert"
+                       for message in event["params"]["messages"])
+    identity = json.loads((tmp_path / "accounts/max/state/identity.json").read_text())
+    assert identity["send_count"] == 1
+    assert again.shutdown() == 0
+
+
+@pytest.mark.parametrize("scenario", ["reply-missing", "reply-foreign", "reply-pending"])
+def test_unconfirmed_reply_never_gets_correlated_or_replayed(core_factory, tmp_path, scenario):
+    core = core_factory(scenario)
+    core.start()
+    core.event("status", state="auth_required")
+    sign_in(core)
+    params = {**A, "chat_id": "10", "text": "literal", "client_id": "reply-unknown", "reply_to": {"message_id": "19"}}
+    if scenario == "reply-pending":
+        request = core.send_request("messages.send", params)
+        core.event("conversations.upsert", lambda p: p["conversations"][0].get("title") == "Reply pending")
+        core.cancel(request)
+        error = core.response(request)["error"]
+    else:
+        error = core.error("messages.send", params)
+    assert error["data"] == {"code": "NETWORK", "outcome": "unknown", "retry_safe": False}
+    assert core.error("messages.send", params)["data"]["outcome"] == "unknown"
+    assert not any(message.get("ext", {}).get("max", {}).get("client_id") == "reply-unknown"
+                   for event in core.all_events if event["method"] == "messages.upsert"
+                   for message in event["params"]["messages"])
+    identity = json.loads((tmp_path / "accounts/max/state/identity.json").read_text())
+    assert identity["send_count"] == 1
+    assert core.shutdown() == 0
 
 
 def test_slow_connection_fast_start_ping_stop_and_eof(core_factory, tmp_path):

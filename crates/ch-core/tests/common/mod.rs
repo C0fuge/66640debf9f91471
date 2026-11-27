@@ -6,6 +6,8 @@ use ch_db::{Db, now_millis};
 use ch_protocol::Event;
 use serde_json::{Value, json};
 
+mod managed;
+
 /// An in-memory database with plugin + account `fake` (and optionally `max`).
 pub fn ingest_with_accounts(accounts: &[(&str, &str)], opts: IngestOptions) -> Ingest {
     let db = Db::open_in_memory().unwrap();
@@ -83,6 +85,7 @@ const VOLATILE: &[&str] = &[
 /// A canonical dump of every table (minus volatile timestamps) for state comparisons.
 pub fn dump(db: &Db) -> String {
     let conn = db.conn();
+    managed::assert_coherent(conn);
     let tables = ch_db::migrations::table_names(conn).unwrap();
     let mut out = String::new();
     for t in tables {
@@ -95,8 +98,14 @@ pub fn dump(db: &Db) -> String {
             .unwrap()
             .map(|c| c.unwrap())
             .filter(|(c, _)| !VOLATILE.contains(&c.as_str()))
+            // Allocation order is volatile, but only after exact index/control
+            // revisions and live consumer coherence were checked above.
+            .filter(|(c, _)| !(c == "revision"
+                && matches!(t.as_str(), "managed_ref_clock" | "managed_ref_row" | "managed_ref")))
             // Surrogate rowids and integer FKs depend on insertion order; compare by content.
-            .filter(|(c, ty)| !(ty == "INTEGER" && (c == "id" || c.ends_with("_id"))))
+            // Keep every other managed field, including source/message hint FKs.
+            .filter(|(c, ty)| t.starts_with("managed_")
+                || !(ty == "INTEGER" && (c == "id" || c.ends_with("_id"))))
             .map(|(c, _)| c)
             .collect();
         if cols.is_empty() {
@@ -112,7 +121,21 @@ pub fn dump(db: &Db) -> String {
             .query_map([], |r| {
                 let mut parts = Vec::new();
                 for (i, c) in cols.iter().enumerate() {
-                    let v: rusqlite::types::Value = r.get(i)?;
+                    let mut v: rusqlite::types::Value = r.get(i)?;
+                    if matches!(t.as_str(), "managed_ref_row" | "managed_ref") && c == "consumer_key" {
+                        let kind_index = cols.iter().position(|c| c == "consumer_kind").unwrap();
+                        let kind: String = r.get(kind_index)?;
+                        let raw: String = r.get(i)?;
+                        v = rusqlite::types::Value::Text(managed::key(conn, &kind, &raw));
+                    } else if t == "managed_ref" {
+                        if let rusqlite::types::Value::Integer(id) = &v {
+                            if c == "message_id" {
+                                v = rusqlite::types::Value::Text(managed::key(conn, "message", &id.to_string()));
+                            } else if c == "source_id" {
+                                v = rusqlite::types::Value::Text(managed::source_key(conn, *id));
+                            }
+                        }
+                    }
                     parts.push(format!("{c}={v:?}"));
                 }
                 Ok(parts.join("|"))

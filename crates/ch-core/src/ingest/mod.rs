@@ -1535,6 +1535,40 @@ pub fn event_account(e: &Event) -> &str {
     }
 }
 
+/// Whether this amendment applies; quoted sends retain their existing behavior.
+pub(crate) fn basic_text_reply(item: &OutboxRow) -> bool {
+    item.method == "messages.send"
+        && item.params.get("comment_to").and_then(|v| v.as_str()).is_none()
+        && item.params.get("reply_to").is_some_and(|reply| {
+            !reply.is_null()
+                && !["quote_text", "quote_offset"].iter().any(|key| {
+                    reply.get(*key).is_some_and(|value| !value.is_null())
+                })
+        })
+}
+
+/// Match observed relation fields, never the requested local echo's inferred reference.
+pub(crate) fn text_reply_matches(
+    item: &OutboxRow,
+    topic: Option<&str>,
+    reply: Option<&ch_protocol::dto::ReplyRef>,
+) -> bool {
+    let Some(source) = item.params.get("reply_to")
+        .and_then(|reply| reply.get("message_id"))
+        .and_then(|value| value.as_str()) else {
+        return false;
+    };
+    let expected_topic = match item.params.get("topic_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(topic)) => Some(topic.as_str()),
+        _ => return false,
+    };
+    topic == expected_topic && reply.is_some_and(|observed| {
+        observed.message_id == source
+            && observed.chat_id.as_deref().is_none_or(|chat| chat == item.chat_id)
+    })
+}
+
 /// Validate a send result or exact client-ID echo against its destination. For a comment
 /// sent from a channel, the source post names the discussion chat. An explicit cross-chat
 /// reply reference can establish the same link when the source post is not cached.
@@ -1544,7 +1578,30 @@ pub(crate) fn send_destination_matches(
     m: &Message,
 ) -> ch_db::Result<bool> {
     let Some(post) = item.params.get("comment_to").and_then(|v| v.as_str()) else {
-        return Ok(m.chat_id == item.chat_id);
+        if m.chat_id != item.chat_id {
+            return Ok(false);
+        }
+        // Check the incoming observation before merging it with a local echo,
+        // whose ReplyRef is only the requested relation. Plain/quoted sends and
+        // other methods retain their existing behavior in this narrow amendment.
+        if !basic_text_reply(item) {
+            return Ok(true);
+        }
+        if m.id.starts_with("local:")
+            || !text_reply_matches(item, m.topic_id.as_deref(), m.reply_to.as_ref())
+        {
+            return Ok(false);
+        }
+        // None is not a whole-chat topic wildcard. In particular, do not invent
+        // platform-specific General None/1 normalization in this shared layer.
+        if m.topic_id.is_none()
+            && let Some(conv) = ch_db::conversation_rowid(conn, &item.account_id, &m.chat_id)?
+            && ch_db::get_message(conn, conv, &m.id)?.is_some_and(|stored| stored.topic_id.is_some())
+        {
+            // Sparse None cannot clear a contradictory canonical topic during merge.
+            return Ok(false);
+        }
+        return Ok(true);
     };
     if let Some(source) = ch_db::conversation_rowid(conn, &item.account_id, &item.chat_id)?
         && let Some(discussion) =

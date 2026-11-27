@@ -138,7 +138,9 @@ impl AccountStorageBinding {
     #[cfg(target_os = "linux")]
     pub(crate) fn uploads(&self) -> PathBuf { self.root.join("uploads") }
     #[cfg(target_os = "linux")]
-    pub(crate) fn retain_guard(&self) -> Arc<OwnedRwLockReadGuard<()>> { self.guard.clone() }
+    pub(crate) fn retain_binding(&self) -> Self {
+        Self { owner: self.owner.clone(), root: self.root.clone(), gate: self.gate.clone(), guard: self.guard.clone() }
+    }
 }
 
 impl Accounts {

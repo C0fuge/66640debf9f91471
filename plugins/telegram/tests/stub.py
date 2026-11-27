@@ -116,6 +116,10 @@ class Stub:
         if ids == 99:
             return row(99, tl.PeerUser(18))
         raw = self.messages.get(ids)
+        if raw is not None and raw.message == "reply-read-flood":
+            raise errors.FloodWaitError(None, capture=23)
+        if raw is not None and raw.message == "reply-read-pending":
+            await asyncio.Future()
         if self.mode == 6 and raw is not None and isinstance(raw.media, tl.MessageMediaPoll):
             raw = copy.deepcopy(raw)
             raw.media.results = tl.PollResults(min=True, total_voters=raw.media.results.total_voters)
@@ -353,4 +357,10 @@ class Stub:
         if req.message == "explode":
             raise OSError("synthetic-private-error")
         msg_id = self.sent.setdefault(req.random_id, 11 + len(self.sent))
+        if req.reply_to is not None:
+            peer = tl.PeerUser(req.peer.user_id) if isinstance(req.peer, tl.InputPeerUser) else tl.PeerChannel(req.peer.channel_id)
+            header = tl.MessageReplyHeader(reply_to_msg_id=8 if req.message == "reply-wrong" else req.reply_to.reply_to_msg_id,
+                reply_to_top_id=req.reply_to.top_msg_id, forum_topic=req.reply_to.top_msg_id is not None)
+            self.messages[msg_id] = row(msg_id, peer, out=True, reply_to=header)
+            self.messages[msg_id].message = req.message
         return tl.UpdateShortSentMessage(msg_id, 1, 1, NOW, out=True, entities=req.entities)

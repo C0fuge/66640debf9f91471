@@ -262,17 +262,13 @@ enum Verification {
     Local { held: File, _lease: File },
     Core(Box<ch_core::managed_stage::VerifiedStageBinding>),
 }
-impl Verified {
-    fn check_bytes(&self) -> Result<()> {
-        match &self.handles {
-            Verification::Local { held, .. } => self.stage.check_bytes(held),
-            Verification::Core(proof) => proof.check_directory(self.stage.dir.file.as_fd()),
-        }
-    }
-}
 pub(crate) struct LiveClaim {
-    verified: Verified,
-    used: bool,
+    stage: Stage,
+    handles: ClaimHandles,
+}
+enum ClaimHandles {
+    Core(Box<ch_core::managed_stage::LiveStageClaim>),
+    Local { held: File, _lease: File, used: bool },
 }
 
 pub(super) fn read_manifest(dir: &Dir) -> Result<(Manifest, File)> {
@@ -507,52 +503,68 @@ impl Stage {
     }
 }
 impl Verified {
-    pub fn claim(mut self, intent: Intent) -> Result<LiveClaim> {
-        intent.check()?;
-        if let Verification::Core(proof) = &self.handles { proof.recheck_ready()?; }
-        let previous = self.stage.current()?;
-        let mut m = self.stage.manifest.clone();
-        m.phase = Phase::Claimed(intent);
-        self.stage
-            .publish(Some(&previous), &m, || self.check_bytes())?;
-        self.stage.manifest = m;
-        Ok(LiveClaim {
-            verified: self,
-            used: false,
-        })
+    pub fn claim(self, intent: Intent) -> Result<LiveClaim> {
+        let Self { mut stage, handles } = self;
+        match handles {
+            Verification::Core(proof) => {
+                let claim = (*proof).claim(intent)?;
+                stage.manifest = claim.manifest().clone();
+                Ok(LiveClaim { stage, handles: ClaimHandles::Core(Box::new(claim)) })
+            }
+            Verification::Local { held, _lease } => {
+                // Legacy helper/discard code cannot construct Core claim authority.
+                intent.check()?;
+                let previous = stage.current()?;
+                let mut next = stage.manifest.clone();
+                next.phase = Phase::Claimed(intent);
+                stage.publish(Some(&previous), &next, || stage.check_bytes(&held))?;
+                stage.manifest = next;
+                Ok(LiveClaim { stage, handles: ClaimHandles::Local { held, _lease, used: false } })
+            }
+        }
     }
 }
 impl LiveClaim {
-    pub fn manifest(&self) -> &Manifest {
-        self.verified.stage.manifest()
-    }
-    /// Callable once on the unique task that completed a durable ready->claimed transition.
+    pub fn manifest(&self) -> &Manifest { self.stage.manifest() }
+
+    /// Callable once on the unique task that completed the actual durable transition.
     pub fn checked_path(&mut self) -> Result<PathBuf> {
-        if self.used {
-            return Err(Error::Integrity);
+        match &mut self.handles {
+            ClaimHandles::Core(claim) => {
+                let path = claim.checked_path()?;
+                self.stage.current()?;
+                if path != self.stage.managed_path() { return Err(Error::StageChanged); }
+                Ok(path)
+            }
+            ClaimHandles::Local { held, used, .. } => {
+                if *used { return Err(Error::Integrity); }
+                *used = true;
+                self.stage.current()?;
+                self.stage.check_bytes(held)?;
+                Ok(self.stage.managed_path())
+            }
         }
-        self.used = true;
-        self.verified.stage.current()?;
-        self.verified.check_bytes()?;
-        Ok(self.verified.stage.managed_path())
     }
-    /// Call only after core proved local admission of this exact retained request.
-    pub fn consume(self) -> Result<Stage> {
-        if !self.used {
-            return Err(Error::Integrity);
-        }
-        let Verified {
-            mut stage,
-            handles: _handles,
-        } = self.verified;
-        let old = stage.current()?;
-        let mut m = stage.manifest.clone();
-        let Phase::Claimed(intent) = m.phase else {
-            return Err(Error::Integrity);
-        };
-        m.phase = Phase::Consumed(intent);
-        stage.publish(Some(&old), &m, || Ok(()))?;
-        stage.manifest = m;
+
+    /// Core independently confirms the exact canonical retained request.
+    pub fn consume(self, outbox: &ch_core::outbox::Outbox) -> Result<Stage> {
+        let Self { mut stage, handles } = self;
+        let ClaimHandles::Core(claim) = handles else { return Err(Error::Integrity); };
+        stage.manifest = (*claim).consume(outbox)?;
+        Ok(stage)
+    }
+
+    #[cfg(test)]
+    pub fn consume_for_test(self) -> Result<Stage> {
+        let Self { mut stage, handles } = self;
+        let ClaimHandles::Local { used, .. } = &handles else { return Err(Error::Integrity); };
+        if !*used { return Err(Error::Integrity); }
+        let previous = stage.current()?;
+        let mut next = stage.manifest.clone();
+        let Phase::Claimed(intent) = next.phase else { return Err(Error::Integrity); };
+        next.phase = Phase::Consumed(intent);
+        stage.publish(Some(&previous), &next, || Ok(()))?;
+        stage.manifest = next;
         Ok(stage)
     }
 }

@@ -3,6 +3,8 @@
 pub mod manifest;
 mod fd;
 mod verify;
+mod claim;
+pub use claim::LiveStageClaim;
 pub use verify::VerifiedStageBinding;
 
 pub const MAX_BYTES: u64 = 1 << 31;

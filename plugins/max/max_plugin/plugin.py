@@ -44,6 +44,27 @@ def correlated_confirmation(message: dict, client_id: str) -> dict:
     return {**message, "ext": ext}
 
 
+def bare_reply(params: T.MessagesSendParams) -> bool:
+    return params.reply_to is not None and params.reply_to.quote_text is None and params.reply_to.quote_offset is None
+
+
+def reply_confirmation(message: Any, chat_id: str, reply_to: str) -> bool:
+    """Inspect the observed DTO before correlation, including old journal receipts."""
+    if not isinstance(message, dict):
+        return False
+    reply = message.get("reply_to")
+    try:
+        from_wire(T.Message, message)
+        numeric_id(message["id"], "message_id")
+    except Exception:
+        return False
+    return (message.get("chat_id") == chat_id and message.get("direction") == "out"
+            and message.get("topic_id") is None
+            and (message.get("is_scheduled") is None or message.get("is_scheduled") is False)
+            and isinstance(reply, dict) and reply.get("message_id") == reply_to
+            and reply.get("chat_id") == chat_id)
+
+
 @dataclass
 class Runtime:
     store: PrivateState
@@ -423,6 +444,9 @@ class MaxPlugin(Plugin):
                     if previous["digest"] != digest:
                         raise InvalidParams("client_id was already used with another message", field="client_id")
                     if previous["outcome"] == "confirmed":
+                        if bare_reply(params) and not reply_confirmation(previous.get("message"), params.chat_id, params.reply_to.message_id):
+                            raise PluginError("Previous MAX reply confirmation is unavailable; automatic retry is unsafe",
+                                              code="NETWORK", outcome="unknown", retry_safe=False)
                         # A durable, payload-matching success is authoritative even
                         # when its original RPC reply was lost. Older journal rows
                         # gain correlation from this exact keyed retry, never from
@@ -444,10 +468,15 @@ class MaxPlugin(Plugin):
                 wire = to_wire(result)
                 if wire.get("chat_id") != params.chat_id or wire.get("direction") != "out":
                     raise PluginError("MAX did not confirm the outgoing message")
+                if bare_reply(params) and not reply_confirmation(wire, params.chat_id, params.reply_to.message_id):
+                    raise PluginError("MAX did not confirm the requested reply")
                 if params.client_id is not None:
                     wire = correlated_confirmation(wire, params.client_id)
                     result = from_wire(T.Message, wire)
             except asyncio.CancelledError:
+                if bare_reply(params):
+                    raise PluginError("MAX reply outcome is unknown; automatic retry is unsafe",
+                                      code="NETWORK", outcome="unknown", retry_safe=False) from None
                 raise
             except Exception:
                 raise PluginError("MAX send outcome is unknown; automatic retry is unsafe",

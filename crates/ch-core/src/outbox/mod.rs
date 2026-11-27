@@ -1256,9 +1256,36 @@ impl Inner {
         let Some(echo) = row.echo_message_id else {
             return Ok(None);
         };
-        Ok(ch_db::get_message_by_id(g.db().conn(), echo)?
-            .filter(|m| m.message_id != format!("local:{}", row.client_id) && m.direction == "out")
-            .map(|m| m.message_id))
+        let conn = g.db().conn();
+        if crate::ingest::basic_text_reply(row)
+            && !ch_db::get_outbox(conn, row.id)?.is_some_and(|current| {
+                current.account_id == row.account_id && current.client_id == row.client_id
+                    && current.echo_message_id == Some(echo)
+            })
+        {
+            // Even exact-looking metadata cannot restore a pointer revoked by
+            // ON DELETE SET NULL after this worker captured its outbox row.
+            return Ok(None);
+        }
+        let Some(message) = ch_db::get_message_by_id(conn, echo)?
+            .filter(|m| m.message_id != format!("local:{}", row.client_id) && m.direction == "out") else {
+            return Ok(None);
+        };
+        if crate::ingest::basic_text_reply(row) {
+            let owner = ch_db::get_account(conn, &row.account_id)?;
+            let conversation = ch_db::get_conversation_by_id(conn, message.conversation_id)?;
+            let exact_owner = conversation.is_some_and(|c| c.account_id == row.account_id && c.chat_id == row.chat_id);
+            let correlated = owner.is_some_and(|a| message.ext.as_ref()
+                .and_then(|ext| ext.get(&a.plugin_id)).and_then(|ext| ext.get("client_id"))
+                .and_then(serde_json::Value::as_str) == Some(row.client_id.as_str()));
+            if !exact_owner || !correlated || message.message_id.starts_with("local:")
+                || matches!(message.delivery.as_deref(), Some("sending" | "failed"))
+                || !crate::ingest::text_reply_matches(row, message.topic_id.as_deref(), message.reply_to.as_ref())
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(message.message_id))
     }
 
     /// Set the echo row's `delivery` (when the echo still carries its `local:` id or has been
@@ -1271,6 +1298,19 @@ impl Inner {
         let Some(mut m) = ch_db::get_message_by_id(conn, echo_id)? else {
             return Ok(None);
         };
+        if crate::ingest::basic_text_reply(row) {
+            let retained = ch_db::get_outbox(conn, row.id)?.is_some_and(|current| {
+                current.account_id == row.account_id && current.client_id == row.client_id
+                    && current.echo_message_id == Some(echo_id)
+            });
+            let scope = ch_db::get_conversation_by_id(conn, m.conversation_id)?
+                .is_some_and(|c| c.account_id == row.account_id && c.chat_id == row.chat_id);
+            if !retained || !scope || m.topic_id != row.topic_id {
+                // A worker's captured pointer may outlive deletion and INTEGER PK
+                // reuse; ON DELETE SET NULL invalidates that old status authority.
+                return Ok(None);
+            }
+        }
         if m.delivery.as_deref() == Some(delivery)
             || (delivery == "sent" && matches!(m.delivery.as_deref(), Some("read" | "delivered")))
         {
