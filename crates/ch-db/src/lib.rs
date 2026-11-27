@@ -125,6 +125,31 @@ impl Db {
         Self::init(conn)
     }
 
+    /// Open a file-backed WAL connection with connection-local FULL durability.
+    ///
+    /// This does not change other connections' synchronous policy. Memory/temporary
+    /// databases and any connection unable to establish WAL/FULL are rejected.
+    pub fn open_full_sync(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = rusqlite::Connection::open(path)?;
+        Self::pragmas(&conn)?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let db = Self { conn };
+        db.require_full_sync()?;
+        migrations::run(&db.conn, migrations::LATEST)?;
+        Ok(db)
+    }
+
+    /// Verify the current connection's WAL/FULL policy immediately before proof work.
+    /// This is a durability policy check, not a managed-file ownership proof.
+    pub fn require_full_sync(&self) -> Result<()> {
+        let mode: String = self.conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        let sync: i64 = self.conn.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") || sync != 2 {
+            return Err(Error::Invalid("managed proof writer requires WAL/FULL".into()));
+        }
+        Ok(())
+    }
+
     /// An in-memory database with the full schema (tests).
     pub fn open_in_memory() -> Result<Self> {
         let conn = rusqlite::Connection::open_in_memory()?;

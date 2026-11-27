@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use super::accounts::Accounts;
 use super::bus::{ChangeBus, CoreChange};
 use super::error::Result;
+use super::managed_proof::ManagedProofWriter;
 use super::sink::{IngestSink, account_path_filter};
 use crate::host::{HostConfig, HostHandle, SecretStore};
 use crate::ingest::{Ingest, IngestOptions};
@@ -98,6 +99,7 @@ pub struct Core {
     accounts: Accounts,
     bus: ChangeBus,
     sink: Arc<IngestSink>,
+    managed_proofs: ManagedProofWriter,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -119,12 +121,13 @@ impl Core {
         let db_path = host_config.data_dir.join(DB_FILE);
 
         let p = db_path.clone();
-        let (ingest_db, accounts_db) =
-            tokio::task::spawn_blocking(move || -> ch_db::Result<(Db, Db)> {
+        let (ingest_db, accounts_db, proof_db) =
+            tokio::task::spawn_blocking(move || -> ch_db::Result<(Db, Db, Db)> {
                 // The first open migrates; the second finds the schema current.
                 let a = Db::open(&p)?;
                 let b = Db::open(&p)?;
-                Ok((a, b))
+                let c = Db::open_full_sync(&p)?;
+                Ok((a, b, c))
             })
             .await??;
 
@@ -132,6 +135,7 @@ impl Core {
         let mut opts = config.ingest;
         opts.path_filter = Some(account_path_filter(&host_config));
         let sink = Arc::new(IngestSink::new(Ingest::new(ingest_db, opts), bus.clone()));
+        let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(), proof_db);
         let host = HostHandle::new(host_config, sink.clone(), Arc::clone(&config.secrets));
         let host_rx = host.subscribe();
         let accounts = Accounts::new(accounts_db, host.clone(), config.secrets, bus.clone());
@@ -157,6 +161,7 @@ impl Core {
             accounts,
             bus,
             sink,
+            managed_proofs,
             tasks: Mutex::new(tasks),
         })
     }
@@ -186,6 +191,11 @@ impl Core {
         &self.sink
     }
 
+    /// Native, bounded FULL transaction writer. This grants no file or send authority.
+    pub fn managed_proofs(&self) -> &ManagedProofWriter {
+        &self.managed_proofs
+    }
+
     /// `<data_dir>/hub.db`. Services open their own connection with [`Core::open_db`].
     pub fn db_path(&self) -> &Path {
         &self.db_path
@@ -205,6 +215,7 @@ impl Core {
     /// Stop every plugin gracefully (§4.5), persist the accounts' final state, checkpoint the
     /// WAL. Accounts stay wanted in the database and resume on the next open.
     pub async fn shutdown(&self) {
+        self.managed_proofs.close();
         let tasks: Vec<_> =
             std::mem::take(&mut *self.tasks.lock().unwrap_or_else(PoisonError::into_inner));
         // The autostart task first, so nothing starts while we stop.
@@ -220,6 +231,9 @@ impl Core {
         }
         for t in tasks {
             let _ = t.await;
+        }
+        if let Err(e) = self.managed_proofs.drain().await {
+            warn!("draining managed proof writes: {e}");
         }
         match self.sink.with_ingest(|i| i.db().checkpoint()).await {
             Ok(Ok(())) => {}

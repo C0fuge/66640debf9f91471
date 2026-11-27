@@ -13,6 +13,10 @@
 //! DB connection model: every service opens its own [`ch_db::Db`] on [`Core::db_path`] (WAL; the
 //! 5 s busy timeout serialises writers). Ingest is the main writer; the accounts service has its
 //! own connection.
+//! [`ManagedProofWriter`] is the explicit exception to NORMAL synchronous policy:
+//! Core owns a separate WAL/FULL connection, under the same ingest mutex, for
+//! bounded durable transactions. Its jobs survive caller cancellation and drain
+//! before Core's shutdown checkpoint. It grants no managed-file/send authority.
 //!
 //! [`HostHandle`]: crate::host::HostHandle
 //! [`EventSink`]: crate::host::EventSink
@@ -23,6 +27,7 @@
 mod accounts;
 mod bus;
 mod error;
+mod managed_proof;
 mod root;
 mod sink;
 
@@ -32,5 +37,6 @@ pub use accounts::{
 };
 pub use bus::{AccountChange, ChangeBus, CoreChange};
 pub use error::{RuntimeError, SettingsProblem};
+pub use managed_proof::{ManagedProofError, ManagedProofTransaction, ManagedProofWriter};
 pub use root::{Core, CoreConfig, DB_FILE, default_data_dir};
 pub use sink::{IngestSink, account_path_filter};
