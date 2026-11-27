@@ -166,9 +166,13 @@ impl Core {
         let sink = Arc::new(IngestSink::new(Ingest::new(ingest_db, opts), bus.clone()));
         let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(), proof_db);
         #[cfg(target_os = "linux")]
-        let managed_sources = crate::managed_sources::ManagedSources::new(managed_proofs.clone());
+        let managed_sources = crate::managed_sources::ManagedSources::new(managed_proofs.clone(), &host_config);
         let host = HostHandle::new(host_config, sink.clone(), Arc::clone(&config.secrets));
         let host_rx = host.subscribe();
+        #[cfg(target_os = "linux")]
+        let accounts = Accounts::for_core(accounts_db, host.clone(), config.secrets, bus.clone(),
+            managed_sources.stage_mutations(),managed_sources.owner_barriers(),managed_sources.owner_jobs());
+        #[cfg(not(target_os = "linux"))]
         let accounts = Accounts::new(accounts_db, host.clone(), config.secrets, bus.clone());
         accounts.sync_plugins().await?;
 
@@ -232,6 +236,12 @@ impl Core {
     #[cfg(target_os = "linux")]
     pub(crate) fn managed_sources(&self) -> Arc<crate::managed_sources::ManagedSources> {
         Arc::clone(&self.managed_sources)
+    }
+
+    /// Opaque, invalidation-only hook for actual private-stage FS operations.
+    #[cfg(target_os = "linux")]
+    pub fn stage_mutations(&self) -> crate::managed_stage::StageMutations {
+        self.managed_sources.stage_mutations()
     }
 
     /// `<data_dir>/hub.db`. Services open their own connection with [`Core::open_db`].

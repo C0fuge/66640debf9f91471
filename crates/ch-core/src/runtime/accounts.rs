@@ -108,6 +108,14 @@ pub struct SpecDefaults {
 }
 
 struct Inner {
+    #[cfg(target_os = "linux")]
+    stage_mutations: Option<crate::managed_stage::StageMutations>,
+    #[cfg(target_os = "linux")]
+    owner_barriers: Option<crate::managed_sources::OwnerBarriers>,
+    #[cfg(target_os = "linux")]
+    owner_jobs: Option<Arc<crate::managed_sources::OwnedJobs>>,
+    #[cfg(all(test,target_os="linux"))]
+    owner_checkpoint: Mutex<Option<Arc<dyn Fn(&str)+Send+Sync>>>,
     db: Arc<Mutex<Db>>,
     host: HostHandle,
     secrets: Arc<dyn SecretStore>,
@@ -133,6 +141,14 @@ impl Accounts {
     /// A service over `db`, driving `host`.
     pub fn new(db: Db, host: HostHandle, secrets: Arc<dyn SecretStore>, bus: ChangeBus) -> Self {
         Self(Arc::new(Inner {
+            #[cfg(target_os = "linux")]
+            stage_mutations: None,
+            #[cfg(target_os = "linux")]
+            owner_barriers: None,
+            #[cfg(target_os = "linux")]
+            owner_jobs: None,
+            #[cfg(all(test,target_os="linux"))]
+            owner_checkpoint: Mutex::default(),
             db: Arc::new(Mutex::new(db)),
             host,
             secrets,
@@ -142,6 +158,18 @@ impl Accounts {
             membership: Default::default(),
             storage: Default::default(),
         }))
+    }
+
+    // Standalone public Accounts construction never manufactures a Core hook.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn for_core(db: Db, host: HostHandle, secrets: Arc<dyn SecretStore>, bus: ChangeBus,
+        mutations: crate::managed_stage::StageMutations, owners:crate::managed_sources::OwnerBarriers,
+        jobs:Arc<crate::managed_sources::OwnedJobs>) -> Self {
+        let mut accounts = Self::new(db, host, secrets, bus);
+        Arc::get_mut(&mut accounts.0).expect("new Accounts is uniquely owned").stage_mutations = Some(mutations);
+        Arc::get_mut(&mut accounts.0).expect("new Accounts is uniquely owned").owner_barriers = Some(owners);
+        Arc::get_mut(&mut accounts.0).expect("new Accounts is uniquely owned").owner_jobs = Some(jobs);
+        accounts
     }
 
     /// Run `f` on this service's connection on a blocking task.
@@ -378,8 +406,116 @@ impl Accounts {
     pub async fn remove(&self, account_id: &str) -> Result<()> {
         let me = self.clone();
         let id = account_id.to_owned();
-        tokio::spawn(async move { me.remove_owned(&id).await }).await?
+        #[cfg(target_os = "linux")]
+        {
+            // A hookless native factory cannot see Core quarantine/pending state.
+            // Linux destructive removal requires the actual Core-issued context.
+            let jobs=self.0.owner_jobs.as_ref().ok_or(RuntimeError::Host(HostError::ShuttingDown))?;
+            let runtime=tokio::runtime::Handle::current();
+            return jobs.run_scoped(move |scope|me.remove_core_owned(&id,&scope,&runtime))
+                .await.map_err(|_|RuntimeError::Host(HostError::ShuttingDown))?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {tokio::spawn(async move { me.remove_owned(&id).await }).await?}
     }
+
+    #[cfg(target_os="linux")]
+    fn owner_db<R>(&self,scope:&crate::managed_sources::BlockingWork<'_>,
+        work:impl FnOnce(&Db)->Result<R>) -> Result<R> {
+        self.0.owner_jobs.as_ref().ok_or(RuntimeError::Host(HostError::ShuttingDown))?
+            .check(scope).map_err(|_|RuntimeError::Host(HostError::ShuttingDown))?;
+        let db=self.0.db.lock().unwrap_or_else(PoisonError::into_inner);
+        work(&db)
+    }
+
+    // The whole function executes on the actual counted blocking worker. Neither
+    // destructive SQLite nor std::fs deletion is a detached async sub-task.
+    #[cfg(target_os="linux")]
+    fn remove_core_owned(&self,account_id:&str,scope:&crate::managed_sources::BlockingWork<'_>,
+        runtime:&tokio::runtime::Handle) -> Result<()> {
+        let _membership=runtime.block_on(self.0.membership.lock());
+        let lock=self.lock_for(account_id);let _lifecycle=runtime.block_on(lock.lock());
+        let row=self.owner_db(scope,|db|ch_db::get_account(db.conn(),account_id)?
+            .ok_or_else(||RuntimeError::UnknownAccount(account_id.into())))?;
+        let root=storage::directory(self.0.host.config(),account_id);
+        let gate=self.0.storage.get(&root);
+        let anchor=crate::managed_stage::AccountRootAnchor::capture(self.0.host.config(),account_id).ok();
+        let observed=self.removal_observation(&row,&root,&gate)?;
+        let barriers=self.0.owner_barriers.as_ref().ok_or(RuntimeError::Host(HostError::ShuttingDown))?;
+        let close=match barriers.begin_close(observed,anchor.as_ref()) {
+            Ok(close)=>close,
+            Err(_)=>{gate.token.cancel();return Err(RuntimeError::SourceInUse);}
+        };
+        gate.token.cancel();
+        #[cfg(test)] self.at_owner_close("revoked");
+        let _storage=runtime.block_on(gate.drain.write());
+        let anchor=anchor.as_ref().ok_or(RuntimeError::SourceInUse)?;
+        if !close.matches_anchor(anchor) || anchor.check().is_err() { return Err(RuntimeError::SourceInUse); }
+        // First slice: every known source is retained; no settlement certificate
+        // or inactive catalog snapshot is interpreted as whole-reader closure.
+        let durable=self.owner_db(scope,|db|storage::managed_in_use(db.conn(),account_id))?;
+        if close.in_use() || durable {
+            #[cfg(test)] self.at_owner_close("before-rearm");
+            let _=self.rearm_refused(scope,&row,&root,&gate,anchor,&close);
+            return Err(RuntimeError::SourceInUse);
+        }
+        runtime.block_on(self.stop_on_host(&row));
+        #[cfg(test)] self.at_owner_close("before-delete-tx");
+        let sole=match self.owner_db(scope,|db|self.delete_row_at(db,&row,&root,&gate))? {
+            Ok(sole)=>sole,
+            Err(error)=>{
+                let _=self.rearm_refused(scope,&row,&root,&gate,anchor,&close);
+                return Err(error);
+            }
+        };
+        // This clears only the controlled close reservation after a known delete,
+        // never source/unknown records and never from an absent-row inference.
+        close.deleted().map_err(|_|RuntimeError::Task("account removal bookkeeping incomplete".into()))?;
+        runtime.block_on(self.delete_account_secrets(&row));
+        let settled=if sole {
+            // Observe-only invalidation; a closed/poisoned catalog already denies
+            // completeness. It does not supply source-lifetime/deletion authority.
+            let _mutation=self.0.stage_mutations.as_ref().and_then(|hook|hook.begin().ok());
+            #[cfg(test)] self.at_owner_close("before-root-delete");
+            if anchor.check().is_err() {
+                warn!("account directory identity changed before cleanup");false
+            } else {
+                match std::fs::remove_dir_all(&root) {
+                    Ok(())=>true,
+                    Err(error) if error.kind()==std::io::ErrorKind::NotFound=>true,
+                    Err(_)=>{warn!("account directory cleanup incomplete");false}
+                }
+            }
+        } else {true};
+        if settled {self.0.storage.retire(&root,&gate);}
+        self.0.bus.publish(CoreChange::Account(AccountChange::Removed {
+            account_id:account_id.into(),plugin_id:row.plugin_id,
+        }));
+        Ok(())
+    }
+
+    async fn delete_account_secrets(&self,row:&AccountRow) {
+        for ns in [row.plugin_id.clone(),settings_secret_namespace(&row.plugin_id)] {
+            match self.0.secrets.get_all(&ns,&row.account_id).await {
+                Ok(all)=>for key in all.keys() {
+                    if self.0.secrets.delete(&ns,&row.account_id,key).await.is_err() {warn!("deleting account secret failed");}
+                },
+                Err(_)=>warn!("listing account secrets failed"),
+            }
+        }
+    }
+
+    #[cfg(all(test,target_os="linux"))]
+    pub(crate) fn owner_close_checkpoint(&self,hook:Arc<dyn Fn(&str)+Send+Sync>) {
+        *self.0.owner_checkpoint.lock().unwrap()=Some(hook);
+    }
+    #[cfg(all(test,target_os="linux"))]
+    fn at_owner_close(&self,phase:&str) {
+        let hook=self.0.owner_checkpoint.lock().unwrap().clone();
+        if let Some(hook)=hook {hook(phase);}
+    }
+
+    #[cfg(not(target_os = "linux"))]
     async fn remove_owned(&self, account_id: &str) -> Result<()> {
         let _membership = self.0.membership.lock().await;
         let lock = self.lock_for(account_id);
@@ -389,23 +525,14 @@ impl Accounts {
         let gate = self.0.storage.get(&root);
         gate.token.cancel();
         let _storage = gate.drain.write().await;
+        let check_id=account_id.to_owned();
+        if self.db(move|db|storage::managed_in_use(db.conn(),&check_id)).await? {
+            // Standalone native Accounts has no Core close/root proof to rearm.
+            return Err(RuntimeError::SourceInUse);
+        }
         self.stop_on_host(&row).await;
         let sole = self.delete_owned_row(&row, &root, &gate).await?;
-        for ns in [
-            row.plugin_id.clone(),
-            settings_secret_namespace(&row.plugin_id),
-        ] {
-            match self.0.secrets.get_all(&ns, account_id).await {
-                Ok(all) => {
-                    for k in all.keys() {
-                        if let Err(e) = self.0.secrets.delete(&ns, account_id, k).await {
-                            warn!(account = account_id, "deleting secret {k}: {e}");
-                        }
-                    }
-                }
-                Err(e) => warn!(account = account_id, "listing secrets: {e}"),
-            }
-        }
+        self.delete_account_secrets(&row).await;
         let settled = if sole {
             match tokio::fs::remove_dir_all(&root).await {
                 Ok(()) => true,

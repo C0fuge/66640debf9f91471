@@ -171,9 +171,9 @@ impl Store {
                 }
                 // Keep proven local admission/claim evidence visible even when
                 // damage to the retained bytes freezes further allocations.
-                let stage = Stage::from_inventory(dir.clone(), m);
+                let stage = Stage::from_inventory(dir.clone(), m, self.mutations.clone());
                 valid &= if has_bytes {
-                    stage.open_bytes().is_ok()
+                    stage.check_bytes_metadata().is_ok()
                 } else {
                     stage.manifest().phase == Phase::Discarded
                 };

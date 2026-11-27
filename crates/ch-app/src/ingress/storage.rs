@@ -100,7 +100,7 @@ impl Service {
         }
         drop(stmt);
         drop(db);
-        fs::Store::open(&self.core.data_dir().join("accounts"), owners)
+        fs::Store::open_with_mutations(&self.core.data_dir().join("accounts"), owners, self.core.stage_mutations())
     }
     pub(super) fn private_roots(&self) -> Vec<PathBuf> {
         let c = self.core.host().config();

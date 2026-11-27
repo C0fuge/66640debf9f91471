@@ -123,6 +123,163 @@ fn intent() -> Intent {
     }
 }
 
+async fn core_for_catalog(f: &Fixture) -> ch_core::runtime::Core {
+    let mut config = ch_core::runtime::CoreConfig::new(&f.private,
+        std::sync::Arc::new(ch_core::host::MemorySecretStore::new()));
+    config.autostart = false;
+    ch_core::runtime::Core::open(config).await.unwrap()
+}
+
+#[tokio::test]
+async fn core_hook_keeps_v1_copy_quota_and_recovered_discard_and_vetoes_closed_writes() {
+    let mut f = Fixture::new();
+    let core = core_for_catalog(&f).await;
+    f.store = Store::open_with_mutations(&f.accounts, vec![f.owner.clone()], core.stage_mutations()).unwrap();
+    // A failed copy still follows the existing bounded cleanup/quota behavior.
+    let failed = f.store.stage(&f.owner, ID, f.scope(), 2, f.open(), MAX_BYTES,
+        |copied| if copied > 0 { Err(Error::Cancelled) } else { Ok(()) });
+    assert!(matches!(failed, Err(Error::Cancelled)));
+    assert_eq!(f.store.inventory().total.slots, 0);
+    let stage = f.stage();
+    let json = fs::read(stage.managed_path().with_file_name("manifest.json")).unwrap();
+    let fields = serde_json::from_slice::<serde_json::Value>(&json).unwrap();
+    let expected: std::collections::BTreeSet<_> = ["version", "stage_id", "client_id", "scope", "created",
+        "name", "size", "format", "fingerprint", "sha256", "phase"].into_iter().collect();
+    assert_eq!(fields.as_object().unwrap().keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(), expected);
+    assert!(stage.manifest().phase == Phase::Ready);
+    let recovered = f.store.recover(&f.owner, ID).unwrap().clone();
+    assert!(recovered.discard_ready(|_, _| Ok(false)).is_err());
+    assert_eq!(fs::read(stage.managed_path().with_file_name("manifest.json")).unwrap(), json);
+    let inventory = f.store.inventory();
+    assert!(inventory.complete);
+    assert_eq!(inventory.total.slots, 1);
+    assert_eq!(inventory.total.bytes, f.open().len());
+    core.shutdown().await;
+    let called = Cell::new(false);
+    assert!(matches!(recovered.discard_ready(|_, _| { called.set(true); Ok(true) }), Err(Error::Cancelled)));
+    assert!(!called.get());
+    assert_eq!(fs::read(stage.managed_path().with_file_name("manifest.json")).unwrap(), json);
+    let another = "22223344556677889900aabbccddeeff";
+    assert!(matches!(f.store.stage(&f.owner, another, f.scope(), 2, f.open(), MAX_BYTES, |_| Ok(())), Err(Error::Cancelled)));
+    assert!(!f.owner.uploads.join(another).exists());
+    assert_eq!(f.store.inventory().total.slots, 1);
+}
+
+#[tokio::test]
+async fn hooked_discard_sync_failures_retain_honest_phase_and_existing_byte_charge() {
+    for fail_at_directory in [false, true] {
+        let mut f = Fixture::new();
+        let core = core_for_catalog(&f).await;
+        f.store = Store::open_with_mutations(&f.accounts, vec![f.owner.clone()], core.stage_mutations()).unwrap();
+        let stage = f.stage();
+        let result = stage.discard_ready_with(|_, _| Ok(true), |file, directory| {
+            if directory == fail_at_directory { Err(io::Error::other("synthetic sync failure")) }
+            else { file.sync_all() }
+        });
+        assert_eq!(result.unwrap_err(), if fail_at_directory { Error::Unknown } else { Error::Storage });
+        assert!(stage.managed_path().exists());
+        let recovered = f.store.recover(&f.owner, ID).unwrap();
+        assert!(recovered.manifest().phase == if fail_at_directory { Phase::Discarded } else { Phase::Ready });
+        let inventory = f.store.inventory();
+        assert_eq!(inventory.total.slots, 1);
+        assert_eq!(inventory.total.bytes, f.open().len());
+        core.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn store_rejects_a_real_hook_for_another_accounts_namespace_without_allocating() {
+    let mut f = Fixture::new();
+    let other = Fixture::new();
+    let core = core_for_catalog(&f).await;
+    let hook = core.stage_mutations();
+    assert!(matches!(Store::open_with_mutations(&other.accounts, vec![other.owner.clone()], hook.clone()),
+        Err(Error::Integrity)));
+    assert!(!other.owner.uploads.exists());
+    assert_eq!(other.store.inventory().total.slots, 0);
+    f.store = Store::open_with_mutations(&f.accounts, vec![f.owner.clone()], hook).unwrap();
+    f.stage();
+    assert_eq!(f.store.inventory().total.slots, 1);
+    assert_eq!(f.store.inventory().total.bytes, f.open().len());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_claim_and_consumed_publishers_keep_the_cores_permanent_writer_veto() {
+    for consuming in [false, true] {
+        let mut f = Fixture::new();
+        let core = core_for_catalog(&f).await;
+        f.store = Store::open_with_mutations(&f.accounts, vec![f.owner.clone()], core.stage_mutations()).unwrap();
+        let stage = f.stage();
+        let verified = stage.verify(MAX_BYTES, |_| Ok(())).unwrap();
+        let claim = if consuming {
+            let mut claim = verified.claim(intent()).unwrap();
+            claim.checked_path().unwrap();
+            Some(claim)
+        } else {
+            core.shutdown().await;
+            assert!(matches!(verified.claim(intent()), Err(Error::Cancelled)));
+            None
+        };
+        if let Some(claim) = claim {
+            core.shutdown().await;
+            assert!(matches!(claim.consume_for_test(), Err(Error::Cancelled)));
+        }
+        let recovered = f.store.recover(&f.owner, ID).unwrap();
+        assert!(recovered.manifest().phase == if consuming { Phase::Claimed(intent()) } else { Phase::Ready });
+        let inventory = f.store.inventory();
+        assert!(inventory.complete);
+        assert_eq!(inventory.total.slots, 1);
+        assert_eq!(inventory.total.bytes, f.open().len());
+    }
+}
+
+#[test]
+fn inventory_validates_metadata_and_charges_all_phases_without_opening_payload_readers() {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    for phase in 0..3 {
+        let f = Fixture::new();
+        let stage = f.stage();
+        let expected = match phase {
+            0 => Phase::Ready,
+            1 => {
+                let claim = stage.verify(MAX_BYTES, |_| Ok(())).unwrap().claim(intent()).unwrap();
+                drop(claim);
+                Phase::Claimed(intent())
+            },
+            _ => {
+                let mut claim = stage.verify(MAX_BYTES, |_| Ok(())).unwrap().claim(intent()).unwrap();
+                claim.checked_path().unwrap();
+                drop(claim.consume_for_test().unwrap());
+                Phase::Consumed(intent())
+            },
+        };
+        // O_PATH has no payload open/read events. This detects the old O_RDONLY
+        // inventory probe even if it never consumes bytes and closes immediately.
+        // SAFETY: inotify_init1 takes only these supported flag bits, no pointers.
+        let raw = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(raw >= 0);
+        // SAFETY: successful inotify_init1 transferred this sole descriptor.
+        let mut notifications = unsafe { File::from_raw_fd(raw) };
+        let path = fd::cname(stage.managed_path().as_os_str().as_bytes()).unwrap();
+        // SAFETY: descriptor and terminated synthetic fixture path are valid.
+        assert!(unsafe { libc::inotify_add_watch(notifications.as_raw_fd(), path.as_ptr(),
+            libc::IN_OPEN | libc::IN_ACCESS | libc::IN_CLOSE_NOWRITE) } >= 0);
+        let inventory = f.store.inventory();
+        assert!(inventory.complete);
+        assert_eq!(inventory.total.slots, 1);
+        assert_eq!(inventory.total.bytes, f.open().len());
+        assert_eq!(inventory.manifests.len(), 1);
+        assert!(inventory.manifests[0].phase == expected);
+        let mut events = [0; 1024];
+        assert_eq!(notifications.read(&mut events).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        // Positive control: a genuine payload reader must be observed.
+        drop(File::open(stage.managed_path()).unwrap());
+        assert!(notifications.read(&mut events).unwrap() > 0);
+    }
+}
+
 #[test]
 fn actual_file_source_type_name_binding_and_limits() {
     let f = Fixture::new();

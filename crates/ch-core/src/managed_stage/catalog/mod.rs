@@ -1,0 +1,221 @@
+//! Descriptive deny metadata only. No source, reader, wire or cleanup authority.
+//! WIP: not usable for enforcement until every supported writer invalidates first.
+//! Initial scanning, App writer hooks and account lifecycle/Host composition remain
+//! pending. A complete inventory never proves legacy physical readers closed;
+//! stable unproved stage evidence and old inode negatives survive later absence.
+mod scan;
+#[cfg(test)]
+mod tests;
+
+use super::{Error, Result, manifest::Scope};
+use crate::host::HostConfig;
+use std::{collections::{BTreeMap, BTreeSet}, path::PathBuf, sync::{Arc, Mutex, MutexGuard}};
+
+const MAX_INODES: usize = 1024;
+const MAX_STAGES: usize = 256;
+const MAX_WRITERS: usize = 16;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Inode { dev: u64, ino: u64 }
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct StageKey { account: Vec<u8>, stage: Vec<u8> }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StageKind { Ready, Claimed, Consumed, Discarded, Unknown }
+
+/// Negative close-owner evidence, not a declaration that any reader has settled.
+#[derive(Clone)]
+pub(crate) struct LegacyCandidate {
+    key: StageKey,
+    directory: Option<Inode>,
+    kind: StageKind,
+    scope: Option<Scope>,
+    client: Option<String>,
+    unproved: bool,
+}
+impl LegacyCandidate {
+    pub(crate) fn account_folder(&self) -> &[u8] { &self.key.account }
+    pub(crate) fn stage_folder(&self) -> &[u8] { &self.key.stage }
+    pub(crate) fn kind(&self) -> StageKind { self.kind }
+    pub(crate) fn scope_hint(&self) -> Option<&Scope> { self.scope.as_ref() }
+    pub(crate) fn client_hint(&self) -> Option<&str> { self.client.as_deref() }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InodeMatch { KnownPrivate, NotListed }
+
+/// Missing from a complete set is still NOT a safe-input/read permission.
+pub(crate) struct CatalogLookup { epoch: u64, complete: bool, matched: InodeMatch }
+impl CatalogLookup {
+    pub(crate) fn epoch(&self) -> u64 { self.epoch }
+    pub(crate) fn complete(&self) -> bool { self.complete }
+    pub(crate) fn matched(&self) -> InodeMatch { self.matched }
+}
+
+pub(crate) struct CatalogView { epoch: u64, complete: bool, writers: usize, inodes: usize }
+impl CatalogView {
+    pub(crate) fn epoch(&self) -> u64 { self.epoch }
+    pub(crate) fn complete(&self) -> bool { self.complete }
+    pub(crate) fn writers(&self) -> usize { self.writers }
+    pub(crate) fn inode_count(&self) -> usize { self.inodes }
+}
+
+#[derive(Default)]
+struct State {
+    epoch: u64,
+    active: usize,
+    complete: bool,
+    poisoned: bool,
+    closed: bool,
+    inodes: BTreeSet<Inode>,
+    stages: BTreeMap<StageKey, LegacyCandidate>,
+    root: Option<Inode>,
+}
+impl State {
+    fn advance(&mut self) -> Result<u64> {
+        self.complete = false;
+        let Some(epoch) = self.epoch.checked_add(1) else {
+            self.poisoned = true;
+            return Err(Error::Integrity);
+        };
+        self.epoch = epoch;
+        Ok(epoch)
+    }
+}
+
+/// Core-owned metadata. Contains no Gate, account guard, FD or network handle.
+pub(crate) struct PrivateByteCatalog { data_dir: PathBuf, state: Mutex<State> }
+impl PrivateByteCatalog {
+    /// Private Core composition factory; no caller-vouched completeness or inode list.
+    pub(crate) fn for_core(config: &HostConfig) -> Arc<Self> {
+        Arc::new(Self { data_dir: config.data_dir.clone(), state: Mutex::new(State::default()) })
+    }
+    pub(crate) fn mutations(self: &Arc<Self>) -> super::StageMutations {
+        super::StageMutations { catalog: self.clone() }
+    }
+    pub(super) fn check_accounts_root(&self, root: &std::path::Path) -> Result<()> {
+        if root == self.data_dir.join("accounts") { Ok(()) } else { Err(Error::Integrity) }
+    }
+    pub(crate) fn close(&self) {
+        let mut state = self.lock();
+        state.closed = true;
+        state.complete = false;
+    }
+
+    // Observe-only tracking cannot break otherwise valid file operations. If
+    // bounded accounting fails, permanently refuse completeness for this epoch
+    // of Core instead. Closing has a separate, permanent new-operation veto.
+    pub(super) fn observe_mutation(self: &Arc<Self>) -> Result<CatalogMutation> {
+        let mut state = self.lock();
+        if state.closed { return Err(Error::Cancelled); }
+        state.complete = false;
+        let counted = if state.poisoned || state.active >= MAX_WRITERS || state.advance().is_err() {
+            state.poisoned = true;
+            false
+        } else {
+            state.active += 1;
+            true
+        };
+        Ok(CatalogMutation { catalog: self.clone(), counted })
+    }
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+    pub(crate) fn view(&self) -> CatalogView {
+        let state = self.lock();
+        CatalogView { epoch: state.epoch, complete: state.complete && !state.poisoned,
+            writers: state.active, inodes: state.inodes.len() }
+    }
+    pub(crate) fn lookup_inode(&self, dev: u64, ino: u64) -> CatalogLookup {
+        let state = self.lock();
+        CatalogLookup { epoch: state.epoch, complete: state.complete && !state.poisoned,
+            matched: if state.inodes.contains(&Inode { dev, ino }) { InodeMatch::KnownPrivate } else { InodeMatch::NotListed } }
+    }
+    pub(crate) fn legacy_candidates(&self) -> Vec<LegacyCandidate> {
+        self.lock().stages.values().filter(|entry| entry.unproved).cloned().collect()
+    }
+
+    /// Must precede the first supported private inode/namespace mutation.
+    /// The actual owned FS worker, not its waiter, retains the returned token.
+    pub(crate) fn begin_mutation(self: &Arc<Self>) -> Result<CatalogMutation> {
+        let mut state = self.lock();
+        state.complete = false;
+        if state.closed { return Err(Error::Cancelled); }
+        if state.poisoned || state.active >= MAX_WRITERS { return Err(Error::Busy); }
+        state.advance()?;
+        state.active += 1;
+        Ok(CatalogMutation { catalog: self.clone(), counted: true })
+    }
+
+    /// Independent anchored scan is the ONLY completeness publisher. No quota or
+    /// owner-close/source-settlement permission follows from its result.
+    pub(crate) fn refresh(&self) -> Result<CatalogView> { self.refresh_with(|| {}, || {}) }
+
+    fn refresh_with(&self, before_scan: impl FnOnce(), after_scan: impl FnOnce()) -> Result<CatalogView> {
+        let epoch = {
+            let mut state = self.lock();
+            if state.closed { return Err(Error::Cancelled); }
+            if state.poisoned || state.active != 0 { return Err(Error::Busy); }
+            state.advance()?
+        };
+        before_scan();
+        let scanned = scan::walk(&self.data_dir);
+        after_scan();
+        let mut state = self.lock();
+        // Partial negative evidence remains useful, even when publication is refused.
+        let mut complete = scanned.complete;
+        for inode in scanned.inodes {
+            if state.inodes.contains(&inode) { continue; }
+            if state.inodes.len() == MAX_INODES { complete = false; continue; }
+            state.inodes.insert(inode);
+        }
+        // A supported copy may expose a temporary empty stage while this scan
+        // runs. Only stable observations may become sticky legacy evidence.
+        if state.epoch != epoch || state.active != 0 || state.poisoned || state.closed {
+            state.complete = false;
+            return Err(Error::Busy);
+        }
+        match (state.root, scanned.root) {
+            (Some(old), Some(current)) if old != current => complete = false,
+            (None, Some(current)) => state.root = Some(current),
+            (Some(_), None) => complete = false,
+            _ => {},
+        }
+        for (key, candidate) in scanned.stages {
+            if let Some(old) = state.stages.get_mut(&key) {
+                let rebound = old.directory.zip(candidate.directory).is_some_and(|(a,b)| a != b)
+                    || old.scope.as_ref().zip(candidate.scope.as_ref()).is_some_and(|(a,b)| a != b)
+                    || old.client.as_ref().zip(candidate.client.as_ref()).is_some_and(|(a,b)| a != b);
+                if rebound {
+                    old.kind = StageKind::Unknown; old.unproved = true; complete = false;
+                } else {
+                    if old.unproved && !candidate.unproved { old.kind = StageKind::Unknown; }
+                    else { old.kind = candidate.kind; }
+                    old.unproved |= candidate.unproved;
+                    if old.directory.is_none() { old.directory = candidate.directory; }
+                    if old.scope.is_none() { old.scope = candidate.scope; }
+                    if old.client.is_none() { old.client = candidate.client; }
+                }
+            } else if state.stages.len() < MAX_STAGES {
+                state.stages.insert(key, candidate);
+            } else { complete = false; }
+        }
+        // Absence NEVER deletes old inode negatives or unproved legacy candidates.
+        state.complete = complete;
+        let view = CatalogView { epoch: state.epoch, complete, writers: state.active, inodes: state.inodes.len() };
+        if complete { Ok(view) } else { Err(Error::Integrity) }
+    }
+}
+
+/// Invalidation/lifetime ownership only. Dropping it cannot certify completion.
+pub(crate) struct CatalogMutation { catalog: Arc<PrivateByteCatalog>, counted: bool }
+impl Drop for CatalogMutation {
+    fn drop(&mut self) {
+        let mut state = self.catalog.lock();
+        state.complete = false;
+        if !self.counted { return; }
+        if let Some(active) = state.active.checked_sub(1) { state.active = active; }
+        else { state.poisoned = true; }
+    }
+}

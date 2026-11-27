@@ -169,6 +169,15 @@ impl Dir {
         }
         Err(Error::Integrity)
     }
+    // Descriptive, operation-local identity only; no serde/persisted mount number.
+    pub(super) fn ancestry_identity(&self) -> Vec<(PathBuf, Identity)> {
+        let mut chain=Vec::new();let mut current=Some(self);
+        while let Some(dir)=current {
+            chain.push((dir.path.clone(),dir.identity));
+            current=dir.parent.as_ref().map(|(parent,_)|parent.as_ref());
+        }
+        chain
+    }
     pub fn lock(&self) -> Result<File> {
         // New open description: concurrent users of the same Dir also contend.
         let f = openat(self.fd(), c".", libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
@@ -191,6 +200,17 @@ impl Dir {
         }
         Ok(())
     }
+}
+
+// Shared configured-data boundary for verifier, catalog and account-root anchors.
+pub(super) fn data_dir(path: &Path) -> Result<Arc<Dir>> {
+    let parts=parts(path)?;
+    let (last,parents)=parts.split_last().ok_or(Error::Integrity)?;
+    let mut dir=Dir::root()?;
+    for part in parents { dir=dir.child(&cname(part)?,Policy::Any)?; }
+    dir=dir.child(&cname(last)?,Policy::Owner)?;
+    dir.check()?;
+    Ok(dir)
 }
 
 pub(super) fn temp(dir: &Dir) -> Result<File> {

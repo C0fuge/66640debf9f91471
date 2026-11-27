@@ -7,24 +7,40 @@ const LIMIT: u32 = 4;
 #[derive(Default)]
 struct State { closed: bool, jobs: Vec<JoinHandle<()>> }
 
-pub(crate) struct OwnedJobs { state: Mutex<State>, slots: Arc<Semaphore> }
+pub(crate) struct OwnedJobs { state: Mutex<State>, slots: Arc<Semaphore>, identity:Arc<()> }
+
+// Actual counted blocking thread, not a caller-provided boolean or an IO grant.
+pub(crate) struct BlockingWork<'scope> { thread:std::thread::ThreadId, identity:&'scope Arc<()> }
 
 impl OwnedJobs {
     pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self { state: Mutex::default(), slots: Arc::new(Semaphore::new(LIMIT as usize)) })
+        Arc::new(Self { state: Mutex::default(), slots: Arc::new(Semaphore::new(LIMIT as usize)),identity:Arc::new(()) })
     }
 
     pub(crate) async fn run<R, F>(&self, work: F) -> Result<R, Error>
     where R: Send + 'static, F: FnOnce() -> R + Send + 'static {
+        self.run_scoped(move |_|work()).await
+    }
+
+    pub(crate) fn check(&self,work:&BlockingWork<'_>) -> Result<(),Error> {
+        if work.thread!=std::thread::current().id() || !Arc::ptr_eq(work.identity,&self.identity) {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn run_scoped<R,F>(&self,work:F) -> Result<R,Error>
+    where R:Send+'static,F:FnOnce(BlockingWork<'_>)->R+Send+'static {
         let (send, recv) = oneshot::channel();
         {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.closed { return Err(Error::Closed); }
             let slot = Arc::clone(&self.slots).try_acquire_owned().map_err(|_| Error::Busy)?;
             state.jobs.retain(|job| !job.is_finished());
+            let identity=Arc::clone(&self.identity);
             state.jobs.push(tokio::task::spawn_blocking(move || {
                 let _slot = slot;
-                let result = work();
+                let result = work(BlockingWork {thread:std::thread::current().id(),identity:&identity});
                 let _ = send.send(result);
             }));
         }

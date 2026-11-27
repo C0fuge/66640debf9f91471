@@ -22,13 +22,24 @@ const MANIFEST_CAP: u64 = 64 * 1024;
 
 pub(crate) struct Store {
     pub(super) accounts: Arc<Dir>,
+    pub(super) mutations: Option<ch_core::managed_stage::StageMutations>,
     // None records a collision. Never allocate or import a receipt through that mapping.
     pub(super) owners: HashMap<OsString, Option<Owner>>,
 }
 impl Store {
     /// Accounts must already exist. Mapping comes from the complete persisted owner
     /// set and HostConfig::upload_dir, never from a manifest or request parameter.
+    #[cfg(test)]
     pub fn open(accounts_root: &Path, owners: Vec<Owner>) -> Result<Self> {
+        Self::open_inner(accounts_root, owners, None)
+    }
+    pub fn open_with_mutations(accounts_root: &Path, owners: Vec<Owner>,
+        mutations: ch_core::managed_stage::StageMutations) -> Result<Self> {
+        mutations.check_accounts_root(accounts_root)?;
+        Self::open_inner(accounts_root, owners, Some(mutations))
+    }
+    fn open_inner(accounts_root: &Path, owners: Vec<Owner>,
+        mutations: Option<ch_core::managed_stage::StageMutations>) -> Result<Self> {
         let parts = fd::parts(accounts_root)?;
         let (last, parents) = parts.split_last().ok_or(Error::Integrity)?;
         if *last != b"accounts" || parents.is_empty() {
@@ -44,6 +55,7 @@ impl Store {
         accounts.check()?;
         let mut store = Self {
             accounts,
+            mutations,
             owners: HashMap::new(),
         };
         for owner in owners {
@@ -116,7 +128,7 @@ impl Store {
         }
         let uploads = self.uploads(owner, false)?;
         let dir = uploads.child(&fd::cname(stage_id.as_bytes())?, Policy::Private)?;
-        Stage::load(dir, owner, stage_id)
+        Stage::load(dir, owner, stage_id, self.mutations.clone())
     }
 
     /// Call after atomically charging source.len() and one slot. Re-inventory on
@@ -149,6 +161,8 @@ impl Store {
         if client_id == stage_id {
             return Err(Error::Integrity);
         }
+        // Starts inside the actual synchronous writer, before even mkdir.
+        let _mutation = self.mutations.as_ref().map(|hook| hook.begin()).transpose()?;
         let uploads = self.uploads(owner, true)?;
         let name = fd::cname(stage_id.as_bytes())?;
         uploads.mkdir(&name)?; // Always exclusive. Existing stage IDs are never reopened here.
@@ -198,6 +212,7 @@ impl Store {
             let stage = Stage {
                 dir: dir.clone(),
                 manifest,
+                mutations: self.mutations.clone(),
             };
             let held = stage.open_bytes()?;
             stage.publish(None, &stage.manifest, || {
@@ -253,6 +268,7 @@ fn scan(
 pub(crate) struct Stage {
     pub(super) dir: Arc<Dir>,
     manifest: Manifest,
+    mutations: Option<ch_core::managed_stage::StageMutations>,
 }
 pub(crate) struct Verified {
     stage: Stage,
@@ -299,10 +315,12 @@ pub(super) fn read_manifest(dir: &Dir) -> Result<(Manifest, File)> {
     Ok((m, file))
 }
 impl Stage {
-    pub(super) fn from_inventory(dir: Arc<Dir>, manifest: Manifest) -> Self {
-        Self { dir, manifest }
+    pub(super) fn from_inventory(dir: Arc<Dir>, manifest: Manifest,
+        mutations: Option<ch_core::managed_stage::StageMutations>) -> Self {
+        Self { dir, manifest, mutations }
     }
-    pub(super) fn load(dir: Arc<Dir>, owner: &Owner, stage_id: &str) -> Result<Self> {
+    pub(super) fn load(dir: Arc<Dir>, owner: &Owner, stage_id: &str,
+        mutations: Option<ch_core::managed_stage::StageMutations>) -> Result<Self> {
         if dir.identity.mount != dir.parent().ok_or(Error::Integrity)?.identity.mount {
             return Err(Error::Integrity);
         }
@@ -310,7 +328,7 @@ impl Stage {
         if manifest.stage_id != stage_id || !owner.matches(&manifest.scope) {
             return Err(Error::Integrity);
         }
-        let stage = Self { dir, manifest };
+        let stage = Self { dir, manifest, mutations };
         if stage.manifest.phase == Phase::Ready {
             stage.check_layout()?;
             stage.open_bytes()?;
@@ -357,6 +375,13 @@ impl Stage {
             return Err(Error::StageChanged);
         }
         Ok(())
+    }
+    /// Inventory needs only anchored metadata. Never acquire a payload reader
+    /// merely to measure a Ready or unproved Claimed/Consumed local copy.
+    pub(super) fn check_bytes_metadata(&self) -> Result<()> {
+        let probe = fd::openat(self.dir.fd(), c"bytes", libc::O_PATH, 0)
+            .map_err(|_| Error::StageChanged)?;
+        self.check_bytes(&probe)
     }
     pub(super) fn open_bytes(&self) -> Result<File> {
         let probe = fd::openat(self.dir.fd(), c"bytes", libc::O_PATH, 0)
@@ -464,6 +489,14 @@ impl Stage {
         &self,
         proof: impl FnOnce(&Manifest, &Path) -> Result<bool>,
     ) -> Result<()> {
+        self.discard_ready_with(proof, |file, _| file.sync_all())
+    }
+    pub(super) fn discard_ready_with(
+        &self,
+        proof: impl FnOnce(&Manifest, &Path) -> Result<bool>,
+        sync: impl Fn(&File, bool) -> io::Result<()>,
+    ) -> Result<()> {
+        let _mutation = self.mutations.as_ref().map(|hook| hook.begin()).transpose()?;
         // A corrupt digest is also insufficient authority for destructive cleanup.
         // Hold the same bounded scan slot as verify, and retain the lease through unlink.
         let verified = self.verify(super::MAX_BYTES, |_| Ok(()))?;
@@ -473,12 +506,12 @@ impl Stage {
         let previous = self.current()?;
         let mut discarded = self.manifest.clone();
         discarded.phase = Phase::Discarded;
-        self.publish(Some(&previous), &discarded, || {
+        self.publish_with(Some(&previous), &discarded, || {
             if !proof(&self.manifest, &self.managed_path())? {
                 return Err(Error::Integrity);
             }
             self.check_bytes(held)
-        })?;
+        }, sync)?;
         let remove = || {
             let (current, file) = read_manifest(&self.dir)?;
             if current != discarded {
@@ -517,6 +550,7 @@ impl Verified {
                 let previous = stage.current()?;
                 let mut next = stage.manifest.clone();
                 next.phase = Phase::Claimed(intent);
+                let _mutation = stage.mutations.as_ref().map(|hook| hook.begin()).transpose()?;
                 stage.publish(Some(&previous), &next, || stage.check_bytes(&held))?;
                 stage.manifest = next;
                 Ok(LiveClaim { stage, handles: ClaimHandles::Local { held, _lease, used: false } })
@@ -563,6 +597,7 @@ impl LiveClaim {
         let mut next = stage.manifest.clone();
         let Phase::Claimed(intent) = next.phase else { return Err(Error::Integrity); };
         next.phase = Phase::Consumed(intent);
+        let _mutation = stage.mutations.as_ref().map(|hook| hook.begin()).transpose()?;
         stage.publish(Some(&previous), &next, || Ok(()))?;
         stage.manifest = next;
         Ok(stage)

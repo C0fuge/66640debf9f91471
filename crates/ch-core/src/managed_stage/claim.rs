@@ -47,6 +47,7 @@ impl VerifiedStageBinding {
         };
         let bytes = serde_json::to_vec(&next).map_err(|_| Error::Integrity)?;
         if bytes.len() > MANIFEST_CAP { return Err(Error::Integrity); }
+        let _mutation = self.owner.stage_mutations()?.begin()?;
         let mut temp = fd::temp(&self.dir)?;
         temp.write_all(&bytes)?;
         temp.flush()?;
@@ -219,6 +220,106 @@ mod tests {
     fn intent() -> Intent { Intent { caption:" literal ".into(),as_file:true,spoiler:true } }
     fn fail_directory(file:&File,directory:bool)->io::Result<()> {
         if directory { Err(io::Error::other("synthetic sync failure")) } else { file.sync_all() }
+    }
+
+    #[tokio::test]
+    async fn actual_phase_publishers_invalidate_before_temp_and_settle_after_sync_failures() {
+        for consuming in [false, true] {
+            for fail_at_directory in [false, true] {
+                let f = Fixture::new().await;
+                let catalog = f.core.managed_sources().catalog();
+                let mut proof = Some(f.proof().await);
+                let claim = if consuming {
+                    let mut claim = proof.take().unwrap().claim(intent()).unwrap();
+                    claim.checked_path().unwrap();
+                    f.admit(&claim);
+                    Some(claim)
+                } else { None };
+                catalog.refresh().unwrap();
+                let initial = catalog.view().epoch();
+                let sync = |file: &File, directory| {
+                    let state = catalog.view();
+                    assert!(!state.complete());
+                    assert_eq!(state.writers(), 1);
+                    assert!(state.epoch() > initial);
+                    if directory == fail_at_directory { Err(io::Error::other("synthetic sync failure")) }
+                    else { file.sync_all() }
+                };
+                let failed = if let Some(claim) = claim {
+                    claim.consume_with(&f.outbox, sync).map(|_| ())
+                } else {
+                    proof.unwrap().claim_with(intent(), sync).map(|_| ())
+                };
+                assert_eq!(failed.unwrap_err(), if fail_at_directory { Error::Unknown } else { Error::Storage });
+                assert_eq!(catalog.view().writers(), 0);
+                assert!(!catalog.view().complete());
+                let expected = match (consuming, fail_at_directory) {
+                    (false, false) => Phase::Ready,
+                    (false, true) | (true, false) => Phase::Claimed(intent()),
+                    (true, true) => Phase::Consumed(intent()),
+                };
+                assert!(f.disk().phase == expected);
+                f.close().await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn caller_loss_keeps_actual_phase_writer_token_until_worker_settles() {
+        let f = Fixture::new().await;
+        let catalog = f.core.managed_sources().catalog();
+        catalog.refresh().unwrap();
+        let proof = f.proof().await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let gate = std::sync::Mutex::new(Some((entered_tx, release_rx)));
+                let result = proof.claim_with(intent(), |file, directory| {
+                    if !directory {
+                        let (entered, release) = gate.lock().unwrap().take().unwrap();
+                        let _ = entered.send(());
+                        release.recv().unwrap();
+                    }
+                    file.sync_all()
+                });
+                // Drop actual proof/storage/byte handles before announcing settlement.
+                let phase = result.map(|claim| claim.manifest().phase.clone());
+                let _ = settled_tx.send(phase);
+            }).await.unwrap();
+        });
+        entered_rx.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(catalog.view().writers(), 1);
+        assert!(matches!(catalog.refresh(), Err(Error::Busy)));
+        release_tx.send(()).unwrap();
+        assert!(settled_rx.await.unwrap().unwrap() == Phase::Claimed(intent()));
+        assert_eq!(catalog.view().writers(), 0);
+        assert!(!catalog.view().complete());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn retained_and_fresh_bindings_keep_core_hook_but_standalone_accounts_cannot_mint_it() {
+        let f = Fixture::new().await;
+        let binding = f.core.accounts().storage_binding_for("owner").await.unwrap();
+        let observation = binding.observation();
+        drop(binding);
+        let rebound = f.core.accounts().storage_binding_for_observation(&observation).await.unwrap();
+        let proof = VerifiedStageBinding::verify_ready(&rebound, STAGE, super::super::MAX_BYTES, |_| Ok(())).unwrap();
+        drop(rebound);
+        let standalone = crate::runtime::Accounts::new(f.core.open_db().unwrap(), f.core.host().clone(),
+            Arc::new(MemorySecretStore::new()), f.core.bus().clone());
+        let other = standalone.storage_binding_for("owner").await.unwrap();
+        assert!(matches!(other.stage_mutations(), Err(Error::TargetChanged)));
+        drop(other);
+        f.core.managed_sources().close();
+        assert!(matches!(proof.claim(intent()), Err(Error::Cancelled)));
+        assert!(f.disk().phase == Phase::Ready);
+        assert!(matches!(f.core.stage_mutations().begin(), Err(Error::Cancelled)));
+        f.close().await;
     }
 
     #[tokio::test]

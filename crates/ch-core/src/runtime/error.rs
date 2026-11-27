@@ -31,6 +31,9 @@ pub enum RuntimeError {
     /// this composition does not yet provide. No source is assumed safe or absent.
     #[error("managed lifetime recovery is not available in this build")]
     ManagedLifetimeRecoveryUnavailable,
+    /// Local source lifetime remains unresolved; no account data was deleted.
+    #[error("account sources are still in use")]
+    SourceInUse,
     /// The plugin host refused or failed.
     #[error(transparent)]
     Host(#[from] HostError),

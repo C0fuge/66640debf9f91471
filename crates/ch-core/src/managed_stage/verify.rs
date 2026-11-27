@@ -98,11 +98,7 @@ fn open_stage(owner: &AccountStorageBinding, id: &str) -> Result<Arc<Dir>> {
     let accounts = account.parent().ok_or(Error::Integrity)?;
     let data = accounts.parent().ok_or(Error::Integrity)?;
     if accounts.file_name().is_none_or(|v| v != "accounts") { return Err(Error::Integrity); }
-    let parts = fd::parts(data)?;
-    let (last, parents) = parts.split_last().ok_or(Error::Integrity)?;
-    let mut dir = Dir::root()?;
-    for part in parents { dir = dir.child(&fd::cname(part)?, Policy::Any)?; }
-    dir = dir.child(&fd::cname(last)?, Policy::Owner)?;
+    let mut dir = fd::data_dir(data)?;
     for (name, policy) in [
         (b"accounts".as_slice(), Policy::Owner),
         (account.file_name().ok_or(Error::Integrity)?.as_bytes(), Policy::Owner),

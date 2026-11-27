@@ -75,7 +75,7 @@ impl From<RuntimeError> for Failure {
         match e {
             RuntimeError::UnknownAccount(_) | RuntimeError::UnknownPlugin(_) => Self::Missing,
             RuntimeError::InvalidSettings(_) => Self::Invalid,
-            RuntimeError::AccountExists(_) => Self::Conflict,
+            RuntimeError::AccountExists(_) | RuntimeError::SourceInUse => Self::Conflict,
             RuntimeError::PluginUnavailable { .. } | RuntimeError::Secret(_) => Self::Unavailable,
             RuntimeError::Host(e) => Self::from(&e),
             _ => Self::Internal,

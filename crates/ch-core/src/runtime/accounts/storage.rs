@@ -23,6 +23,12 @@ pub(super) struct Gate {
 }
 
 impl Gates {
+    #[cfg(target_os = "linux")]
+    fn replace_revoked(&self,root:&Path,old:&Arc<Gate>) -> Option<Arc<Gate>> {
+        let mut gates=self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !old.token.is_cancelled() || !gates.get(root).is_some_and(|g|Arc::ptr_eq(g,old)) { return None; }
+        let fresh=Arc::new(Gate::default());gates.insert(root.to_owned(),fresh.clone());Some(fresh)
+    }
     pub(super) fn get(&self, root: &Path) -> Arc<Gate> {
         self.0
             .lock()
@@ -87,6 +93,16 @@ pub(super) fn check_owner(conn: &Connection, expected: &AccountRow) -> Result<()
         Err(unknown(&expected.account_id))
     }
 }
+
+// Temporary unsupported-state policy: history has no reviewed ownership/closure
+// implementation yet, so ANY dispatch/retirement conservatively blocks removal.
+// These are constant-size/indexed probes, never unbounded orphan/JSON scans.
+pub(super) fn managed_in_use(conn:&Connection,account:&str) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM managed_source WHERE account_id=?1)
+        OR EXISTS(SELECT 1 FROM managed_dispatch LIMIT 1)
+        OR EXISTS(SELECT 1 FROM managed_retirement LIMIT 1)",[account],|row|row.get(0))
+        .map_err(ch_db::Error::from)?)
+}
 // Bounded examination of identifiers only. A source ID longer than 256 bytes
 // cannot sanitize to a <=255-byte component (replacements never shorten it).
 pub(super) fn exclusive(
@@ -130,6 +146,8 @@ pub(super) fn exclusive(
 /// let fabricated = AccountStorageBinding {};
 /// ```
 pub struct AccountStorageBinding {
+    #[cfg(target_os = "linux")]
+    mutations: Option<crate::managed_stage::StageMutations>,
     owner: AccountRow,
     root: PathBuf,
     gate: Arc<Gate>,
@@ -162,6 +180,9 @@ impl Hash for AccountStorageObservation {
     }
 }
 impl AccountStorageObservation {
+    // Descriptive configured namespace key only; this is not a filesystem proof.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn namespace(&self) -> &Path { &self.root }
     pub fn owner(&self) -> &AccountRow { &self.owner }
     pub fn revocation(&self) -> CancellationToken { self.gate.token.clone() }
     pub fn is_revoked(&self) -> bool { self.gate.token.is_cancelled() }
@@ -185,11 +206,23 @@ impl AccountStorageBinding {
     pub(crate) fn uploads(&self) -> PathBuf { self.root.join("uploads") }
     #[cfg(target_os = "linux")]
     pub(crate) fn retain_binding(&self) -> Self {
-        Self { owner: self.owner.clone(), root: self.root.clone(), gate: self.gate.clone(), guard: self.guard.clone() }
+        Self { owner: self.owner.clone(), root: self.root.clone(), gate: self.gate.clone(), guard: self.guard.clone(), mutations: self.mutations.clone() }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn stage_mutations(&self) -> crate::managed_stage::Result<&crate::managed_stage::StageMutations> {
+        self.mutations.as_ref().ok_or(crate::managed_stage::Error::TargetChanged)
     }
 }
 
 impl Accounts {
+    #[cfg(target_os = "linux")]
+    pub(super) fn removal_observation(&self,row:&AccountRow,root:&Path,gate:&Arc<Gate>) -> Result<AccountStorageObservation> {
+        if root!=directory(self.0.host.config(),&row.account_id)
+            || !self.0.storage.current(root,gate)
+        { return Err(unknown(&row.account_id)); }
+        Ok(AccountStorageObservation {owner:row.clone(),root:root.to_owned(),gate:gate.clone()})
+    }
+
     // Intrinsic issuer/current-generation check only, not a read lease or posting
     // permission. A matching row/root from another Accounts factory is insufficient.
     #[cfg(target_os = "linux")]
@@ -232,7 +265,9 @@ impl Accounts {
         if observed.is_revoked() || !self.0.storage.current(&observed.root, &observed.gate) {
             return Err(unknown(&observed.owner.account_id));
         }
-        Ok(AccountStorageBinding { owner:observed.owner.clone(), root:observed.root.clone(), gate:observed.gate.clone(), guard })
+        Ok(AccountStorageBinding { owner:observed.owner.clone(), root:observed.root.clone(), gate:observed.gate.clone(), guard,
+            #[cfg(target_os = "linux")]
+            mutations: self.0.stage_mutations.clone() })
     }
 
     /// Pin a persisted account's configured storage against destructive teardown.
@@ -287,7 +322,9 @@ impl Accounts {
     /// Accounts-owned nonforgeable scope for the managed-stage verifier.
     pub async fn storage_binding_for(&self, account_id: &str) -> Result<AccountStorageBinding> {
         let (owner, root, gate, guard) = self.capture_storage(account_id).await?;
-        Ok(AccountStorageBinding { owner, root, gate, guard: Arc::new(guard) })
+        Ok(AccountStorageBinding { owner, root, gate, guard: Arc::new(guard),
+            #[cfg(target_os = "linux")]
+            mutations: self.0.stage_mutations.clone() })
     }
 
     async fn capture_storage(
@@ -337,34 +374,62 @@ impl Accounts {
         gate: &Arc<Gate>,
     ) -> Result<bool> {
         let owner = row.clone();
-        let inner = self.0.clone();
         let path = root.to_owned();
+        let expected=gate.clone();
+        let me=self.clone();
         let result = self
-            .db(move |db| {
-                let tx = db.transaction()?;
-                check_owner(&tx, &owner)?;
-                let sole = exclusive(&tx, inner.host.config(), &owner, &path)?;
-                match ch_db::delete_account(&tx, &owner.account_id) {
-                    Ok(true) => {
-                        tx.commit().map_err(ch_db::Error::from)?;
-                        Ok(Ok(sole))
-                    }
-                    result => {
-                        let error = match result {
-                            Err(e) => RuntimeError::Db(e),
-                            _ => unknown(&owner.account_id),
-                        };
-                        tx.rollback().map_err(ch_db::Error::from)?;
-                        check_owner(db.conn(), &owner)?;
-                        Ok(Err(error))
-                    }
-                }
-            })
+            .db(move |db| me.delete_row_at(db,&owner,&path,&expected))
             .await?;
         if result.is_err() {
             self.0.storage.retire(root, gate);
         }
         result
+    }
+
+    // Inner Err is a positively completed rollback; outer Err is not rearm proof.
+    pub(super) fn delete_row_at(&self,db:&ch_db::Db,row:&AccountRow,root:&Path,gate:&Arc<Gate>) -> Result<Result<bool>> {
+        let tx=db.transaction()?;
+        check_owner(&tx,row)?;
+        if !self.0.storage.current(root,gate) { return Err(unknown(&row.account_id)); }
+        let sole=exclusive(&tx,self.0.host.config(),row,root)?;
+        // Reserve the actual deleting writer before the LAST negative-source
+        // check. Preflight alone cannot protect against a concurrent raw writer.
+        if managed_in_use(&tx,&row.account_id)? {
+            tx.rollback().map_err(ch_db::Error::from)?;
+            check_owner(db.conn(),row)?;
+            return Ok(Err(RuntimeError::SourceInUse));
+        }
+        match ch_db::delete_account(&tx,&row.account_id) {
+            Ok(true)=>{ tx.commit().map_err(ch_db::Error::from)?;Ok(Ok(sole)) }
+            result=>{
+                let error=match result {Err(e)=>RuntimeError::Db(e),_=>unknown(&row.account_id)};
+                tx.rollback().map_err(ch_db::Error::from)?;
+                check_owner(db.conn(),row)?;
+                Ok(Err(error))
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn rearm_refused(&self,scope:&crate::managed_sources::BlockingWork<'_>,row:&AccountRow,
+        root:&Path,gate:&Arc<Gate>,anchor:&crate::managed_stage::AccountRootAnchor,
+        close:&crate::managed_sources::OwnerClose) -> Result<()> {
+        if !close.matches_anchor(anchor) || anchor.check().is_err() { return Err(RuntimeError::SourceInUse); }
+        let fresh=self.owner_db(scope,|db| {
+            let tx=db.transaction()?;
+            check_owner(&tx,row)?;
+            if !exclusive(&tx,self.0.host.config(),row,root)? || !self.0.storage.current(root,gate) {
+                return Err(RuntimeError::SourceInUse);
+            }
+            tx.commit().map_err(ch_db::Error::from)?;
+            let next=self.0.storage.replace_revoked(root,gate).ok_or(RuntimeError::SourceInUse)?;
+            Ok(AccountStorageObservation {owner:row.clone(),root:root.to_owned(),gate:next})
+        })?;
+        if anchor.check().is_err() || !self.owns_storage_observation(&fresh) || close.rearmed(&fresh,anchor).is_err() {
+            fresh.revocation().cancel();
+            return Err(RuntimeError::SourceInUse);
+        }
+        Ok(())
     }
 }
 
@@ -490,6 +555,50 @@ mod capture_tests {
         assert!(matches!(pending.await.unwrap(),Err(RuntimeError::UnknownAccount(_))));
         *core.accounts().0.storage.1.lock().unwrap()=None;
         let (_,token,guard)=core.accounts().storage_lease_for("owner").await.unwrap();assert!(!token.is_cancelled());drop(guard);
+        core.shutdown().await;
+    }
+
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    #[cfg(target_os="linux")]
+    async fn refusal_does_not_replace_a_different_published_gate_with_identical_owner_metadata() {
+        let temp=tempfile::tempdir().unwrap();let dir=temp.path().join("plugins/fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"),serde_json::json!({"id":"fixture","name":"Fixture",
+            "version":"0.0.1","api_version":"1.2.0","entry":["python3","-I","-c","pass"],
+            "brand_color":"#123456","multi_account":true,"auth_methods":["none"]}).to_string()).unwrap();
+        let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new()));config.autostart=false;
+        let core=Core::open(config).await.unwrap();
+        let row=core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+        let root=directory(core.host().config(),"owner");std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("bytes"),b"preserve").unwrap();
+        core.open_db().unwrap().conn().execute("INSERT INTO managed_source(stage_id,client_id,account_id,
+            plugin_id,account_created_at,chat_id,path,fingerprint_json,intent_json,created_at,updated_at)
+            VALUES('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            'owner','fixture',?1,'chat',?2,'{}','{}',0,0)",
+            rusqlite::params![row.created_at,root.join("bytes").to_str()]).unwrap();
+        let original=core.accounts().0.storage.get(&root);
+        let replacement=Arc::new(Mutex::new(None));let saved=replacement.clone();
+        let accounts=core.accounts().clone();let path=root.clone();
+        // Fault injection uses the real private map publisher, not a fabricated
+        // observation/root proof. Persisted owner fields stay exactly identical.
+        core.accounts().owner_close_checkpoint(Arc::new(move|phase| {
+            if phase=="before-rearm" {
+                let previous=accounts.0.storage.get(&path);
+                accounts.0.storage.retire(&path,&previous);
+                *saved.lock().unwrap()=Some(accounts.0.storage.get(&path));
+            }
+        }));
+        assert!(matches!(core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+        let fresh=replacement.lock().unwrap().clone().unwrap();
+        assert!(original.token.is_cancelled());
+        assert!(Arc::ptr_eq(&core.accounts().0.storage.get(&root),&fresh));
+        assert!(core.accounts().get("owner").await.unwrap().is_some_and(|owner|owner.created_at==row.created_at));
+        assert_eq!(std::fs::read(root.join("bytes")).unwrap(),b"preserve");
+        assert_eq!(core.managed_sources().owner_barriers().closing_count(),1);
+        assert!(matches!(core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+        assert!(fresh.token.is_cancelled());
+        assert_eq!(core.managed_sources().owner_barriers().closing_count(),1);
+        core.accounts().owner_close_checkpoint(Arc::new(|_|{}));
         core.shutdown().await;
     }
 }

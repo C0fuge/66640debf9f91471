@@ -1,7 +1,7 @@
 use super::*;
-use crate::host::{HostConfig, MemorySecretStore};
+use crate::host::{HostConfig, HostError, MemorySecretStore, SecretStore};
 use crate::managed_stage::{VerifiedStageBinding, manifest::{Fingerprint, Format, Intent, Manifest, Phase, Scope}};
-use crate::runtime::{CoreConfig, NewAccount};
+use crate::runtime::{CoreConfig, NewAccount, RuntimeError};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Condvar;
@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 const STAGE: &str = "11111111111111111111111111111111";
 const CLIENT: &str = "22222222222222222222222222222222";
 
-struct Fixture { temp: tempfile::TempDir, core: Arc<Core>, outbox: Outbox }
+struct Fixture { temp: tempfile::TempDir, core: Arc<Core>, outbox: Outbox, secrets:Arc<MemorySecretStore> }
 
 impl Fixture {
     async fn new(start: bool) -> Self {
@@ -24,7 +24,8 @@ impl Fixture {
             "entry":["python3","-I","./peer.py"],"brand_color":"#123456",
             "multi_account":true,"auth_methods":["none"]
         }).to_string()).unwrap();
-        let mut config = CoreConfig::new(temp.path(), Arc::new(MemorySecretStore::new()));
+        let secrets=Arc::new(MemorySecretStore::new());
+        let mut config = CoreConfig::new(temp.path(), secrets.clone());
         config.host = HostConfig::fast(temp.path(), 50);
         for key in ["CH_DATA_DIR", "HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
             config.host.env.insert(key.into(), temp.path().join(key).to_string_lossy().into_owned());
@@ -62,7 +63,7 @@ impl Fixture {
         std::fs::write(stage.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
         std::fs::set_permissions(stage.join("manifest.json"), std::fs::Permissions::from_mode(0o600)).unwrap();
         let outbox = Outbox::for_core(&core, OutboxPolicy::default());
-        let fixture = Self { temp, core, outbox };
+        let fixture = Self { temp, core, outbox, secrets };
         if start {
             fixture.core.accounts().start("owner").await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -75,6 +76,7 @@ impl Fixture {
     }
 
     fn stage(&self) -> std::path::PathBuf { self.core.host().config().upload_dir("owner").join(STAGE) }
+    fn root(&self) -> std::path::PathBuf { self.core.host().config().state_dir("owner").parent().unwrap().to_owned() }
     async fn claim(&self) -> LiveStageClaim {
         let binding = self.core.accounts().storage_binding_for("owner").await.unwrap();
         VerifiedStageBinding::verify_ready(&binding, STAGE, crate::managed_stage::MAX_BYTES, |_| Ok(())).unwrap()
@@ -107,6 +109,13 @@ impl Fixture {
         assert!(!run.is_cancelled(),"status disconnect alone keeps the start interval alive");
     }
     async fn close(self) { self.outbox.shutdown().await; self.core.shutdown().await; }
+}
+
+fn defer_commit_failure(f:&Fixture) {
+    f.core.open_db().unwrap().conn().execute_batch("CREATE TABLE deferred_fault(
+        owner TEXT REFERENCES account(account_id) DEFERRABLE INITIALLY DEFERRED);
+        CREATE TRIGGER deferred_admission_fault AFTER INSERT ON managed_source BEGIN
+            INSERT INTO deferred_fault(owner) VALUES('absent-owner'); END;").unwrap();
 }
 
 struct Release(Arc<(Mutex<bool>, Condvar)>);
@@ -224,7 +233,7 @@ async fn fallback_lookup_cannot_return_a_recreated_owners_exact_looking_receipt(
     let old=claim.owner_binding().observation();
     let request=claim.canonical_request().unwrap();
     // Fresh work is unavailable, but the separate bounded receipt lane stays open.
-    f.core.managed_sources().close();
+    f.core.managed_sources().stop_fresh_admission();
     let (release,paused,entered)=pause("fallback");
     let lookups=AtomicUsize::new(0);
     *f.outbox.inner.managed_checkpoint.lock().unwrap()=Some(Arc::new(move |phase| {
@@ -287,15 +296,21 @@ async fn same_root_foreign_accounts_issuer_and_unbound_outbox_are_not_managed_co
     let binding=other.storage_binding_for("owner").await.unwrap();
     assert!(binding.observation()!=actual);
     assert_eq!(binding.owner().created_at,actual.owner().created_at);
+    let before=std::fs::read(f.stage().join("manifest.json")).unwrap();
     let claim=VerifiedStageBinding::verify_ready(&binding,STAGE,crate::managed_stage::MAX_BYTES,|_|Ok(())).unwrap()
-        .claim(Intent {caption:" exact caption ".into(),as_file:true,spoiler:false}).unwrap();
+        .claim(Intent {caption:" exact caption ".into(),as_file:true,spoiler:false});
+    // Standalone Accounts has no Core-owned writer hook: refuse before any
+    // Ready -> Claimed publication, rather than manufacturing one for admission.
+    assert!(matches!(claim,Err(crate::managed_stage::Error::TargetChanged)));
     drop(binding);
-    assert!(matches!(f.outbox.enqueue_managed_file_checked(claim).await,
-        Err(ManagedAdmissionError::Rejected(OutboxError::AdmissionConflict))));
+    assert_eq!(std::fs::read(f.stage().join("manifest.json")).unwrap(),before);
+    let manifest:Manifest=serde_json::from_slice(&before).unwrap();
+    assert!(manifest.phase==Phase::Ready);
     f.assert_no_admission();f.assert_no_wire();f.close().await;
 
     let f=Fixture::new(true).await;
     let unbound=Outbox::new(f.core.ingest().shared_ingest(),Arc::new(f.core.host().clone()),OutboxPolicy::default());
+    // This separate refusal receives a genuine Core-issued claim.
     assert!(matches!(unbound.enqueue_managed_file_checked(f.claim().await).await,
         Err(ManagedAdmissionError::Unavailable)));
     f.assert_no_admission();f.assert_no_wire();
@@ -364,10 +379,7 @@ async fn final_revocation_after_all_inserts_rolls_back_source_echo_outbox_and_re
 async fn failed_real_commit_quarantines_without_replay_or_a_durability_receipt() {
     let f=Fixture::new(true).await;
     // A real deferred-FK COMMIT failure, not a forged callback result/boolean.
-    f.core.open_db().unwrap().conn().execute_batch("CREATE TABLE deferred_fault(
-        owner TEXT REFERENCES account(account_id) DEFERRABLE INITIALLY DEFERRED);
-        CREATE TRIGGER deferred_admission_fault AFTER INSERT ON managed_source BEGIN
-            INSERT INTO deferred_fault(owner) VALUES('absent-owner'); END;").unwrap();
+    defer_commit_failure(&f);
     let result=f.outbox.enqueue_managed_file_checked(f.claim().await).await;
     assert!(matches!(result,Err(ManagedAdmissionError::Unknown)));
     f.assert_no_admission();
@@ -388,5 +400,189 @@ async fn committed_receipt_survives_local_manifest_bookkeeping_failure() {
     assert_eq!(f.outbox.get(item.id).unwrap(),item);
     assert_eq!(f.count("managed_source"),1);
     assert_eq!(f.core.managed_sources().census(),(0,1,0));
+    f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn source_refusal_preserves_data_and_rearms_only_fresh_generations_without_growth() {
+    let f=Fixture::new(true).await;
+    f.secrets.set("fixture","owner","session","synthetic").await.unwrap();
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    let bytes=std::fs::read(f.stage().join("bytes")).unwrap();
+    let mut old=f.core.accounts().storage_observation_for("owner").await.unwrap();
+    for _ in 0..3 {
+        assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+        assert!(old.is_revoked());
+        assert!(f.core.accounts().storage_binding_for_observation(&old).await.is_err());
+        let fresh=f.core.accounts().storage_observation_for("owner").await.unwrap();
+        assert!(fresh!=old && !fresh.is_revoked());old=fresh;
+        assert_eq!(f.core.managed_sources().owner_barriers().closing_count(),0);
+        assert_eq!(f.outbox.get(item.id).unwrap(),item);
+        assert_eq!(std::fs::read(f.stage().join("bytes")).unwrap(),bytes);
+        assert_eq!(f.secrets.snapshot("fixture","owner")["session"],"synthetic");
+        assert!(f.core.host().account("fixture","owner").unwrap().wanted);
+        assert_eq!(f.count("managed_source"),1);
+    }
+    f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn pending_pre_id_work_is_drained_and_committed_winner_is_retained() {
+    for phase in ["before-writer","committed"] {
+        let f=Fixture::new(true).await;
+        let claim=f.claim().await;
+        let (release,hook,entered)=pause(phase);
+        *f.outbox.inner.managed_checkpoint.lock().unwrap()=Some(hook);
+        let (owner_release,owner_hook,revoked)=pause("revoked");
+        f.core.accounts().owner_close_checkpoint(owner_hook);
+        let outbox=f.outbox.clone();
+        let sending=tokio::spawn(async move{outbox.enqueue_managed_file_checked(claim).await});
+        entered.await.unwrap();
+        assert_eq!(f.core.managed_sources().census().0,1);
+        assert_eq!(f.count("managed_source"),i64::from(phase=="committed"));
+        let accounts=f.core.accounts().clone();
+        let removal=tokio::spawn(async move{accounts.remove("owner").await});
+        revoked.await.unwrap();owner_release.release();
+        assert!(!removal.is_finished()); // The actual claim still owns its old storage lease.
+        release.release();
+        let sent=sending.await.unwrap();let removed=removal.await.unwrap();
+        if phase=="before-writer" {
+            assert!(matches!(sent,Err(ManagedAdmissionError::Rejected(_))));
+            removed.unwrap();
+            assert!(f.core.accounts().get("owner").await.unwrap().is_none());
+            assert!(!f.root().exists());
+        } else {
+            assert_eq!(sent.unwrap().state,OutboxState::Queued);
+            assert!(matches!(removed,Err(RuntimeError::SourceInUse)));
+            assert!(f.core.accounts().get("owner").await.unwrap().is_some());
+            assert!(f.stage().join("bytes").exists());
+        }
+        assert_eq!(f.core.managed_sources().owner_barriers().closing_count(),0);
+        f.assert_no_wire();f.close().await;
+    }
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn root_swap_never_rearms_or_heals_by_recapturing_a_replacement() {
+    use std::sync::atomic::{AtomicBool,Ordering};
+    let f=Fixture::new(true).await;
+    f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    let old=f.core.accounts().storage_observation_for("owner").await.unwrap();
+    let root=f.root();let previous=root.with_file_name("previous-owner");
+    let keep=previous.clone();let current=root.clone();let once=AtomicBool::new(false);
+    f.core.accounts().owner_close_checkpoint(Arc::new(move|phase| {
+        if phase=="before-rearm" && !once.swap(true,Ordering::SeqCst) {
+            std::fs::rename(&current,&keep).unwrap();std::fs::create_dir(&current).unwrap();
+            std::fs::write(current.join("replacement"),b"preserve").unwrap();
+        }
+    }));
+    for _ in 0..2 {
+        assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+        assert!(old.is_revoked());
+        assert!(f.core.accounts().storage_binding_for("owner").await.is_err());
+        assert_eq!(f.core.managed_sources().owner_barriers().closing_count(),1);
+        assert!(f.core.accounts().get("owner").await.unwrap().is_some());
+        assert!(previous.join("uploads").join(STAGE).join("bytes").exists());
+        assert_eq!(std::fs::read(root.join("replacement")).unwrap(),b"preserve");
+    }
+    f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn failed_root_capture_cannot_fall_through_to_unanchored_removal() {
+    let f=Fixture::new(false).await;
+    f.secrets.set("fixture","owner","session","synthetic").await.unwrap();
+    let root=f.root();let previous=root.with_file_name("previous-owner");
+    std::fs::rename(&root,&previous).unwrap();
+    std::os::unix::fs::symlink(&previous,&root).unwrap();
+    assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+    assert!(f.core.accounts().get("owner").await.unwrap().is_some());
+    assert!(std::fs::symlink_metadata(&root).unwrap().file_type().is_symlink());
+    assert!(previous.join("uploads").join(STAGE).join("bytes").exists());
+    assert_eq!(f.secrets.snapshot("fixture","owner")["session"],"synthetic");
+    f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn deleting_transaction_refuses_a_source_inserted_after_preflight() {
+    let f=Fixture::new(false).await;
+    f.secrets.set("fixture","owner","session","synthetic").await.unwrap();
+    let old=f.core.accounts().storage_observation_for("owner").await.unwrap();
+    let (release,hook,entered)=pause("before-delete-tx");
+    f.core.accounts().owner_close_checkpoint(hook);
+    let accounts=f.core.accounts().clone();
+    let caller=tokio::spawn(async move{accounts.remove("owner").await});
+    entered.await.unwrap();
+    // Unproved negative SQL evidence from a concurrent writer, not a forged grant.
+    f.core.open_db().unwrap().conn().execute("INSERT INTO managed_source(stage_id,client_id,
+        account_id,plugin_id,account_created_at,chat_id,path,fingerprint_json,intent_json,created_at,updated_at)
+        VALUES(?1,?2,'owner','fixture',?3,'chat',?4,'{}','{}',0,0)",
+        rusqlite::params![STAGE,CLIENT,old.owner().created_at,f.stage().join("bytes").to_str()]).unwrap();
+    release.release();
+    assert!(matches!(caller.await.unwrap(),Err(RuntimeError::SourceInUse)));
+    assert!(f.core.accounts().get("owner").await.unwrap().is_some());
+    assert_eq!(f.count("managed_source"),1);
+    assert!(f.stage().join("bytes").exists());
+    assert_eq!(f.secrets.snapshot("fixture","owner")["session"],"synthetic");
+    assert!(old.is_revoked());
+    assert!(f.core.accounts().storage_observation_for("owner").await.is_ok());
+    f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn unknown_registry_survives_hookless_factory_and_closed_core_accounts_clone() {
+    let f=Fixture::new(true).await;defer_commit_failure(&f);
+    f.secrets.set("fixture","owner","session","synthetic").await.unwrap();
+    assert!(matches!(f.outbox.enqueue_managed_file_checked(f.claim().await).await,Err(ManagedAdmissionError::Unknown)));
+    assert_eq!(f.count("managed_source"),0);
+    assert_eq!(f.core.managed_sources().census(),(0,0,1));
+    let standalone=Accounts::new(f.core.open_db().unwrap(),f.core.host().clone(),f.secrets.clone(),
+        crate::runtime::ChangeBus::new(16));
+    assert!(matches!(standalone.remove("owner").await,Err(RuntimeError::Host(HostError::ShuttingDown))));
+    assert!(f.core.accounts().get("owner").await.unwrap().is_some());drop(standalone);
+    // The actual issuer also refuses from in-memory quarantine despite zero DB rows.
+    assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+    assert!(f.stage().join("bytes").exists());
+    let accounts=f.core.accounts().clone();let root=f.root();let path=f.core.db_path().to_owned();
+    let Fixture {temp,core,outbox,secrets}=f;
+    outbox.shutdown().await;core.shutdown().await;drop(outbox);drop(core);
+    assert!(matches!(accounts.remove("owner").await,Err(RuntimeError::Host(HostError::ShuttingDown))));
+    assert!(ch_db::get_account(ch_db::Db::open(path).unwrap().conn(),"owner").unwrap().is_some());
+    assert!(root.join("uploads").join(STAGE).join("bytes").exists());
+    assert_eq!(secrets.snapshot("fixture","owner")["session"],"synthetic");
+    drop(accounts);drop(temp);
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn cancelled_remove_and_shutdown_wait_for_actual_destructive_worker() {
+    let f=Fixture::new(false).await;
+    let root=f.root();let (release,hook,entered)=pause("before-root-delete");
+    f.core.accounts().owner_close_checkpoint(hook);
+    let accounts=f.core.accounts().clone();
+    let caller=tokio::spawn(async move{accounts.remove("owner").await});
+    entered.await.unwrap(); // Inside counted blocking worker, just before std::fs deletion.
+    assert!(f.core.accounts().get("owner").await.unwrap().is_none());
+    assert!(root.exists());caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
+    let core=f.core.clone();let mut shutdown=tokio::spawn(async move{core.shutdown().await});
+    assert!(tokio::time::timeout(Duration::from_millis(50),&mut shutdown).await.is_err());
+    assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::Host(HostError::ShuttingDown))));
+    shutdown.abort();assert!(shutdown.await.unwrap_err().is_cancelled());
+    let sources=f.core.managed_sources();let mut drain=tokio::spawn(async move{sources.drain().await});
+    assert!(tokio::time::timeout(Duration::from_millis(25),&mut drain).await.is_err());
+    release.release();
+    tokio::time::timeout(Duration::from_secs(5),drain).await.unwrap().unwrap().unwrap();
+    assert!(!root.exists());
+    assert_eq!(f.core.managed_sources().owner_barriers().closing_count(),0);
+    f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn ordinary_no_source_removal_with_parent_anchored_absence_clears_close_state() {
+    let f=Fixture::new(false).await;
+    std::fs::remove_dir_all(f.root().parent().unwrap()).unwrap();
+    f.core.accounts().remove("owner").await.unwrap();
+    assert!(f.core.accounts().get("owner").await.unwrap().is_none());
+    assert_eq!(f.core.managed_sources().owner_barriers().closing_count(),0);
+    assert_eq!(f.core.managed_sources().census(),(0,0,0));
     f.assert_no_wire();f.close().await;
 }
