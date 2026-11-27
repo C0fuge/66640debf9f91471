@@ -28,6 +28,7 @@ pub(crate) struct ManagedSources {
     lookups: Arc<OwnedJobs>,
     owner_jobs: Arc<OwnedJobs>,
     directory_jobs: Arc<OwnedJobs>,
+    copy_jobs:Arc<OwnedJobs>,
     closed: CancellationToken,
 }
 
@@ -36,7 +37,7 @@ impl ManagedSources {
         let catalog=PrivateByteCatalog::for_core(config);
         Arc::new(Self { core_nonce:crate::host::managed_nonce(),owners: OwnerBarriers::new(catalog.clone()),catalog, proofs,
             admissions: OwnedJobs::new(), lookups: OwnedJobs::new(), owner_jobs:OwnedJobs::new(),
-            directory_jobs:OwnedJobs::new(),closed: CancellationToken::new() })
+            directory_jobs:OwnedJobs::new(),copy_jobs:OwnedJobs::new(),closed: CancellationToken::new() })
     }
     pub(crate) async fn initialize_catalog(self:&Arc<Self>) {
         let owned=self.clone();
@@ -62,6 +63,7 @@ impl ManagedSources {
     }
     pub(crate) fn owner_barriers(&self) -> OwnerBarriers { self.owners.clone() }
     pub(crate) fn owner_jobs(&self) -> Arc<OwnedJobs> { self.owner_jobs.clone() }
+    pub(crate) fn copy_jobs(&self)->Arc<OwnedJobs> {self.copy_jobs.clone()}
     pub(crate) fn directory_jobs(&self) -> Arc<OwnedJobs> { self.directory_jobs.clone() }
     pub(crate) fn stage_mutations(&self) -> StageMutations { self.catalog.mutations() }
     #[cfg(test)]
@@ -90,6 +92,7 @@ impl ManagedSources {
         self.owners.stop();
         self.owner_jobs.close();
         self.directory_jobs.close();
+        self.copy_jobs.close();
         self.catalog.close();
         self.closed.cancel();
         self.admissions.close();
@@ -97,11 +100,12 @@ impl ManagedSources {
 
     pub(crate) async fn drain(&self) -> Result<(), Error> {
         self.close();
+        let copies=self.copy_jobs.drain().await;
         let directories=self.directory_jobs.drain().await;
         let owners=self.owner_jobs.drain().await;
         let admissions = self.admissions.drain().await;
         let lookups = self.lookups.drain().await;
-        directories.and(owners).and(admissions).and(lookups)
+        copies.and(directories).and(owners).and(admissions).and(lookups)
     }
 
     #[cfg(test)]

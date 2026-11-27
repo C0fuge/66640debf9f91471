@@ -4,6 +4,12 @@ use crate::runtime::AccountStorageBinding;
 use sha2::{Digest,Sha256};
 use std::{fs::Permissions,io::{Read,Write},os::unix::fs::PermissionsExt};
 
+/// An owned input stream. Input checks do not assert output birth or grant IO.
+pub trait CopyInput:Read+Send+'static {
+    fn check(&self)->Result<()>;
+    fn publication_check(&self)->Result<()>;
+}
+
 /// Descriptive copy input. These values cannot designate a pre-existing byte inode.
 pub struct CopyDescription {
     pub stage_id:String,
@@ -19,8 +25,8 @@ pub struct CopyDescription {
 /// validates the original input and cancellation at each chunk/publication edge.
 /// All created byte descriptors/flocks drop before returning metadata. This is
 /// exclusive creation, not proof that generic source readers have been excluded.
-pub fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDescription,
-    reader:&mut impl Read,mut checkpoint:impl FnMut(u64)->Result<()>)->Result<Manifest> {
+pub(super) fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDescription,
+    reader:&mut impl CopyInput,mut checkpoint:impl FnMut(u64)->Result<()>)->Result<Manifest> {
     let CopyDescription {stage_id,scope,created,name,size,limit}=description;
     let account=owner.owner();
     if !hex(&stage_id,32) || created<0 || scope.account!=account.account_id
@@ -35,7 +41,7 @@ pub fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDescription
         || scope.topic.as_ref().is_some_and(|id|!super::manifest::opaque(id)) {
         return Err(Error::Integrity);
     }
-    checkpoint(0)?;
+    reader.check()?;checkpoint(0)?;
     let _mutation=owner.stage_mutations()?.begin()?;
     let uploads=open_uploads(owner,true)?;
     let display_name=name;
@@ -54,6 +60,7 @@ pub fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDescription
             let cap=(size-count).min(buffer.len() as u64) as usize;
             let n=reader.read(&mut buffer[..cap])?;
             if n==0 {return Err(Error::Integrity);}
+            reader.check()?;
             bytes.write_all(&buffer[..n])?;count+=n as u64;
             hash.update(&buffer[..n]);prefix.extend_from_slice(&buffer[..n.min(8-prefix.len())]);
             checkpoint(count)?;
@@ -61,7 +68,7 @@ pub fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDescription
         }
         if reader.read(&mut buffer[..1])?!=0 {return Err(Error::Integrity);}
         bytes.flush()?;bytes.sync_all()?;
-        checkpoint(size)?;dir.check()?;
+        reader.publication_check()?;checkpoint(size)?;dir.check()?;
         if owner.is_revoked() {return Err(Error::TargetChanged);}
         if bytes.metadata()?.len()!=size {return Err(Error::Storage);}
         fd::link(&dir,&bytes,c"bytes")?;published=Some(fd::id(&bytes)?);
@@ -74,7 +81,7 @@ pub fn copy_ready_stage(owner:&AccountStorageBinding,description:CopyDescription
         if encoded.len()>64*1024 {return Err(Error::Integrity);}
         let mut metadata=fd::temp(&dir)?;metadata.write_all(&encoded)?;
         metadata.flush()?;metadata.sync_all()?;
-        checkpoint(size)?;dir.bind(c"bytes",&bytes)?;
+        checkpoint(size)?;reader.publication_check()?;dir.bind(c"bytes",&bytes)?;
         if owner.is_revoked() {return Err(Error::TargetChanged);}
         fd::link(&dir,&metadata,c"manifest.json")?;
         // Ready may survive any following error. Never roll this publication back.

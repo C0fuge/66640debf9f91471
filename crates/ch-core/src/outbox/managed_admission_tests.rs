@@ -147,6 +147,16 @@ fn pause(phase: &'static str) -> (Release, Arc<TextCheckpoint>, oneshot::Receive
     (release,hook,recv)
 }
 
+struct MemoryCopy(std::io::Cursor<Vec<u8>>);
+impl std::io::Read for MemoryCopy {
+    fn read(&mut self,buffer:&mut [u8])->std::io::Result<usize> {std::io::Read::read(&mut self.0,buffer)}
+}
+impl crate::managed_stage::CopyInput for MemoryCopy {
+    fn check(&self)->crate::managed_stage::Result<()> {Ok(())}
+    fn publication_check(&self)->crate::managed_stage::Result<()> {Ok(())}
+}
+fn memory_copy(bytes:&[u8])->MemoryCopy {MemoryCopy(std::io::Cursor::new(bytes.to_vec()))}
+
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn actual_core_copy_exclusively_publishes_ready_without_source_registration_or_escaped_flock() {
     let f=Fixture::new(false).await;
@@ -156,7 +166,7 @@ async fn actual_core_copy_exclusively_publishes_ready_without_source_registratio
     let content=b"actual Core-created synthetic bytes";
     let description=||crate::managed_stage::CopyDescription {stage_id:id.into(),scope:original.scope.clone(),
         created:1,name:"new.bin".into(),size:content.len() as u64,limit:1024};
-    let manifest=crate::managed_stage::copy_ready_stage(&binding,description(),&mut &content[..],|_|Ok(())).unwrap();
+    let manifest=f.core.stage_publisher().copy(binding.retain_binding(),description(),memory_copy(content),|_|Ok(())).await.unwrap();
     let path=f.core.host().config().upload_dir("owner").join(id);
     assert_eq!(std::fs::read(path.join("bytes")).unwrap(),content);
     assert_eq!(manifest.sha256,format!("{:x}",Sha256::digest(content)));
@@ -167,12 +177,14 @@ async fn actual_core_copy_exclusively_publishes_ready_without_source_registratio
     // returning metadata; a real independent verifier can immediately claim.
     let proof=VerifiedStageBinding::verify_ready(&binding,id,1024,|_|Ok(())).unwrap();
     drop(proof);
-    assert!(crate::managed_stage::copy_ready_stage(&binding,description(),&mut &b"foreign replacement"[..],|_|Ok(())).is_err());
+    assert!(f.core.stage_publisher().copy(binding.retain_binding(),description(),memory_copy(b"foreign replacement"),|_|Ok(())).await.is_err());
     assert_eq!(std::fs::read(path.join("bytes")).unwrap(),content);
     let other=Fixture::new(false).await;
     let foreign=other.core.accounts().storage_binding_for("owner").await.unwrap();
     assert!(f.core.stage_mutations().check_binding(&foreign).is_err(),"same owner labels cannot bridge Core issuers");
-    drop(foreign);other.close().await;drop(binding);f.close().await;
+    assert!(matches!(f.core.stage_publisher().copy(foreign,description(),memory_copy(content),|_|Ok(())).await,
+        Err(crate::managed_stage::Error::TargetChanged)));
+    other.close().await;drop(binding);f.close().await;
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
@@ -203,13 +215,74 @@ async fn actual_core_copy_checks_bounded_eof_and_cancel_before_ready_publication
     for (content,size,cancel) in [(&b"short"[..],6,false),(&b"long"[..],3,false),(&b"exact"[..],5,true)] {
         let description=crate::managed_stage::CopyDescription {stage_id:id.into(),scope:original.scope.clone(),
             created:1,name:"new.bin".into(),size,limit:1024};
-        let result=crate::managed_stage::copy_ready_stage(&binding,description,&mut &content[..],|count| {
+        let result=f.core.stage_publisher().copy(binding.retain_binding(),description,memory_copy(content),move|count| {
             if cancel && count==size {Err(crate::managed_stage::Error::Cancelled)} else {Ok(())}
-        });
+        }).await;
         assert!(result.is_err());
         assert!(!f.core.host().config().upload_dir("owner").join(id).exists(),"only the actual fresh incomplete allocation is rolled back");
         assert_eq!(f.count("managed_source"),0);assert_eq!(f.count("outbox"),0);
     }
+    drop(binding);f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_core_copy_caller_loss_and_cancelled_shutdown_still_drain_its_real_writer() {
+    let f=Fixture::new(false).await;
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let original:Manifest=serde_json::from_slice(&std::fs::read(f.stage().join("manifest.json")).unwrap()).unwrap();
+    let scope=original.scope.clone();
+    let description=crate::managed_stage::CopyDescription {stage_id:"5".repeat(32),scope:original.scope,
+        created:1,name:"new.bin".into(),size:5,limit:1024};
+    let (release,hook,entered)=pause("copied");
+    let publisher=f.core.stage_publisher().clone();
+    let caller=tokio::spawn(async move {
+        publisher.copy(binding,description,memory_copy(b"exact"),move|count| {
+            if count==5 {hook("copied");}Ok(())
+        }).await
+    });
+    entered.await.unwrap();caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
+    let closing=f.core.clone();let mut shutdown=tokio::spawn(async move{closing.shutdown().await});
+    assert!(tokio::time::timeout(Duration::from_millis(40),&mut shutdown).await.is_err());
+    shutdown.abort();assert!(shutdown.await.unwrap_err().is_cancelled());
+    let closing=f.core.clone();let mut resumed=tokio::spawn(async move{closing.shutdown().await});
+    assert!(tokio::time::timeout(Duration::from_millis(40),&mut resumed).await.is_err());
+    release.release();resumed.await.unwrap();
+    assert!(!f.core.host().config().upload_dir("owner").join("5".repeat(32)).exists());
+    if let Ok(binding)=f.core.accounts().storage_binding_for("owner").await {
+        let description=crate::managed_stage::CopyDescription {stage_id:"6".repeat(32),scope,
+            created:1,name:"new.bin".into(),size:5,limit:1024};
+        assert!(f.core.stage_publisher().copy(binding,description,memory_copy(b"exact"),|_|Ok(())).await.is_err(),
+            "an authentic storage binding cannot reopen the closed Core copying service");
+        assert!(!f.core.host().config().upload_dir("owner").join("6".repeat(32)).exists());
+    }
+    f.outbox.shutdown().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_core_copy_reservations_bound_real_workers_before_allocating_more_stages() {
+    let f=Fixture::new(false).await;
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let original:Manifest=serde_json::from_slice(&std::fs::read(f.stage().join("manifest.json")).unwrap()).unwrap();
+    let mut callers=Vec::new();let mut releases=Vec::new();
+    for index in 10..14 {
+        let description=crate::managed_stage::CopyDescription {stage_id:format!("{index:032x}"),scope:original.scope.clone(),
+            created:1,name:"new.bin".into(),size:5,limit:1024};
+        let (release,hook,entered)=pause("copied");releases.push(release);
+        let publisher=f.core.stage_publisher().clone();let owner=binding.retain_binding();
+        callers.push(tokio::spawn(async move {
+            publisher.copy(owner,description,memory_copy(b"exact"),move|count| {
+                if count==5 {hook("copied");}Ok(())
+            }).await
+        }));
+        entered.await.unwrap();
+    }
+    let description=crate::managed_stage::CopyDescription {stage_id:"f".repeat(32),scope:original.scope,
+        created:1,name:"overflow.bin".into(),size:5,limit:1024};
+    assert!(matches!(f.core.stage_publisher().copy(binding.retain_binding(),description,memory_copy(b"exact"),|_|Ok(())).await,
+        Err(crate::managed_stage::Error::Busy)));
+    assert!(!f.core.host().config().upload_dir("owner").join("f".repeat(32)).exists());
+    for release in releases {release.release();}
+    for caller in callers {caller.await.unwrap().unwrap();}
     drop(binding);f.close().await;
 }
 

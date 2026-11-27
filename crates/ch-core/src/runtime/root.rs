@@ -125,6 +125,8 @@ pub struct Core {
     logical_owners: super::LogicalOwners,
     #[cfg(target_os = "linux")]
     managed_sources: Arc<crate::managed_sources::ManagedSources>,
+    #[cfg(target_os="linux")]
+    stage_publisher:crate::managed_stage::StagePublisher,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -142,6 +144,8 @@ impl Drop for Core {
         // the App-owned shutdown still must await the actual drain above.
         #[cfg(target_os = "linux")]
         self.logical_owners.close();
+        #[cfg(target_os="linux")]
+        self.stage_publisher.close();
     }
 }
 
@@ -208,6 +212,9 @@ impl Core {
         let accounts = Accounts::new(accounts_db, host.clone(), config.secrets, bus.clone());
         #[cfg(target_os = "linux")]
         host.bind_storage(accounts.host_storage_view()?)?;
+        #[cfg(target_os="linux")]
+        let stage_publisher=crate::managed_stage::StagePublisher::for_core(
+            accounts.host_storage_view()?,managed_sources.copy_jobs());
         accounts.sync_plugins().await?;
 
         let mut tasks = vec![tokio::spawn(forward_host(
@@ -235,6 +242,8 @@ impl Core {
             logical_owners,
             #[cfg(target_os = "linux")]
             managed_sources,
+            #[cfg(target_os="linux")]
+            stage_publisher,
             tasks: Mutex::new(tasks),
         })
     }
@@ -286,6 +295,10 @@ impl Core {
     pub fn stage_mutations(&self) -> crate::managed_stage::StageMutations {
         self.managed_sources.stage_mutations()
     }
+
+    /// Actual Core-owned copying service; no source-read or cleanup grant.
+    #[cfg(target_os="linux")]
+    pub fn stage_publisher(&self)->&crate::managed_stage::StagePublisher {&self.stage_publisher}
 
     /// `<data_dir>/hub.db`. Services open their own connection with [`Core::open_db`].
     pub fn db_path(&self) -> &Path {

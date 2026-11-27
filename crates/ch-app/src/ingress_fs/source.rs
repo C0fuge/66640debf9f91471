@@ -215,3 +215,13 @@ impl Source {
         Ok(())
     }
 }
+
+impl std::io::Read for Source {
+    fn read(&mut self,buffer:&mut [u8])->std::io::Result<usize> {
+        std::io::Read::read(&mut self.file,buffer)
+    }
+}
+impl ch_core::managed_stage::CopyInput for Source {
+    fn check(&self)->Result<()> {Source::check(self)}
+    fn publication_check(&self)->Result<()> {Source::publication_check(self)}
+}

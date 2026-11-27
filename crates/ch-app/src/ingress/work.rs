@@ -410,16 +410,16 @@ impl Job {
         let j = self.clone();
         tokio::task::spawn_blocking(move || {
             // Detached request futures cannot drop these guards while blocking filesystem work still runs.
-            let (_binding, _slot) = (binding, slot);
+            let _slot = slot;
             j.check(&life)?;
             j.check(&current)?;
             let store = j.s.store()?;
             let a = j.s.fs_owner(&j.owner);
             match action {
                 Action::Choose(_) => {
-                    j.copy(&store, &a, source.ok_or(fs::Error::UnsafeSource)?, &life, &_binding)
+                    j.copy(&store, &a, source.ok_or(fs::Error::UnsafeSource)?, &life, binding)
                 }
-                Action::Send(i) => j.admit(&store, &a, &i, &life, &_binding),
+                Action::Send(i) => j.admit(&store, &a, &i, &life, &binding),
                 Action::Discard => j.discard(&store, &a, &life),
             }
         })
@@ -427,12 +427,12 @@ impl Job {
         .map_err(|_| fs::Error::Storage)?
     }
     fn copy(
-        &self,
+        self: &Arc<Self>,
         store: &fs::Store,
         owner: &fs::Owner,
         path: PathBuf,
         life: &CancellationToken,
-        binding: &ch_core::runtime::AccountStorageBinding,
+        binding: ch_core::runtime::AccountStorageBinding,
     ) -> Work<()> {
         let limit = self.effective(None)?;
         let source = fs::Source::open(&path, &self.s.private_roots(), limit)?;
@@ -459,28 +459,30 @@ impl Job {
             chat: self.thread.chat_id.clone(),
             topic: self.thread.topic_id.clone(),
         };
+        let job=self.clone();let copy_life=life.clone();
         let staged = store.stage_bound(
             owner,
             binding,
+            self.s.core.stage_publisher(),
             ch_core::managed_stage::CopyDescription {
                 stage_id:self.stage.clone(),scope,created:ch_db::now_millis(),
                 name:source.display_name().to_owned(),size,limit,
             },
             source,
-            |n| {
-                self.check(life)?;
+            move |n| {
+                job.check(&copy_life)?;
                 #[cfg(test)]
                 if n == size {
-                    self.s.at("copy-publication")?;
+                    job.s.at("copy-publication")?;
                 }
-                if n == size && size > self.effective(None)? {
+                if n == size && size > job.effective(None)? {
                     return Err(fs::Error::TooLarge);
                 }
-                let mut l = lock(&self.s.ledger);
-                if let Some(e) = l.entries.get_mut(&self.seq) {
+                let mut l = lock(&job.s.ledger);
+                if let Some(e) = l.entries.get_mut(&job.seq) {
                     e.copied = Some(n);
                 }
-                l.dirty.insert(self.thread.account_id.clone());
+                l.dirty.insert(job.thread.account_id.clone());
                 Ok(())
             },
         );

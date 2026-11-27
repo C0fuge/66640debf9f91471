@@ -138,24 +138,21 @@ impl Store {
 
     /// Production copying delegates actual exclusive creation to Core. Source
     /// validation and progress remain on the same counted App FS worker.
-    pub fn stage_bound(&self,owner:&Owner,binding:&ch_core::runtime::AccountStorageBinding,
+    pub fn stage_bound(&self,owner:&Owner,binding:ch_core::runtime::AccountStorageBinding,
+        publisher:&ch_core::managed_stage::StagePublisher,
         description:ch_core::managed_stage::CopyDescription,source:Source,
-        mut checkpoint:impl FnMut(u64)->Result<()>)->Result<Stage> {
+        checkpoint:impl FnMut(u64)->Result<()>+Send+'static)->Result<Stage> {
         let actual=binding.owner();
         if actual.account_id!=owner.account || actual.plugin_id!=owner.plugin
             || actual.created_at!=owner.account_created
             || !owner.matches(&description.scope) || description.size!=source.len() {
             return Err(Error::TargetChanged);
         }
-        self.mutations.as_ref().ok_or(Error::Integrity)?.check_binding(binding)?;
+        self.mutations.as_ref().ok_or(Error::Integrity)?.check_binding(&binding)?;
         self.account(owner)?.check()?;
-        let stage_id=description.stage_id.clone();let size=source.len();
-        let mut reader=&source.file;
-        let manifest=ch_core::managed_stage::copy_ready_stage(binding,description,&mut reader,|count| {
-            source.check()?;checkpoint(count)?;
-            if count==size {source.publication_check()?;}
-            Ok(())
-        })?;
+        let stage_id=description.stage_id.clone();
+        let manifest=tokio::runtime::Handle::current().block_on(
+            publisher.copy(binding,description,source,checkpoint))?;
         let stage=self.recover(owner,&stage_id)?;
         if stage.manifest()!=&manifest {return Err(Error::StageChanged);}
         Ok(stage)
