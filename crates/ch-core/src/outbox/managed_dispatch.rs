@@ -63,7 +63,10 @@ pub(super) fn local_failure(inner:&Inner,row:OutboxRow,source:i64,ticket:NativeP
         Ok(vec![OutboxChange::Item(OutboxItem::from_row(&current))])
     });
     if let Ok(receipt)=receipt {tokio::spawn(async move {
-        if let Ok(Ok(Ok(changes)))=receipt.await {for change in changes {publisher.publish(change);}}
+        let result=receipt.await;
+                #[cfg(test)]
+                if !matches!(&result,Ok(Ok(Ok(_)))) {eprintln!("native managed proof did not commit: {result:?}");}
+                if let Ok(Ok(Ok(changes)))=result {for change in changes {publisher.publish(change);}}
     });}
 }
 
@@ -92,7 +95,10 @@ impl Completion {
         if let Ok(receipt)=receipt {
             // DB work is ALREADY admitted and counted before this future exists.
             tokio::spawn(async move {
-                if let Ok(Ok(Ok(changes)))=receipt.await {for change in changes {publisher.publish(change);}}
+                let result=receipt.await;
+                #[cfg(test)]
+                if !matches!(&result,Ok(Ok(Ok(_)))) {eprintln!("native managed proof did not commit: {result:?}");}
+                if let Ok(Ok(Ok(changes)))=result {for change in changes {publisher.publish(change);}}
             });
         }
     }
@@ -118,7 +124,10 @@ impl Completion {
             Ok(vec![])
         });
         if let Ok(receipt)=receipt {tokio::spawn(async move {
-            if let Ok(Ok(Ok(changes)))=receipt.await {for change in changes {publisher.publish(change);}}
+            let result=receipt.await;
+                #[cfg(test)]
+                if !matches!(&result,Ok(Ok(Ok(_)))) {eprintln!("native managed proof did not commit: {result:?}");}
+                if let Ok(Ok(Ok(changes)))=result {for change in changes {publisher.publish(change);}}
         });}
     }
 }

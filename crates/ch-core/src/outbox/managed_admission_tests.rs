@@ -321,7 +321,13 @@ async fn actual_managed_admission_reopens_without_replay_or_false_closure_from_s
 async fn wait_native_state(f:&Fixture,id:i64,state:OutboxState) {
     tokio::time::timeout(Duration::from_secs(20),async {
         while f.outbox.get(id).unwrap().state!=state {tokio::time::sleep(Duration::from_millis(10)).await;}
-    }).await.unwrap();
+    }).await.unwrap_or_else(|_| {
+        let db=f.core.open_db().unwrap();
+        let dispatches:Vec<(String,Option<String>)>=db.conn().prepare("SELECT state,result_ids_json FROM managed_dispatch ORDER BY id")
+            .unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<std::result::Result<_,_>>().unwrap();
+        panic!("native state did not reach {state:?}: row={:?}, dispatches={dispatches:?}, wire={}, closed={}",
+            f.outbox.get(id).unwrap(),f.temp.path().join("wire").exists(),f.temp.path().join("wire.closed").exists());
+    });
 }
 async fn wait_attempt_state(f:&Fixture,state:&str) {
     tokio::time::timeout(Duration::from_secs(5),async {
