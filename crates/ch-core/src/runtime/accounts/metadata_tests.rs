@@ -238,7 +238,7 @@ async fn dropping_core_revokes_only_metadata_and_retained_handles_cannot_mint_or
 #[tokio::test(flavor="multi_thread", worker_threads=3)]
 async fn cancelled_shutdown_and_drainer_keep_actual_metadata_work_owned_and_old_handles_closed() {
     let f = Fixture::new().await; let old = f.snapshot(); let domain = f.core.accounts().0.logical_owners.clone();
-    let (release, entered, _completed) = pause(&domain, "event"); f.pulse("paused-shutdown", "paused");
+    let (release, entered, completed) = pause(&domain, "event"); f.pulse("paused-shutdown", "paused");
     tokio::time::timeout(Duration::from_secs(5), entered).await.unwrap().unwrap();
     let core = f.core.clone(); let shutdown = tokio::spawn(async move { core.shutdown().await });
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -253,18 +253,34 @@ async fn cancelled_shutdown_and_drainer_keep_actual_metadata_work_owned_and_old_
     tokio::time::timeout(Duration::from_secs(5), async {
         while !old.origin().is_revoked() { tokio::task::yield_now().await; }
     }).await.unwrap();
+    // This same valid status can already have reached the row through its
+    // independent native snapshot or the legitimate final shutdown resync.
+    // The boundary under test is NO CHANGE after issuer close, not absence of
+    // metadata that was positively admitted for this owner before close.
+    let baseline = f.core.accounts().get("owner").await.unwrap().unwrap();
+    let handles = || -> i64 {
+        f.core.open_db().unwrap().conn().query_row("SELECT COUNT(*) FROM platform_handle
+            WHERE account_id='owner' AND user_id IN ('paused-shutdown', 'after-close')", [], |row| row.get(0)).unwrap()
+    };
+    // Only the paused Ingest event would create this Contact identity; the
+    // snapshot/resync path records me_user_id without inserting a handle.
+    assert_eq!(handles(), 0);
     assert!(tokio::time::timeout(Duration::from_millis(25), &mut shutdown).await.is_err());
     shutdown.abort(); assert!(shutdown.await.unwrap_err().is_cancelled());
     let retry = domain.clone(); let mut drain = tokio::spawn(async move { retry.drain().await });
     assert!(tokio::time::timeout(Duration::from_millis(25), &mut drain).await.is_err());
-    release.release(); tokio::time::timeout(Duration::from_secs(5), drain).await.unwrap().unwrap().unwrap();
+    release.release();
+    tokio::time::timeout(Duration::from_secs(5), completed).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), drain).await.unwrap().unwrap().unwrap();
+    assert_eq!(f.core.accounts().get("owner").await.unwrap().unwrap(), baseline);
+    assert_eq!(handles(), 0);
     f.core.shutdown().await;
     let reopened = Core::open(config(&f.temp, f.secrets.clone())).await.unwrap();
     assert!(!f.core.accounts().persist_owned(old.clone()).await.unwrap());
     f.core.ingest().deliver_owned("fixture", old.origin().clone(), status("after-close")).await.unwrap();
     let row = reopened.accounts().get("owner").await.unwrap().unwrap();
-    assert_ne!(row.me_user_id.as_deref(), Some("paused-shutdown"));
-    assert_ne!(row.me_user_id.as_deref(), Some("after-close"));
+    assert_eq!(row, baseline);
+    assert_eq!(handles(), 0);
     assert!(f.core.accounts().0.logical_owners.capture(&row).is_none());
     reopened.shutdown().await;
 }
