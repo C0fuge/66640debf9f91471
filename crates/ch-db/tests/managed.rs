@@ -319,7 +319,7 @@ fn migration_reapply_preserves_revision_and_coverage_and_failure_rolls_back() {
     insert_message(db.conn(),&message("/ordinary")).unwrap();
     drain(&db);
     let before:i64=db.conn().query_row("SELECT revision FROM managed_ref_row WHERE consumer_kind='message'",[],|r|r.get(0)).unwrap();
-    db.conn().execute_batch(migrations::MIGRATIONS.last().unwrap().sql).unwrap();
+    db.conn().execute_batch(migrations::MIGRATIONS.iter().find(|m|m.version==5).unwrap().sql).unwrap();
     assert!(managed_reference_coverage(db.conn()).unwrap().complete);
     let after:i64=db.conn().query_row("SELECT revision FROM managed_ref_row WHERE consumer_kind='message'",[],|r|r.get(0)).unwrap();
     assert_eq!(before,after);

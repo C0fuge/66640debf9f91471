@@ -176,6 +176,25 @@ async fn actual_core_copy_exclusively_publishes_ready_without_source_registratio
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn publication_metadata_cannot_make_ordinary_owner_removal_forget_unproved_history() {
+    let f=Fixture::new(false).await;
+    // Remove this synthetic legacy stage so the publication-only guard, rather
+    // than the existing unknown-stage catalog veto, must prevent removal.
+    std::fs::remove_dir_all(f.stage()).unwrap();
+    f.core.open_db().unwrap().conn().execute("INSERT INTO managed_stage_publication(stage_id,nonce,client_id,
+        account_id,plugin_id,account_created_at,path,identity_json,created_at)
+        SELECT ?1,?1,?1,account_id,plugin_id,created_at,'/synthetic/unproved/bytes','{}',0
+        FROM account WHERE account_id='owner'",[STAGE]).unwrap();
+    assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+    assert!(f.core.accounts().get("owner").await.unwrap().is_some());
+    assert_eq!(f.count("managed_stage_publication"),1);assert!(f.root().exists());
+    f.core.accounts().add(NewAccount::new("fixture").id("unrelated").no_start()).await.unwrap();
+    f.core.accounts().remove("unrelated").await.unwrap();
+    assert!(f.core.accounts().get("unrelated").await.unwrap().is_none());
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn actual_core_copy_checks_bounded_eof_and_cancel_before_ready_publication() {
     let f=Fixture::new(false).await;
     let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();

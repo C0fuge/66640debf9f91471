@@ -14,6 +14,11 @@ fn unavailable() -> RuntimeError { RuntimeError::ManagedLifetimeRecoveryUnavaila
 pub(super) fn load(conn:&Connection,config:&HostConfig) -> Result<Recovered> {
     let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Deferred)
         .map_err(ch_db::Error::from)?;
+    // Metadata foundation only: no protected-birth restore/input composition is
+    // active yet. Even an unlinked publication fact must stop before Host startup.
+    let unpublished:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_stage_publication LIMIT 1)",
+        [],|row|row.get(0)).map_err(ch_db::Error::from)?;
+    if unpublished {return Err(unavailable());}
     let noncanonical:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_source WHERE id<=0)
         OR EXISTS(SELECT 1 FROM managed_dispatch WHERE id<=0)
         OR EXISTS(SELECT 1 FROM managed_retirement WHERE source_id<=0)",[],|row|row.get(0))

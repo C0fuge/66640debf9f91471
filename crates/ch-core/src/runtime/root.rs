@@ -29,7 +29,8 @@ fn require_unmanaged_startup(db: &Db) -> Result<()> {
     let protected: bool = db.conn().query_row(
         "SELECT EXISTS(SELECT 1 FROM managed_source LIMIT 1)
              OR EXISTS(SELECT 1 FROM managed_dispatch LIMIT 1)
-             OR EXISTS(SELECT 1 FROM managed_retirement LIMIT 1)",
+             OR EXISTS(SELECT 1 FROM managed_retirement LIMIT 1)
+             OR EXISTS(SELECT 1 FROM managed_stage_publication LIMIT 1)",
         [],
         |row| row.get(0),
     ).map_err(ch_db::Error::from)?;

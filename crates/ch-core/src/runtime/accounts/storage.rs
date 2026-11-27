@@ -149,6 +149,7 @@ pub(super) fn check_owner(conn: &Connection, expected: &AccountRow) -> Result<()
 // These are constant-size/indexed probes, never unbounded orphan/JSON scans.
 pub(super) fn managed_in_use(conn:&Connection,account:&str) -> Result<bool> {
     Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM managed_source WHERE account_id=?1)
+        OR EXISTS(SELECT 1 FROM managed_stage_publication WHERE account_id=?1)
         OR EXISTS(SELECT 1 FROM managed_dispatch LIMIT 1)
         OR EXISTS(SELECT 1 FROM managed_retirement LIMIT 1)",[account],|row|row.get(0))
         .map_err(ch_db::Error::from)?)

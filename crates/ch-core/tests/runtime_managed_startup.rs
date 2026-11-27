@@ -67,6 +67,21 @@ async fn malformed_sources_in_every_state_stop_autostart_and_empty_store_still_r
     core.shutdown().await;
 }
 
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn publication_metadata_alone_stops_before_discovery_until_protected_restore_exists() {
+    let env=Env::new();
+    env.plugin_dir("fixture",&["python3","-I","-c","pass"],json!({}));
+    let db=seed(&env);
+    db.conn().execute("INSERT INTO managed_stage_publication(stage_id,nonce,client_id,account_id,
+        plugin_id,account_created_at,path,identity_json,created_at)
+        VALUES(?1,?1,?1,'owner','fixture',0,'/synthetic/unproved/bytes','{}',0)",[NONCE]).unwrap();
+    refused(&env).await;
+    assert!(!db.conn().query_row("SELECT installed FROM plugin WHERE plugin_id='fixture'",[],|r|r.get::<_,bool>(0)).unwrap());
+    assert_eq!(db.conn().query_row("SELECT count(*) FROM managed_stage_publication",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    db.conn().execute("DELETE FROM managed_stage_publication",[]).unwrap();
+    let core=Core::open(config(&env)).await.unwrap();core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orphan_historical_attempts_and_retirement_journal_also_refuse() {
     let env = Env::new();

@@ -1232,7 +1232,7 @@ impl Supervisor {
                             super::NativeProducer::capture(&conn.producer,origin,run,capabilities)
                         })();
                         let _=reply.send(captured.ok_or_else(||HostError::code(ErrorCode::NotSupported,
-                            "native source release promise is unavailable")));
+                            "native source producer is unavailable")));
                     }
                     #[cfg(target_os="linux")]
                     Some(Command::ManagedFile {permit,cancel,request_id,reply}) => {
