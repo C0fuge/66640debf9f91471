@@ -60,6 +60,7 @@ pub(crate) struct MediaJobs {
     session:String, core:Arc<Core>, db:Arc<Mutex<Db>>, changes:broadcast::Sender<events::Invalidation>,
     ledger:Mutex<Ledger>, downloads:Arc<Semaphore>, provider:Mutex<Option<Arc<dyn SaveDialog>>>,
     closed:Arc<AtomicBool>, stop:CancellationToken, tasks:Mutex<Vec<JoinHandle<()>>>,
+    directory:crate::DirectoryLifetime,
 }
 fn fingerprint(mut media:Media)->Media { media.path=None; media.thumb_path=None; media }
 fn valid_thread(thread:&Thread)->bool { is_valid_id(&thread.account_id) && is_valid_id(&thread.chat_id) && thread.topic_id.as_deref().is_none_or(is_valid_id) }
@@ -110,11 +111,11 @@ impl Job {
 }
 
 impl MediaJobs {
-    pub(crate) fn new(core:Arc<Core>,db:Arc<Mutex<Db>>,changes:broadcast::Sender<events::Invalidation>)->std::io::Result<Arc<Self>> {
+    pub(crate) fn new(core:Arc<Core>,db:Arc<Mutex<Db>>,changes:broadcast::Sender<events::Invalidation>,directory:crate::DirectoryLifetime)->std::io::Result<Arc<Self>> {
         let mut random=[0u8;16]; getrandom::fill(&mut random).map_err(|_|std::io::Error::other("Could not initialize media jobs."))?;
         Ok(Arc::new(Self { session:random.iter().map(|b|format!("{b:02x}")).collect(),core,db,changes,
             ledger:Mutex::new(Ledger { entries:BTreeMap::new(), keys:BTreeMap::new(), active:BTreeSet::new(), native_busy:false,progress_dirty:BTreeSet::new(),progress_last:BTreeMap::new() }),
-            downloads:Arc::new(Semaphore::new(2)),provider:Mutex::new(None),closed:Arc::new(AtomicBool::new(false)),stop:CancellationToken::new(),tasks:Mutex::new(Vec::new()) }))
+            downloads:Arc::new(Semaphore::new(2)),provider:Mutex::new(None),closed:Arc::new(AtomicBool::new(false)),stop:CancellationToken::new(),tasks:Mutex::new(Vec::new()),directory }))
     }
     pub(crate) fn save_available(&self)->bool { lock(&self.provider).is_some() && !self.closed.load(Ordering::Acquire) }
     pub(crate) fn install(&self,provider:Arc<dyn SaveDialog>) { *lock(&self.provider)=Some(provider); }
@@ -202,7 +203,7 @@ impl App {
             l.keys.insert(request_key,seq); l.entries.insert(seq,job.clone()); l.active.insert(seq); if kind==Kind::Save { l.native_busy=true; } job
         };
         let answer=json!(job.snapshot()); job.notify();
-        let context=Worker { core:self.core.clone(),db:self.db.clone(),closed:self.media.closed.clone(),downloads:self.media.downloads.clone(),provider };
+        let context=Worker { core:self.core.clone(),db:self.db.clone(),closed:self.media.closed.clone(),downloads:self.media.downloads.clone(),provider,directory:self.media.directory.clone() };
         let worker_job=job.clone();
         let task=tokio::spawn(async move {
             use futures_util::FutureExt;
@@ -233,7 +234,7 @@ impl App {
     }
 }
 
-struct Worker { core:Arc<Core>, db:Arc<Mutex<Db>>, closed:Arc<AtomicBool>,downloads:Arc<Semaphore>,provider:Option<Arc<dyn SaveDialog>> }
+struct Worker { core:Arc<Core>, db:Arc<Mutex<Db>>, closed:Arc<AtomicBool>,downloads:Arc<Semaphore>,provider:Option<Arc<dyn SaveDialog>>,directory:crate::DirectoryLifetime }
 
 // Retain negative accounting through every actual cache descriptor, including
 // the save chooser and an owned blocking copy after its async waiter is lost.
@@ -243,16 +244,19 @@ struct CacheRead {
     file: CacheFile,
     #[cfg(target_os="linux")]
     _read_scope: ch_core::managed_stage::StageReadScope,
+    // Also retain the real process lock (and isolated demo root) after shutdown
+    // aborts an async waiter while its blocking filesystem work still runs.
+    _directory:crate::DirectoryLifetime,
 }
 impl CacheRead {
-    fn open(core:&Core, root:&std::path::Path, path:&std::path::Path)
+    fn open(core:&Core, directory:crate::DirectoryLifetime, root:&std::path::Path, path:&std::path::Path)
         -> std::result::Result<Self,CacheFileError> {
         #[cfg(target_os="linux")]
         let read_scope=core.stage_mutations().read_scope().map_err(|_|CacheFileError::Cancelled)?;
         #[cfg(not(target_os="linux"))]
         let _=core;
         let file=CacheFile::open(root,path)?;
-        Ok(Self {file,#[cfg(target_os="linux")] _read_scope:read_scope})
+        Ok(Self {file,#[cfg(target_os="linux")] _read_scope:read_scope,_directory:directory})
     }
 }
 impl Worker {
@@ -279,7 +283,8 @@ impl Worker {
         let result=match serde_json::from_value::<MediaDownloadResult>(raw){Ok(r)=>r,Err(_)=>{job.finish(State::Unknown,Some(JobError::unknown()),true);return;}};
         let root=self.core.host().config().cache_dir(&s.thread.account_id);let path=PathBuf::from(&result.path);
         let core=self.core.clone();
-        let checked=tokio::task::spawn_blocking(move||CacheRead::open(&core,&root,&path)).await;
+        let directory=self.directory.clone();
+        let checked=tokio::task::spawn_blocking(move||CacheRead::open(&core,directory,&root,&path)).await;
         let file=match checked {Ok(Ok(f))=>f,Ok(Err(e))=>{job.finish(State::Failed,Some(cache_error(e)),true);return;},Err(_)=>{job.finish(State::Unknown,Some(JobError::unknown()),true);return;}};
         let bytes=file.file.metadata().byte_len;
         if job.snapshot().done_bytes.as_deref().and_then(|v|v.parse::<u64>().ok()).is_some_and(|done|done>bytes) {
@@ -297,7 +302,8 @@ impl Worker {
         let name=suggested_name(target.media.filename.as_deref());
         let root=self.core.host().config().cache_dir(&target.owner.account_id);
         let core=self.core.clone();
-        let opened=tokio::task::spawn_blocking(move||CacheRead::open(&core,&root,&PathBuf::from(path))).await;
+        let directory=self.directory.clone();
+        let opened=tokio::task::spawn_blocking(move||CacheRead::open(&core,directory,&root,&PathBuf::from(path))).await;
         let source=match opened {Ok(Ok(f))=>f,Ok(Err(e))=>{job.finish(State::Failed,Some(cache_error(e)),true);return;},Err(_)=>{job.finish(State::Failed,Some(JobError::new("internal","internal")),true);return;}};
         if job.cancel.is_cancelled() {job.finish(State::Cancelled,None,true);return;}
         let Some(provider)=self.provider else {job.finish(State::Failed,Some(JobError::new("unsupported","unavailable")),true);return;};

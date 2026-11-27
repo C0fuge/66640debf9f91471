@@ -22,6 +22,8 @@ mod events;
 mod projection;
 mod wire;
 
+type DirectoryLifetime = (Arc<DataDirectoryLock>, Option<Arc<TempDir>>);
+
 use ch_core::{
     history::{History, HistoryConfig},
     host::MemorySecretStore,
@@ -162,7 +164,8 @@ impl App {
         let steps = Steps::default();
         let stop = CancellationToken::new();
         let db = Arc::new(Mutex::new(db));
-        let media = media::MediaJobs::new(core.clone(), db.clone(), changes.clone())?;
+        let directory = (Arc::new(directory_lock), demo.map(Arc::new));
+        let media = media::MediaJobs::new(core.clone(), db.clone(), changes.clone(), directory.clone())?;
         let reactions = Arc::new(reactions::Service::new()?);
         let ingress = ingress::Service::new(core.clone(), db.clone(), outbox.clone(), changes.clone()).await?;
         let pump = tokio::spawn(events::pump(
@@ -175,7 +178,6 @@ impl App {
             changes.clone(),
             stop.clone(),
         ));
-        let directory = (Arc::new(directory_lock), demo.map(Arc::new));
         let text_admissions = text_admission::Service::new(core.clone(), db.clone(), outbox.clone(), changes.clone(), directory.clone());
         let app = Self {
             core,

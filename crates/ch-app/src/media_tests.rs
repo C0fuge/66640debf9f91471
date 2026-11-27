@@ -238,7 +238,8 @@ async fn actual_cache_descriptor_survives_waiter_loss_and_closed_core_rejects_ne
     let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new()));
     config.autostart=false;
     let core=Core::open(config).await.unwrap();
-    let source=CacheRead::open(&core,&root,&path).unwrap();
+    let directory=(Arc::new(ch_core::runtime::DataDirectoryLock::acquire(temp.path()).unwrap()),None);
+    let source=CacheRead::open(&core,directory.clone(),&root,&path).unwrap();
     assert_eq!(open_handles(),1);
     let (entered,ready)=tokio::sync::oneshot::channel();
     let (resume,paused)=std::sync::mpsc::channel();
@@ -256,13 +257,16 @@ async fn actual_cache_descriptor_survives_waiter_loss_and_closed_core_rejects_ne
     caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
     core.shutdown().await;
     assert_eq!(open_handles(),1);
-    assert!(matches!(CacheRead::open(&core,&root,&path),Err(CacheFileError::Cancelled)));
-    assert!(matches!(CacheRead::open(&core,&root,&root.join("missing")),Err(CacheFileError::Cancelled)));
+    assert!(matches!(CacheRead::open(&core,directory.clone(),&root,&path),Err(CacheFileError::Cancelled)));
+    assert!(matches!(CacheRead::open(&core,directory.clone(),&root,&root.join("missing")),Err(CacheFileError::Cancelled)));
+    drop(directory);
+    assert!(ch_core::runtime::DataDirectoryLock::acquire(temp.path()).is_err());
     resume.send(()).unwrap();
     let (copied,bytes)=tokio::time::timeout(Duration::from_secs(5),done).await.unwrap().unwrap();
     assert_eq!(copied.unwrap(),25);
     assert_eq!(bytes,b"isolated held cache bytes");
     assert_eq!(open_handles(),0);
+    assert!(ch_core::runtime::DataDirectoryLock::acquire(temp.path()).is_ok());
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]

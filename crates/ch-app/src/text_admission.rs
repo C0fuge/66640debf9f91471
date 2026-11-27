@@ -10,7 +10,7 @@ use tokio::{sync::{Semaphore, OwnedSemaphorePermit, broadcast, oneshot}, task::J
 use tokio_util::sync::CancellationToken;
 
 const JOBS: u32 = 4;
-type Directory = (Arc<ch_core::runtime::DataDirectoryLock>, Option<Arc<tempfile::TempDir>>);
+type Directory = crate::DirectoryLifetime;
 struct Lifetime { _slot: OwnedSemaphorePermit, _directory: Directory }
 #[derive(Default)]
 struct State { closed: bool, jobs: Vec<JoinHandle<()>> }
