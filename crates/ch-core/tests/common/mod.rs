@@ -127,13 +127,13 @@ pub fn dump(db: &Db) -> String {
                         let kind: String = r.get(kind_index)?;
                         let raw: String = r.get(i)?;
                         v = rusqlite::types::Value::Text(managed::key(conn, &kind, &raw));
-                    } else if t == "managed_ref" {
-                        if let rusqlite::types::Value::Integer(id) = &v {
-                            if c == "message_id" {
-                                v = rusqlite::types::Value::Text(managed::key(conn, "message", &id.to_string()));
-                            } else if c == "source_id" {
-                                v = rusqlite::types::Value::Text(managed::source_key(conn, *id));
-                            }
+                    } else if t == "managed_ref"
+                        && let rusqlite::types::Value::Integer(id) = &v
+                    {
+                        if c == "message_id" {
+                            v = rusqlite::types::Value::Text(managed::key(conn, "message", &id.to_string()));
+                        } else if c == "source_id" {
+                            v = rusqlite::types::Value::Text(managed::source_key(conn, *id));
                         }
                     }
                     parts.push(format!("{c}={v:?}"));
