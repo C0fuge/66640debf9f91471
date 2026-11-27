@@ -164,8 +164,10 @@ async fn fake_sign_in_ingest_restart() {
     assert!(!seen_auth, "no second sign-in");
     assert_eq!(count(&core, q_conv, &id), 4);
     core.shutdown().await;
+    #[cfg(target_os="linux")]
+    assert!(core.accounts().get(&id).await.is_err(),"closed account service refuses new work");
     assert_eq!(
-        core.accounts().get(&id).await.unwrap().unwrap().state,
+        ch_db::get_account(core.open_db().unwrap().conn(),&id).unwrap().unwrap().state,
         "disconnected"
     );
 }

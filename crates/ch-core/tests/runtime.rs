@@ -140,7 +140,9 @@ async fn echo_add_ingest_restart_remove() {
     assert!(p.installed);
 
     core.shutdown().await;
-    let r = core.accounts().get(&id).await.unwrap().unwrap();
+    #[cfg(target_os="linux")]
+    assert!(core.accounts().get(&id).await.is_err(),"closed account service refuses new work");
+    let r=ch_db::get_account(core.open_db().unwrap().conn(),&id).unwrap().unwrap();
     assert_eq!(r.state, "disconnected", "final host state persisted");
     assert!(r.enabled, "still wanted");
     drop(core);
