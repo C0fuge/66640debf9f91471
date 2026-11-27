@@ -39,14 +39,14 @@ impl History {
             .expect("history DB semaphore is not closed");
     }
 
-    fn active(&self, ctx: &Ctx) -> Result<()> {
+    pub(super) fn active(&self, ctx: &Ctx) -> Result<()> {
         if self.0.stop.is_cancelled() || ctx.owner.is_revoked() {
             return Err(HistoryError::UnknownAccount(ctx.owner.owner().account_id.clone()));
         }
         Ok(())
     }
 
-    fn prune(&self) {
+    pub(super) fn prune(&self) {
         lock(&self.0.chat_locks).retain(|(owner, _), value| !owner.is_revoked() && value.strong_count() > 0);
         lock(&self.0.inflight).retain(|((owner, _), _), cell| !owner.is_revoked() && Arc::strong_count(cell) > 1);
         let now = Instant::now();
@@ -54,7 +54,7 @@ impl History {
         lock(&self.0.gap_errors).retain(|(owner, _), _| !owner.is_revoked());
     }
 
-    async fn ctx(&self, ck: &ChatKey) -> Result<Ctx> {
+    pub(super) async fn ctx(&self, ck: &ChatKey) -> Result<Ctx> {
         self.prune();
         if self.0.stop.is_cancelled() { return Err(HistoryError::UnknownAccount(ck.account_id.clone())); }
         // Accounts metadata readers can themselves be blocking. An owned async wrapper
@@ -72,7 +72,7 @@ impl History {
         Ok(ctx)
     }
 
-    async fn serial(&self, ctx: &Ctx, ck: &ChatKey) -> Result<Ctx> {
+    pub(super) async fn serial(&self, ctx: &Ctx, ck: &ChatKey) -> Result<Ctx> {
         let mutex = self.chat_lock(ctx, ck);
         let revoked = ctx.owner.revocation();
         let guard = tokio::select! {
@@ -87,7 +87,7 @@ impl History {
         Ok(ctx)
     }
 
-    fn chat_lock(&self, ctx: &Ctx, ck: &ChatKey) -> Arc<tokio::sync::Mutex<()>> {
+    pub(super) fn chat_lock(&self, ctx: &Ctx, ck: &ChatKey) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = lock(&self.0.chat_locks);
         locks.retain(|(owner, _), value| !owner.is_revoked() && value.strong_count() > 0);
         let scope = (ctx.owner.clone(), ck.clone());
@@ -97,7 +97,7 @@ impl History {
         mutex
     }
 
-    fn page(&self, ctx: &Ctx, mut page: Page) -> Result<Page> {
+    pub(super) fn page(&self, ctx: &Ctx, mut page: Page) -> Result<Page> {
         self.active(ctx)?;
         page.owner = Some(ctx.owner.clone());
         Ok(page)
@@ -129,12 +129,12 @@ impl History {
             .map_err(|_| HistoryError::Storage(Arc::new(ch_db::Error::Invalid("history DB work is busy".into()))))
     }
 
-    async fn read<T, F>(&self, ctx: &Ctx, f: F) -> Result<T>
+    pub(super) async fn read<T, F>(&self, ctx: &Ctx, f: F) -> Result<T>
     where T:Send+'static, F:FnOnce(&Self, &rusqlite::Connection)->Result<T>+Send+'static {
         self.work(ctx, move |this, ingest, _owner, _stop| f(this, ingest.db().conn())).await
     }
 
-    async fn work<T, F>(&self, ctx: &Ctx, f: F) -> Result<T>
+    pub(super) async fn work<T, F>(&self, ctx: &Ctx, f: F) -> Result<T>
     where T:Send+'static, F:FnOnce(&Self, &Ingest, &AccountStorageObservation, &CancellationToken)->Result<T>+Send+'static {
         self.active(ctx)?;
         // Never acquire storage while holding Ingest or an SQLite writer.
@@ -153,7 +153,7 @@ impl History {
         }).await.map_err(|_| HistoryError::Storage(Arc::new(ch_db::Error::Invalid("history DB worker failed".into()))))?
     }
 
-    async fn global_read<T, F>(&self, f: F) -> Result<T>
+    pub(super) async fn global_read<T, F>(&self, f: F) -> Result<T>
     where T:Send+'static, F:FnOnce(&rusqlite::Connection)->Result<T>+Send+'static {
         let permit = self.db_permit()?;
         let this = self.clone();
