@@ -286,6 +286,8 @@ const DB_JOBS: u32 = 64;
 
 struct Inner {
     ingest: SharedIngest,
+    #[cfg(target_os="linux")]
+    references:crate::runtime::reference_queue::ReferenceQueue,
     bus: Option<ChangeBus>,
     api: Arc<dyn PluginApi>,
     accounts: Accounts,
@@ -399,6 +401,8 @@ impl History {
         cfg.page_size = cfg.page_size.clamp(1, 200);
         Self(Arc::new(Inner {
             ingest: core.ingest().shared_ingest(),
+            #[cfg(target_os="linux")]
+            references:core.ingest().reference_queue(),
             bus,
             api,
             accounts: core.accounts().clone(),

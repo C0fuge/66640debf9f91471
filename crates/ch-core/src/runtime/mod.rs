@@ -33,7 +33,7 @@ mod error;
 mod directory_lock;
 pub use directory_lock::DataDirectoryLock;
 mod managed_proof;
-mod reference_queue;
+pub(crate) mod reference_queue;
 mod root;
 mod sink;
 

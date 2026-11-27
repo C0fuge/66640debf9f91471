@@ -143,6 +143,8 @@ impl History {
         let ctx = ctx.clone();
         tokio::task::spawn_blocking(move || {
             let _serial = ctx.serial.clone();
+            #[cfg(target_os="linux")]
+            let _references=this.0.references.read();
             this.active(&ctx)?;
             let ingest = lock(&this.0.ingest);
             lease.check(ingest.db().conn())?;
@@ -159,6 +161,9 @@ impl History {
         let this = self.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            #[cfg(target_os="linux")]
+            let _references=this.0.references.read();
+            if this.0.stop.is_cancelled() {return Err(worker_failed());}
             let ingest = lock(&this.0.ingest);
             f(ingest.db().conn())
         }).await.map_err(|_| HistoryError::Storage(Arc::new(ch_db::Error::Invalid("history DB worker failed".into()))))?

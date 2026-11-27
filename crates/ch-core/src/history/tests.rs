@@ -1146,3 +1146,61 @@ async fn final_history_close_veto_rolls_back_page_cursor_stub_and_gap_with_accou
     }
     history.close(); history.drain().await; fixture.core.shutdown().await;
 }
+
+#[cfg(target_os="linux")]
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_history_page_holds_reference_gate_after_its_caller_disappears() {
+    let fixture=shared_ingest().await;
+    let history=History::new(&fixture.core,Platform::new(0,&[]),cfg(10));
+    let ctx=history.ctx(&chat()).await.unwrap();
+    let (entered_tx,entered_rx)=tokio::sync::oneshot::channel();
+    let (release_tx,release_rx)=std::sync::mpsc::sync_channel(1);
+    let caller={let history=history.clone();tokio::spawn(async move {
+        history.work(&ctx,move|_,ingest,owner,stop| {
+            ingest.apply_history_page_owned("fake","acc","c1",None,&[message("c1",1)],
+                None,owner,stop,move|_,_,_| {
+                    let _=entered_tx.send(());release_rx.recv().unwrap();Ok(())
+                })?;
+            Ok::<_,HistoryError>(())
+        }).await
+    })};
+    entered_rx.await.unwrap();
+    caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
+    let queue=fixture.core.ingest().reference_queue();
+    let mut exclusive=Box::pin(queue.exclusive_for_test());
+    assert!(tokio::time::timeout(Duration::from_millis(30),&mut exclusive).await.is_err(),
+        "lost waiter cannot release the real history worker's metadata scope");
+    release_tx.send(()).unwrap();
+    let guard=tokio::time::timeout(Duration::from_secs(2),exclusive).await.unwrap();
+    {
+        let ingest=fixture.lock().unwrap();
+        let count:i64=ingest.db().conn().query_row("SELECT COUNT(*) FROM message",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,1,"the admitted real page finishes exactly once");
+    }
+    drop(guard);history.close();history.drain().await;fixture.core.shutdown().await;
+}
+
+#[cfg(target_os="linux")]
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn queued_actual_history_worker_rechecks_close_before_db_and_remains_drainable() {
+    let fixture=shared_ingest().await;
+    let history=History::new(&fixture.core,Platform::new(0,&[]),cfg(10));
+    let queue=fixture.core.ingest().reference_queue();
+    let guard=queue.exclusive_for_test().await;
+    let called=Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let caller={let history=history.clone();let called=called.clone();tokio::spawn(async move {
+        history.global_read(move|_| {called.store(true,std::sync::atomic::Ordering::SeqCst);Ok(())}).await
+    })};
+    tokio::time::timeout(Duration::from_secs(2),async {
+        while queue.waiting_for_test()==0 {tokio::task::yield_now().await;}
+    }).await.unwrap();
+    // The real queued closure has not taken the shared ingest mutex.
+    assert!(history.0.ingest.try_lock().is_ok());
+    caller.abort();assert!(caller.await.unwrap_err().is_cancelled());history.close();
+    let mut drain=Box::pin(history.drain());
+    assert!(tokio::time::timeout(Duration::from_millis(30),&mut drain).await.is_err());
+    assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    drop(guard);tokio::time::timeout(Duration::from_secs(2),drain).await.unwrap();
+    assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    fixture.core.shutdown().await;
+}

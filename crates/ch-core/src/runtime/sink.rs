@@ -73,7 +73,7 @@ impl IngestSink {
         Arc::clone(&self.ingest)
     }
 
-    pub(super) fn reference_queue(&self)->super::reference_queue::ReferenceQueue {self.references.clone()}
+    pub(crate) fn reference_queue(&self)->super::reference_queue::ReferenceQueue {self.references.clone()}
 
     /// Run `f` with the ingest (the main writer) on a blocking task. Services use it for
     /// core-initiated effects (`apply_*`) and to read through the main connection; publish the
