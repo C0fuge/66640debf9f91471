@@ -255,6 +255,8 @@ impl CacheRead {
         let read_scope=core.stage_mutations().read_scope().map_err(|_|CacheFileError::Cancelled)?;
         #[cfg(not(target_os="linux"))]
         let _=core;
+        #[cfg(target_os="linux")]
+        directory.0.check_current().map_err(|_|CacheFileError::Changed)?;
         let file=CacheFile::open(root,path)?;
         Ok(Self {file,#[cfg(target_os="linux")] _read_scope:read_scope,_directory:directory})
     }
@@ -327,6 +329,9 @@ impl Worker {
             // Capture the entire wrapper, not just its file field: precise
             // closure capture must not leave its scope in the async waiter.
             let mut source=source;
+            let directory=source._directory.clone();
+            #[cfg(target_os="linux")]
+            directory.0.check_current().map_err(|_|SaveFileError::SourceChanged)?;
             // A native destination may be anywhere, including the configured
             // accounts tree. Invalidate before the first destination probe and
             // retain through actual destination handles closing in publish().
@@ -336,7 +341,15 @@ impl Worker {
             save_file::publish(&mut source.file,&destination,MAX_CACHE_FILE_BYTES,
                 move||cancel_job.cancel.is_cancelled()||closed.load(Ordering::Acquire),
                 move|done,total|{let mut s=lock(&progress_job.snapshot);s.done_bytes=Some(done.to_string());s.total_bytes=Some(total.to_string());let account=s.thread.account_id.clone();drop(s);if let Some(m)=progress_job.manager.upgrade(){lock(&m.ledger).progress_dirty.insert(account);}},
-                move||{let Some(manager)=weak.upgrade()else{return false;};commit_job.begin_commit(&manager)})
+                move||{
+                    // Recheck before the separate publication decision. No DB
+                    // mutex is held during this real filesystem observation.
+                    #[cfg(target_os="linux")]
+                    if directory.0.check_current().is_err() {return false;}
+                    #[cfg(not(target_os="linux"))]
+                    let _directory=directory;
+                    let Some(manager)=weak.upgrade()else{return false;};commit_job.begin_commit(&manager)
+                })
         }).await;
         match copied {
             Ok(Ok(_))=>job.finish(State::Succeeded,None,true),

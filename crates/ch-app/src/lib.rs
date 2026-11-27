@@ -153,6 +153,11 @@ impl App {
         let directory_lock=DataDirectoryLock::acquire(&config.data_dir)?;
         config.autostart = false;
         let core = Arc::new(Core::open(config).await?);
+        #[cfg(target_os="linux")]
+        if let Err(error)=directory_lock.check_current() {
+            core.shutdown().await;
+            return Err(error.into());
+        }
         let c = core.clone();
         let (db, search) = tokio::task::spawn_blocking(move || -> Startup<_> {
             Ok((c.open_db()?, Search::from_core(&c)?))

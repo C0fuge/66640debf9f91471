@@ -269,6 +269,30 @@ async fn actual_cache_descriptor_survives_waiter_loss_and_closed_core_rejects_ne
     assert!(ch_core::runtime::DataDirectoryLock::acquire(temp.path()).is_ok());
 }
 
+#[cfg(target_os="linux")]
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn replaced_real_directory_lock_refuses_cache_open_and_late_save_choice() {
+    for after_choice in [false,true] {
+        let (mut app,thread)=fixture("good").await;
+        let dialog=Arc::new(HeldDialog::default());app.set_save_dialog(dialog.clone());
+        if after_choice {
+            start(&app,&thread,"stale-lock",Kind::Save,"message").await;
+            wait_state(&app,&thread,"stale-lock","choosing").await;
+        }
+        let root=app.core.data_dir();
+        std::fs::rename(root.join("app.lock"),root.join("previous.lock")).unwrap();
+        let replacement=ch_core::runtime::DataDirectoryLock::acquire(root).unwrap();
+        let dest=root.join("must-not-publish.bin");
+        if after_choice {dialog.answer(Ok(Some(dest.clone()))).await;}
+        else {start(&app,&thread,"stale-lock",Kind::Save,"message").await;}
+        let result=wait_state(&app,&thread,"stale-lock","failed").await;
+        assert_eq!(result["error"]["reason"],"changed");
+        assert_eq!(dialog.calls.load(Ordering::Acquire),usize::from(after_choice));
+        assert!(!dest.exists());assert!(trace(&app).is_empty());
+        app.shutdown().await;drop(replacement);
+    }
+}
+
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn changed_attachment_and_disabled_account_cannot_publish_late_selection() {
     for disabled in [false,true] {
