@@ -1494,3 +1494,60 @@ async fn known_copy_receipt_survives_reader_admission_closing_after_actual_outpu
     assert_eq!(f.count("managed_stage_publication"),1);
     f.assert_no_admission();f.assert_no_wire();f.close().await;
 }
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn ready_discard_precheck_vetoes_dirty_null_source_extension_and_inode_index_hits() {
+    let f=Fixture::new(false).await;
+    let binding=f.core.accounts().storage_binding_for("owner").await.unwrap();
+    let proof=VerifiedStageBinding::verify_ready(&binding,STAGE,1024,|_|Ok(())).unwrap();
+    let db=f.core.open_db().unwrap();
+    let conversation=ch_db::get_conversation(db.conn(),"owner","chat").unwrap().unwrap().id;
+    // Unrelated history must not consume this indexed negative lookup's budget.
+    for n in 0..300 {
+        ch_db::insert_message(db.conn(),&ch_db::MessageRow {conversation_id:conversation,
+            message_id:format!("unrelated-{n}"),direction:"in".into(),sent_at:1,text:Some("ordinary".into()),
+            ..Default::default()}).unwrap();
+    }
+    f.core.stage_publisher().check_unadmitted_ready(&proof).await.unwrap();
+    let row=ch_db::insert_message(db.conn(),&ch_db::MessageRow {conversation_id:conversation,
+        message_id:"reference".into(),direction:"in".into(),sent_at:1,..Default::default()}).unwrap();
+    let path=f.stage().join("bytes");
+    let original=std::fs::read(f.stage().join("manifest.json")).unwrap();
+    let reference=serde_json::json!({"nested":{"attachment_path":path}}).to_string();
+    for column in ["link_preview_json","ext_json","reply_to_json","forward_from_json",
+        "poll_json","location_json","contact_card_json","dice_json","buttons_json","action_json"] {
+        db.conn().execute(&format!("UPDATE message SET {column}=?1 WHERE id=?2"),
+            rusqlite::params![reference,row]).unwrap();
+        let hit:bool=db.conn().query_row("SELECT EXISTS(SELECT 1 FROM managed_ref
+            WHERE path=?1 AND source_id IS NULL)",[path.to_str()],|r|r.get(0)).unwrap();
+        assert!(hit,"{column}");
+        assert!(matches!(f.core.stage_publisher().check_unadmitted_ready(&proof).await,
+            Err(crate::managed_stage::Error::Busy)),"{column}");
+        db.conn().execute(&format!("UPDATE message SET {column}=NULL WHERE id=?1"),[row]).unwrap();
+    }
+    for column in ["avatar_path","wallpaper"] {
+        db.conn().execute(&format!("UPDATE conversation SET {column}=?1 WHERE id=?2"),
+            rusqlite::params![path.to_str(),conversation]).unwrap();
+        assert!(matches!(f.core.stage_publisher().check_unadmitted_ready(&proof).await,
+            Err(crate::managed_stage::Error::Busy)));
+        db.conn().execute(&format!("UPDATE conversation SET {column}=NULL WHERE id=?1"),[conversation]).unwrap();
+    }
+    let outside=f.temp.path().join("unrelated-cache.bin");std::fs::write(&outside,b"ordinary").unwrap();
+    db.conn().execute("UPDATE message SET media_json=?1 WHERE id=?2",
+        rusqlite::params![serde_json::json!({"kind":"document","path":outside}).to_string(),row]).unwrap();
+    // A stale or dirty metadata hint may only veto. This deliberately does not
+    // assert an actual alias or manufacture a positive closure/cleanup proof.
+    let fingerprint=&proof.manifest().fingerprint;
+    db.conn().execute("UPDATE managed_ref SET resolved_dev=?1,resolved_ino=?2 WHERE path=?3",
+        rusqlite::params![fingerprint.dev,fingerprint.ino,outside.to_str()]).unwrap();
+    assert!(matches!(f.core.stage_publisher().check_unadmitted_ready(&proof).await,
+        Err(crate::managed_stage::Error::Busy)));
+    db.conn().execute("UPDATE message SET media_json=NULL WHERE id=?1",[row]).unwrap();
+    // This is only a necessary negative precheck; no unlink or quota release.
+    f.core.stage_publisher().check_unadmitted_ready(&proof).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(),b"synthetic bytes");
+    assert_eq!(std::fs::read(f.stage().join("manifest.json")).unwrap(),original);
+    assert_eq!(f.count("managed_source"),0);assert_eq!(f.count("outbox"),0);
+    assert_eq!(f.count("managed_ready_retirement"),0);assert_eq!(f.count("managed_stage_publication"),1);
+    f.assert_no_wire();drop(proof);drop(binding);f.close().await;
+}

@@ -238,8 +238,8 @@ struct Worker { core:Arc<Core>, db:Arc<Mutex<Db>>, closed:Arc<AtomicBool>,downlo
 
 // Retain negative accounting through every actual cache descriptor, including
 // the save chooser and an owned blocking copy after its async waiter is lost.
-// The scope is last so the file and its anchored directories close first. It
-// provides no pathname, historical-reader closure, or deletion permission.
+// The file and its anchored directories close before the scope, then the real
+// directory lock. Accounting grants no historical-reader closure or deletion.
 struct CacheRead {
     file: CacheFile,
     #[cfg(target_os="linux")]

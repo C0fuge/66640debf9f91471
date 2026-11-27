@@ -111,13 +111,30 @@ impl StagePublisher {
     /// holds the real independently verified byte inode/flock, not parsed JSON.
     /// No descriptor or reusable permission escapes this DB-only lookup. The
     /// caller must still recheck its exact Ready/flock and all stored references
-    /// under its writer lock through destructive settlement.
+    /// under its writer lock through destructive settlement. Existing literal
+    /// and inode-index hits also veto; their absence proves neither complete
+    /// coverage nor that unresolved aliases/historical readers have settled.
     pub async fn check_unadmitted_ready(&self,proof:&super::VerifiedStageBinding)->Result<()> {
         if !self.issuer.current(&proof.owner.observation()) {return Err(Error::TargetChanged);}
         self.protection.check(&proof.owner)?;proof.recheck_ready()?;
         let identity=super::PublicationIdentity::capture(&proof.owner,&proof.dir,proof.manifest())?;
         let observed=proof.owner.observation();let issuer=self.issuer.clone();let stopped=self.jobs.stopped();
-        self.proofs.with_transaction(move|scope|check_unadmitted(scope.transaction(),&issuer,&observed,&stopped,&identity))
+        self.proofs.with_transaction(move|scope| {
+            let tx=scope.transaction();
+            check_unadmitted(tx,&issuer,&observed,&stopped,&identity)?;
+            // Include pre-admission NULL-source slots and every consumer/column
+            // extracted by the existing general ledger. Even a stale or dirty
+            // hit is a negative veto, never a positive alias/read/cleanup grant.
+            let fingerprint=&identity.manifest().fingerprint;
+            let dev=i64::try_from(fingerprint.dev).map_err(|_|Error::Integrity)?;
+            let ino=i64::try_from(fingerprint.ino).map_err(|_|Error::Integrity)?;
+            let referenced:bool=tx.query_row("SELECT
+                EXISTS(SELECT 1 FROM managed_ref WHERE path=?1)
+                OR EXISTS(SELECT 1 FROM managed_ref WHERE resolved_dev=?2 AND resolved_ino=?3)",
+                rusqlite::params![identity.path().to_str(),dev,ino],|r|r.get(0)).map_err(|_|Error::Storage)?;
+            if referenced {return Err(Error::Busy);}
+            Ok(())
+        })
             .await.map_err(|_|Error::Unknown)??;
         proof.recheck_ready()
     }
