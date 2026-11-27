@@ -163,10 +163,9 @@ async fn echo_add_ingest_restart_remove() {
     assert!(core.accounts().get(&id).await.unwrap().is_none());
     assert_eq!(count(&core, q_conv, &id), 0);
     assert!(!env.data_dir.join("accounts").join(&id).exists());
-    assert_eq!(
-        core.host().account("echo", &id).map(|a| a.phase),
-        Some(AccountPhase::Stopped)
-    );
+    // The stopped internal record may remain, but the deleted logical owner
+    // must no longer be exposed through public Host metadata snapshots.
+    assert!(core.host().account("echo", &id).is_none());
     let row2 = core
         .accounts()
         .add(NewAccount::new("echo").no_start())
