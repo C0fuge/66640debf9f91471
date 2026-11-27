@@ -240,7 +240,7 @@ async fn actual_core_copy_caller_loss_and_cancelled_shutdown_still_drain_its_rea
             if count==5 {hook("copied");}Ok(())
         }).await
     });
-    entered.await.unwrap();caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
+    entered.await.unwrap();caller.abort();assert!(matches!(caller.await,Err(error) if error.is_cancelled()));
     let closing=f.core.clone();let mut shutdown=tokio::spawn(async move{closing.shutdown().await});
     assert!(tokio::time::timeout(Duration::from_millis(40),&mut shutdown).await.is_err());
     shutdown.abort();assert!(shutdown.await.unwrap_err().is_cancelled());
