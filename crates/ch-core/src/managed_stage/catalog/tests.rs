@@ -49,6 +49,52 @@ fn known(catalog: &PrivateByteCatalog, path: &Path) -> bool {
 }
 
 #[test]
+fn outside_observation_is_exact_issuer_bound_and_revoked_by_actual_supported_writer() {
+    let f=Fixture::new();
+    let private=f.stage("owner",FIRST,CLIENT1,Phase::Ready);
+    let ordinary=f._temp.path().join("ordinary");
+    fs::write(&ordinary,b"external").unwrap();
+    let paths=vec![ordinary.to_str().unwrap().to_owned()];
+    let observed=f.catalog.external_inputs(paths.clone()).unwrap();
+    assert_eq!(f.catalog.external_frame(&observed,&paths,||19).unwrap(),19);
+    assert!(f.catalog.external_frame(&observed,&[private.to_str().unwrap().into()],||()).is_err());
+    let foreign=PrivateByteCatalog::for_core(&HostConfig::new(&f.data));
+    foreign.refresh().unwrap();
+    assert!(foreign.external_frame(&observed,&paths,||()).is_err());
+    let mutation=f.catalog.mutations().begin().unwrap();
+    assert!(f.catalog.external_frame(&observed,&paths,||()).is_err());
+    drop(mutation);
+    f.catalog.refresh().unwrap();
+    assert!(f.catalog.external_frame(&observed,&paths,||()).is_err(),"a new complete epoch cannot renew old evidence");
+    let fresh=f.catalog.external_inputs(paths.clone()).unwrap();
+    assert!(f.catalog.external_frame(&fresh,&paths,||()).is_ok());
+    f.catalog.close();
+    assert!(f.catalog.external_frame(&fresh,&paths,||()).is_err());
+}
+
+#[test]
+fn outside_classifier_denies_private_names_aliases_and_nonregular_or_ambiguous_targets() {
+    let f=Fixture::new();
+    let private=f.stage("owner",FIRST,CLIENT1,Phase::Ready);
+    let symlink=f._temp.path().join("private-link");
+    std::os::unix::fs::symlink(&private,&symlink).unwrap();
+    for path in [&private,&private.with_file_name("manifest.json"),&symlink,&f.data] {
+        assert!(f.catalog.external_inputs(vec![path.to_str().unwrap().into()]).is_err());
+    }
+    for path in ["relative","/missing/synthetic","/tmp/../synthetic"] {
+        assert!(f.catalog.external_inputs(vec![path.into()]).is_err());
+    }
+    // An alias outside the namespace invalidates private manifest link evidence;
+    // even an unrelated input then remains denied by incomplete catalog state.
+    let hardlink=f._temp.path().join("private-hardlink");
+    fs::hard_link(&private,&hardlink).unwrap();
+    assert!(f.catalog.refresh().is_err());
+    let ordinary=f._temp.path().join("ordinary");fs::write(&ordinary,b"outside").unwrap();
+    assert!(f.catalog.external_inputs(vec![hardlink.to_str().unwrap().into()]).is_err());
+    assert!(f.catalog.external_inputs(vec![ordinary.to_str().unwrap().into()]).is_err());
+}
+
+#[test]
 fn unknown_default_and_real_scan_cover_ready_and_regular_metadata_without_granting_read() {
     let f = Fixture::new();
     assert!(!f.catalog.view().complete());

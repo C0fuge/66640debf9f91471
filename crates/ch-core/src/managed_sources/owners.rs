@@ -31,17 +31,36 @@ pub(crate) struct OwnerBarriers(Arc<Mutex<State>>,Arc<PrivateByteCatalog>);
 impl OwnerBarriers {
     pub(super) fn new(catalog:Arc<PrivateByteCatalog>) -> Self { Self(Arc::new(Mutex::new(State::default())),catalog) }
 
-    // Temporary deny-only boundary until the managed producer route and exact
-    // external-input classifier are composed. No path/inode or reader authority
-    // follows from an empty registry. Legacy unregistered flow is unchanged.
+    pub(crate) async fn prepare_generic(&self, jobs:&super::OwnedJobs, method:&str,
+        params:&serde_json::Value) -> Result<Option<crate::managed_stage::catalog::ExternalInputs>,Error> {
+        if !file_input(method,params) { return Ok(None); }
+        {
+            let state=self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.stopped { return Err(Error::Closed); }
+            if state.pending.is_empty() && state.records.is_empty() { return Ok(None); }
+        }
+        let paths=input_paths(method,params)?;
+        let catalog=self.1.clone();
+        jobs.run(move||catalog.external_inputs(paths)).await?
+            .map(Some).map_err(|_|Error::Busy)
+    }
+
+    // No path/inode or reader authority follows from an empty registry. Legacy
+    // unregistered flow is unchanged. Outside inputs require a fresh observation.
     // Publication is the actual nonblocking writer.try_send, under the SAME
     // reservation lock as pending admission. No DB/FS/await runs in this closure.
     pub(crate) fn generic_frame<R>(&self, method: &str, params: &serde_json::Value,
+        external:Option<&crate::managed_stage::catalog::ExternalInputs>,
         publish: impl FnOnce() -> R) -> Result<R, Error> {
         if !file_input(method, params) { return Ok(publish()); }
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.stopped || !state.pending.is_empty() || !state.records.is_empty() {
-            return Err(Error::Busy);
+        if state.stopped { return Err(Error::Closed); }
+        if !state.pending.is_empty() || !state.records.is_empty() {
+            let paths=input_paths(method,params)?;
+            let result=self.1.external_frame(external.ok_or(Error::Busy)?, &paths,publish)
+                .map_err(|_|Error::Busy);
+            drop(state);
+            return result;
         }
         let result = publish();
         drop(state);
@@ -95,6 +114,23 @@ fn file_input(method: &str, params: &serde_json::Value) -> bool {
         // Vendor inputs have no reviewed schema; never infer independence from
         // a key name or allow arbitrary nesting to escape this deny boundary.
         _ => method.starts_with("x-"),
+    }
+}
+
+fn input_paths(method:&str,params:&serde_json::Value) -> Result<Vec<String>,Error> {
+    let path=|value:Option<&serde_json::Value>| -> Result<String,Error> {
+        value.and_then(|v|v.as_str()).filter(|v|!v.is_empty() && v.len()<=4096)
+            .map(str::to_owned).ok_or(Error::Conflict)
+    };
+    match method {
+        "messages.send_file"|"messages.edit"|"group.edit_photo" => Ok(vec![path(params.get("path"))?]),
+        "profile.update" => Ok(vec![path(params.get("photo_path"))?]),
+        "messages.send_album" => {
+            let items=params.get("items").and_then(|v|v.as_array())
+                .filter(|items|(2..=10).contains(&items.len())).ok_or(Error::Conflict)?;
+            items.iter().map(|item|path(item.get("path"))).collect()
+        }
+        _=>Err(Error::Conflict),
     }
 }
 

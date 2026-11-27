@@ -48,19 +48,19 @@ async fn actual_writer_boundary_rechecks_pending_quarantined_and_closed_source_a
     let frame=encode(&Request::new(17,"messages.send_file",&params)).unwrap();
     let observed=core.accounts().storage_binding_for("owner").await.unwrap().observation();
     let mut reservation=sources.reserve(observed.clone(),"pending-stage".into()).unwrap();
-    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone()).is_err());
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone(),None).is_err());
     assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
     // Only a definite no-new-source result removes this pending barrier.
     reservation.no_new_source();drop(reservation);
-    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone()).unwrap());
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone(),None).unwrap());
     assert!(matches!(frames.try_recv(),Ok(Out::Frame(_))));
     let mut reservation=sources.reserve(observed,"unknown-stage".into()).unwrap();
     reservation.quarantine(None);drop(reservation);
-    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame).is_err());
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame,None).is_err());
     assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
     sources.close();
     let params=serde_json::json!({"photo_path":"/synthetic/other"});
-    assert!(sup.queue_call(&conn,"profile.update",&params,vec![b'\n']).is_err());
+    assert!(sup.queue_call(&conn,"profile.update",&params,vec![b'\n'],None).is_err());
     assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
     core.shutdown().await;
 }
@@ -137,6 +137,36 @@ async fn known_active() -> (tempfile::TempDir, Core, Arc<Registry>, Arc<Conn>, m
     reply.await.unwrap().unwrap();
     assert!(matches!(registry.removal_decision("fixture", "owner", Some(&conn.identity)), Decision::Dispatch));
     (temp, core, registry, conn, frames)
+}
+
+#[tokio::test]
+async fn actual_external_frame_rejects_stale_catalog_and_original_native_run() {
+    let (temp,core,registry,conn,mut frames)=known_active().await;
+    let sources=core.managed_sources();
+    let barriers=sources.owner_barriers();
+    let mut sup=supervisor(&core,registry);
+    sup.source_inputs=Some(barriers.clone());
+    let observed=core.accounts().storage_binding_for("owner").await.unwrap().observation();
+    let mut reservation=sources.reserve(observed,"pending-stage".into()).unwrap();
+    let outside=temp.path().join("independent.bin");std::fs::write(&outside,b"outside").unwrap();
+    let params=serde_json::json!({"account_id":"owner","path":outside});
+    let run=core.host().running_account_token("fixture","owner").unwrap();
+    let proof=barriers.prepare_generic(&sources.lookups(),"messages.send_file",&params).await.unwrap().unwrap();
+    let input=super::super::inputs::InputScope::new(proof,run.clone());
+    let frame=encode(&Request::new(23,"messages.send_file",&params)).unwrap();
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone(),Some(&input)).unwrap());
+    assert!(matches!(frames.try_recv(),Ok(Out::Frame(_))));
+    let writer=core.stage_mutations().begin().unwrap();
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame.clone(),Some(&input)).is_err());
+    assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
+    drop(writer);
+    let proof=barriers.prepare_generic(&sources.lookups(),"messages.send_file",&params).await.unwrap().unwrap();
+    let input=super::super::inputs::InputScope::new(proof,run);
+    core.host().revoke_account_run("fixture","owner");
+    assert!(sup.queue_call(&conn,"messages.send_file",&params,frame,Some(&input)).is_err());
+    assert!(matches!(frames.try_recv(),Err(mpsc::error::TryRecvError::Empty)));
+    reservation.no_new_source();drop(reservation);
+    core.shutdown().await;
 }
 
 #[tokio::test]

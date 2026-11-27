@@ -6,6 +6,8 @@
 //! proves legacy physical readers closed;
 //! stable unproved stage evidence and old inode negatives survive later absence.
 mod scan;
+mod inputs;
+pub(crate) use inputs::ExternalInputs;
 #[cfg(test)]
 mod tests;
 
@@ -111,11 +113,11 @@ impl State {
 }
 
 /// Core-owned metadata. Contains no Gate, account guard, FD or network handle.
-pub(crate) struct PrivateByteCatalog { data_dir: PathBuf, state: Mutex<State> }
+pub(crate) struct PrivateByteCatalog { data_dir: PathBuf, state: Mutex<State>, issuer:Arc<()> }
 impl PrivateByteCatalog {
     /// Private Core composition factory; no caller-vouched completeness or inode list.
     pub(crate) fn for_core(config: &HostConfig) -> Arc<Self> {
-        Arc::new(Self { data_dir: config.data_dir.clone(), state: Mutex::new(State::default()) })
+        Arc::new(Self { data_dir: config.data_dir.clone(), state: Mutex::new(State::default()), issuer:Arc::new(()) })
     }
     pub(crate) fn mutations(self: &Arc<Self>) -> super::StageMutations {
         super::StageMutations { catalog: self.clone() }

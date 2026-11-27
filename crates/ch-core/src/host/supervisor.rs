@@ -422,6 +422,8 @@ pub(crate) enum Command {
         reply: oneshot::Sender<RemovalStop>,
     },
     Call {
+        #[cfg(target_os = "linux")]
+        input: Option<super::inputs::InputScope>,
         request_id: Option<Arc<std::sync::OnceLock<i64>>>,
         method: String,
         params: Value,
@@ -710,11 +712,13 @@ impl Supervisor {
     // The ordinary raw/typed/tracked Call paths converge here at the actual
     // writer queue. A local refusal leaves this connection healthy and sends no
     // request/cancellation. Managed admission takes the same short reservation.
-    fn queue_call(&self, conn: &Conn, method: &str, params: &Value, frame: Vec<u8>)
+    fn queue_call(&self, conn: &Conn, method: &str, params: &Value, frame: Vec<u8>,
+        #[cfg(target_os = "linux")] input:Option<&super::inputs::InputScope>)
         -> Result<bool, HostError> {
         #[cfg(target_os = "linux")]
         if let Some(inputs) = &self.source_inputs {
-            return inputs.generic_frame(method, params, || conn.send_frame(frame))
+            if input.is_some_and(|input|!input.live()) { return Err(HostError::ShuttingDown); }
+            return inputs.generic_frame(method, params,input.map(|input|input.observed()), || conn.send_frame(frame))
                 .map_err(|_| HostError::code(ErrorCode::NotSupported,
                     "generic file inputs are unavailable while managed sources are retained"));
         }
@@ -1152,7 +1156,8 @@ impl Supervisor {
                     Some(Command::StopAccountForRemoval { account_id, queued, reply }) => {
                         self.handle_removal_stop(&conn, account_id, queued, reply);
                     }
-                    Some(Command::Call { method, params, cancel, request_id, reply }) => {
+                    Some(Command::Call { method, params, cancel, request_id, reply,
+                        #[cfg(target_os = "linux")] input }) => {
                         // A queued call can outlive the account run that authorized it.
                         if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
                             let _ = reply.send(Err(HostError::code(ErrorCode::Cancelled, "request cancelled before dispatch")));
@@ -1179,7 +1184,8 @@ impl Supervisor {
                                     deadline: Instant::now() + timeout, timeout,
                                     reply: tx, _done: Some(done_tx),
                                 });
-                                let queued = match self.queue_call(&conn, &frame_method, &params, frame) {
+                                let queued = match self.queue_call(&conn, &frame_method, &params, frame,
+                                    #[cfg(target_os = "linux")] input.as_ref()) {
                                     Ok(queued) => queued,
                                     Err(error) => {
                                         conn.pending().remove(&id);

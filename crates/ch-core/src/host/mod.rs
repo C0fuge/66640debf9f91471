@@ -29,6 +29,8 @@ mod owned;
 #[cfg(target_os = "linux")]
 mod origins;
 #[cfg(target_os = "linux")]
+mod inputs;
+#[cfg(target_os = "linux")]
 pub(crate) use owned::{OwnedAccountSnapshot, OwnedStateChange};
 #[cfg(target_os = "linux")]
 pub(crate) use sink::OwnedEventSink;

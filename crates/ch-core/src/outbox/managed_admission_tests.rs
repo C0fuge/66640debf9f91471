@@ -242,6 +242,35 @@ async fn unregistered_legacy_file_flow_stays_explicitly_unchanged() {
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn complete_catalog_allows_independent_external_files_and_aliases_with_a_retained_source() {
+    let f=Fixture::new(true).await;
+    f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    let outside=f.temp.path().join("independent.bin");
+    let hardlink=f.temp.path().join("independent-hardlink.bin");
+    let symlink=f.temp.path().join("independent-link.bin");
+    std::fs::write(&outside,b"independent synthetic bytes").unwrap();
+    std::fs::hard_link(&outside,&hardlink).unwrap();
+    std::os::unix::fs::symlink(&outside,&symlink).unwrap();
+    for path in [&outside,&hardlink,&symlink] {
+        for (method,params) in [
+            ("messages.send_file",serde_json::json!({"account_id":"owner","path":path})),
+            ("messages.send_album",serde_json::json!({"account_id":"owner","items":[{"path":path},{"path":path}]})),
+            ("messages.edit",serde_json::json!({"account_id":"owner","path":path})),
+            ("group.edit_photo",serde_json::json!({"account_id":"owner","path":path})),
+            ("profile.update",serde_json::json!({"account_id":"owner","photo_path":path})),
+        ] {
+            let error=f.core.host().call_raw("fixture",method,params,None).await.unwrap_err();
+            assert_eq!(error.error_code(),Some(ch_protocol::ErrorCode::MethodNotFound),"{error:?}");
+            assert_eq!(std::fs::read_to_string(f.temp.path().join("wire")).unwrap(),method);
+            std::fs::remove_file(f.temp.path().join("wire")).unwrap();
+        }
+    }
+    assert_eq!(f.count("managed_dispatch"),0,"generic outside calls never mint managed attempts");
+    assert_eq!(f.count("managed_source"),1);
+    f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn exact_legacy_receipt_precedes_spent_changed_bytes_and_missing_run() {
     let f=Fixture::new(false).await;
     let mut claim=f.claim().await;

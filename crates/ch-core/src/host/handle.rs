@@ -31,7 +31,7 @@ const LIFECYCLE: &[&str] = &[
 
 struct Inner {
     #[cfg(target_os = "linux")]
-    source_inputs: Option<crate::managed_sources::OwnerBarriers>,
+    source_inputs: Option<(crate::managed_sources::OwnerBarriers,Arc<crate::managed_sources::OwnedJobs>)>,
     #[cfg(target_os = "linux")]
     directories: Option<Arc<super::directories::AccountDirectories>>,
     #[cfg(target_os = "linux")]
@@ -178,7 +178,7 @@ impl HostHandle {
         let inner = Arc::get_mut(&mut host.0).expect("new Host is uniquely owned");
         inner.directories = Some(super::directories::AccountDirectories::new(
             sources.stage_mutations(), sources.directory_jobs(), sources.lookups()));
-        inner.source_inputs = Some(sources.owner_barriers());
+        inner.source_inputs = Some((sources.owner_barriers(),sources.lookups()));
         inner.owned_sink = Some(sink);
         host
     }
@@ -535,8 +535,24 @@ impl HostHandle {
             ));
         }
         let _ = REQUIRED_METHODS; // documented in ch-protocol; every plugin has them
+        #[cfg(target_os = "linux")]
+        let input = if let Some((barriers,jobs))=&self.0.source_inputs {
+            // Capture BEFORE bounded filesystem work. An account/process restart
+            // cancels this original interval; never recapture a newer one by ID.
+            let run=params.get("account_id").and_then(Value::as_str)
+                .and_then(|account|self.running_account_token(plugin_id,account));
+            let observed=barriers.prepare_generic(jobs,method,&params).await
+                .map_err(|_|HostError::code(ch_protocol::ErrorCode::NotSupported,
+                    "generic file inputs are unavailable without independent external input proof"))?;
+            observed.map(|observed| {
+                let run=run.filter(|run|!run.is_cancelled()).ok_or(HostError::ShuttingDown)?;
+                Ok::<_,HostError>(super::inputs::InputScope::new(observed,run))
+            }).transpose()?
+        } else { None };
         let (tx, rx) = oneshot::channel();
         cmd.send(Command::Call {
+            #[cfg(target_os = "linux")]
+            input,
             method: method.to_owned(),
             params,
             cancel,
@@ -634,7 +650,7 @@ impl HostHandle {
         e.state = PluginState::Starting;
         let sup = Supervisor {
             #[cfg(target_os = "linux")]
-            source_inputs: self.0.source_inputs.clone(),
+            source_inputs: self.0.source_inputs.as_ref().map(|(barriers,_)|barriers.clone()),
             #[cfg(target_os = "linux")]
             directories: self.0.directories.clone(),
             #[cfg(target_os = "linux")]
