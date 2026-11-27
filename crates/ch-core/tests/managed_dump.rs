@@ -47,7 +47,7 @@ fn snapshot_validation_rejects_stale_missing_misowned_and_wrong_slot_references(
     for sql in [
         "UPDATE managed_ref SET revision=revision+1 WHERE consumer_kind='message'",
         "UPDATE managed_ref SET path='/fixture/wrong-path' WHERE consumer_kind='message'",
-        "UPDATE managed_ref SET slot='$.wrong' WHERE consumer_kind='message'",
+        "UPDATE managed_ref SET slot=slot || '.wrong' WHERE consumer_kind='message'",
         "UPDATE managed_ref SET account_id='foreign' WHERE consumer_kind='message'",
         "UPDATE managed_ref SET message_id=NULL WHERE consumer_kind='message'",
         "DELETE FROM managed_ref WHERE consumer_kind='message'",
