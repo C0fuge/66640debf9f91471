@@ -239,7 +239,7 @@ fn pass(
                         request_id,
                     )
                     .await;
-                match finish(inner, &plugin, &row, kind, res, &cancel) {
+                match finish_owned(inner.clone(), plugin.clone(), row.clone(), kind, res, cancel.clone()).await {
                     Ok(Some(reason)) => {
                         if let Some(f) = inner
                             .inflight
@@ -275,6 +275,24 @@ fn owned_attempt(g: &Ingest, row: &OutboxRow, plugin: &str) -> Result<Option<Out
             && r.client_id == row.client_id
             && r.state == outbox_state::SENDING
     }))
+}
+
+
+// Core-bound result persistence belongs to the service once admitted, including
+// when shutdown aborts its network task. No queue scope follows network work.
+async fn finish_owned(
+    inner:Arc<Inner>,plugin:String,row:OutboxRow,kind:OutboxKind,
+    res:std::result::Result<serde_json::Value,HostError>,cancel:CancellationToken,
+)->Result<Option<&'static str>> {
+    #[cfg(target_os="linux")]
+    if let Some(results)=&inner.results {
+        let owner=inner.clone();let queue=results.queue.clone();
+        return results.jobs.run_wait_until(&inner.stopping,move|| {
+            let _scope=queue.read();
+            finish(&owner,&plugin,&row,kind,res,&cancel)
+        }).await.map_err(|_|super::OutboxError::Stopped)?;
+    }
+    finish(&inner,&plugin,&row,kind,res,&cancel)
 }
 
 fn finish(
@@ -570,5 +588,62 @@ async fn reconcile(
             }
         }
         tokio::time::sleep(inner.policy.reconcile_poll.max(Duration::from_millis(1))).await;
+    }
+}
+
+#[cfg(all(test,target_os="linux"))]
+mod result_queue_tests {
+    use super::*;
+    use crate::{host::MemorySecretStore,outbox::{Outbox,OutboxPolicy,OutboxState},runtime::{Core,CoreConfig}};
+    use ch_db::{OutboxRow,PluginRow};
+    use serde_json::json;
+
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn accepted_actual_result_write_survives_lost_waiter_and_interrupted_outbox_drain() {
+        let temp=tempfile::tempdir().unwrap();
+        let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new()));
+        config.autostart=false;
+        let core=Core::open(config).await.unwrap();
+        let outbox=Outbox::for_core(&core,OutboxPolicy::default());
+        let row={
+            let ingest=outbox.inner.ingest();let conn=ingest.db().conn();
+            ch_db::upsert_plugin(conn,&PluginRow {
+                plugin_id:"fixture".into(),name:"Synthetic result persistence".into(),version:"0.0.1".into(),
+                api_version:"1.2.0".into(),enabled:true,installed:true,install_dir:None,brand_color:None,
+                icon_path:None,manifest_json:None,first_seen_at:1,last_seen_at:1
+            }).unwrap();
+            ch_db::create_account(conn,"a","fixture",None,&Default::default()).unwrap();
+            let id=ch_db::insert_outbox(conn,&OutboxRow {
+                account_id:"a".into(),chat_id:"chat".into(),client_id:"synthetic-result".into(),
+                kind:"send_text".into(),method:"messages.send".into(),created_at:1,
+                params:json!({"account_id":"a","chat_id":"chat","text":"synthetic body"}),..Default::default()
+            }).unwrap();
+            ch_db::set_outbox_state(conn,id,outbox_state::SENDING,None,None,None).unwrap();
+            ch_db::get_outbox(conn,id).unwrap().unwrap()
+        };
+        let queue=core.ingest().reference_queue();let guard=queue.exclusive_for_test().await;
+        let caller={let inner=outbox.inner.clone();let row=row.clone();tokio::spawn(async move {
+            finish_owned(inner,"fixture".into(),row,OutboxKind::SendText,Ok(json!({"message":{
+                "id":"sent","chat_id":"chat","direction":"out","sent_at":"2026-01-01T00:00:00Z",
+                "text":"synthetic body","ext":{"fixture":{"client_id":"synthetic-result"}}
+            }})),CancellationToken::new()).await
+        })};
+        tokio::time::timeout(Duration::from_secs(2),async {
+            while queue.waiting_for_test()==0 {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        assert!(outbox.inner.ingest.try_lock().is_ok(),"queued result never holds ingest mutex");
+        assert_eq!(outbox.get(row.id).unwrap().state,OutboxState::Sending);
+        caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
+        let shutdown={let outbox=outbox.clone();tokio::spawn(async move {outbox.shutdown().await})};
+        tokio::time::timeout(Duration::from_secs(2),outbox.inner.stopping.cancelled()).await.unwrap();
+        shutdown.abort();assert!(shutdown.await.unwrap_err().is_cancelled());
+        let mut retry=Box::pin(outbox.shutdown());
+        assert!(tokio::time::timeout(Duration::from_millis(30),&mut retry).await.is_err());
+        drop(guard);tokio::time::timeout(Duration::from_secs(2),retry).await.unwrap();
+        assert_eq!(outbox.get(row.id).unwrap().state,OutboxState::Sent);
+        let conn=core.open_db().unwrap();
+        let count:i64=conn.conn().query_row("SELECT COUNT(*) FROM message WHERE message_id='sent'",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,1,"the accepted real database result is retained once; no network call occurs");
+        outbox.shutdown().await;core.shutdown().await;
     }
 }

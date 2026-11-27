@@ -576,7 +576,15 @@ impl Drop for Lifetime {
     }
 }
 
+#[cfg(target_os="linux")]
+struct ResultJobs {
+    queue:crate::runtime::reference_queue::ReferenceQueue,
+    jobs:Arc<crate::managed_sources::OwnedJobs>,
+}
+
 pub(crate) struct Inner {
+    #[cfg(target_os="linux")]
+    results:Option<ResultJobs>,
     ingest: Arc<Mutex<Ingest>>,
     transport: Arc<dyn SendTransport>,
     policy: OutboxPolicy,
@@ -669,6 +677,8 @@ impl Outbox {
         Self {
             _lifetime: Arc::new(Lifetime(stopping.clone())),
             inner: Arc::new(Inner {
+                #[cfg(target_os="linux")]
+                results:None,
                 ingest,
                 transport,
                 policy,
@@ -703,6 +713,7 @@ impl Outbox {
         {
             let sources = core.managed_sources();
             let inner = Arc::get_mut(&mut outbox.inner).expect("new outbox");
+            inner.results=Some(ResultJobs {queue:core.ingest().reference_queue(),jobs:crate::managed_sources::OwnedJobs::new()});
             inner.managed = Some(managed_admission::Context {
                 sources, host: core.host().clone(), accounts: core.accounts().clone(),
             });
@@ -798,6 +809,11 @@ impl Outbox {
             std::mem::take(&mut *self.inner.workers.lock().unwrap_or_else(|e| e.into_inner()));
         for (_, worker) in workers {
             let _ = worker.task.await;
+        }
+        #[cfg(target_os="linux")]
+        if let Some(results)=&self.inner.results
+            && results.jobs.drain().await.is_err() {
+            tracing::warn!("draining accepted outbox result writes failed");
         }
     }
 
