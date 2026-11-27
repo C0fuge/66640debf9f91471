@@ -167,6 +167,12 @@ impl Core {
         let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(), proof_db);
         #[cfg(target_os = "linux")]
         let managed_sources = crate::managed_sources::ManagedSources::new(managed_proofs.clone(), &host_config);
+        #[cfg(target_os = "linux")]
+        managed_sources.initialize_catalog().await;
+        #[cfg(target_os = "linux")]
+        let host = HostHandle::for_core(host_config, sink.clone(), Arc::clone(&config.secrets),
+            managed_sources.stage_mutations(), managed_sources.directory_jobs());
+        #[cfg(not(target_os = "linux"))]
         let host = HostHandle::new(host_config, sink.clone(), Arc::clone(&config.secrets));
         let host_rx = host.subscribe();
         #[cfg(target_os = "linux")]

@@ -29,6 +29,8 @@ const LIFECYCLE: &[&str] = &[
 ];
 
 struct Inner {
+    #[cfg(target_os = "linux")]
+    directories: Option<Arc<super::directories::AccountDirectories>>,
     config: Arc<HostConfig>,
     registry: Arc<Registry>,
     sink: Arc<dyn EventSink>,
@@ -112,6 +114,8 @@ impl HostHandle {
         secrets: Arc<dyn SecretStore>,
     ) -> HostHandle {
         let handle = HostHandle(Arc::new(Inner {
+            #[cfg(target_os = "linux")]
+            directories: None,
             config: Arc::new(config),
             registry: Arc::new(Registry::new()),
             sink,
@@ -119,6 +123,17 @@ impl HostHandle {
         }));
         handle.rescan();
         handle
+    }
+
+    // Standalone public hosts stay unbound. Only the actual Core composition can
+    // supply its own negative catalog hook and counted directory-work lane.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn for_core(config: HostConfig, sink: Arc<dyn EventSink>, secrets: Arc<dyn SecretStore>,
+        mutations: crate::managed_stage::StageMutations, jobs: Arc<crate::managed_sources::OwnedJobs>) -> Self {
+        let mut host = Self::new(config, sink, secrets);
+        Arc::get_mut(&mut host.0).expect("new Host is uniquely owned").directories =
+            Some(super::directories::AccountDirectories::new(mutations, jobs));
+        host
     }
 
     /// The configuration.
@@ -538,6 +553,8 @@ impl HostHandle {
         // Set synchronously so a caller never observes `Stopped` with a live supervisor.
         e.state = PluginState::Starting;
         let sup = Supervisor {
+            #[cfg(target_os = "linux")]
+            directories: self.0.directories.clone(),
             plugin_id: plugin_id.to_owned(),
             info: e.info.clone(),
             config: Arc::clone(&self.0.config),
@@ -562,3 +579,7 @@ fn to_info(d: &Discovered) -> PluginInfo {
         executable: d.executable.clone(),
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "directory_tests.rs"]
+mod directory_tests;

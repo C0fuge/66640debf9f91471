@@ -107,6 +107,9 @@ pub struct SpecDefaults {
     pub auto_download: AutoDownload,
 }
 
+#[cfg(all(test,target_os="linux"))]
+type OwnerCloseCheckpoint = dyn Fn(&str)+Send+Sync;
+
 struct Inner {
     #[cfg(target_os = "linux")]
     stage_mutations: Option<crate::managed_stage::StageMutations>,
@@ -115,7 +118,7 @@ struct Inner {
     #[cfg(target_os = "linux")]
     owner_jobs: Option<Arc<crate::managed_sources::OwnedJobs>>,
     #[cfg(all(test,target_os="linux"))]
-    owner_checkpoint: Mutex<Option<Arc<dyn Fn(&str)+Send+Sync>>>,
+    owner_checkpoint: Mutex<Option<Arc<OwnerCloseCheckpoint>>>,
     db: Arc<Mutex<Db>>,
     host: HostHandle,
     secrets: Arc<dyn SecretStore>,
@@ -459,9 +462,17 @@ impl Accounts {
             let _=self.rearm_refused(scope,&row,&root,&gate,anchor,&close);
             return Err(RuntimeError::SourceInUse);
         }
+        let catalog=match close.fresh_catalog() {
+            Ok(check)=>check,
+            Err(_)=>{
+                let _=self.rearm_refused(scope,&row,&root,&gate,anchor,&close);
+                return Err(RuntimeError::SourceInUse);
+            }
+        };
         runtime.block_on(self.stop_on_host(&row));
         #[cfg(test)] self.at_owner_close("before-delete-tx");
-        let sole=match self.owner_db(scope,|db|self.delete_row_at(db,&row,&root,&gate))? {
+        let sole=match self.owner_db(scope,|db|self.delete_row_checked(db,&row,&root,&gate,||
+            catalog.verify().map_err(|_|RuntimeError::SourceInUse)))? {
             Ok(sole)=>sole,
             Err(error)=>{
                 let _=self.rearm_refused(scope,&row,&root,&gate,anchor,&close);
@@ -506,7 +517,7 @@ impl Accounts {
     }
 
     #[cfg(all(test,target_os="linux"))]
-    pub(crate) fn owner_close_checkpoint(&self,hook:Arc<dyn Fn(&str)+Send+Sync>) {
+    pub(crate) fn owner_close_checkpoint(&self,hook:Arc<OwnerCloseCheckpoint>) {
         *self.0.owner_checkpoint.lock().unwrap()=Some(hook);
     }
     #[cfg(all(test,target_os="linux"))]

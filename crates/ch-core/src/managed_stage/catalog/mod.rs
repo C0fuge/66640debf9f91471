@@ -1,7 +1,9 @@
 //! Descriptive deny metadata only. No source, reader, wire or cleanup authority.
-//! WIP: not usable for enforcement until every supported writer invalidates first.
-//! Initial scanning, App writer hooks and account lifecycle/Host composition remain
-//! pending. A complete inventory never proves legacy physical readers closed;
+//! WIP: Core startup scans and owner-close fresh scans/epoch vetoes consume this
+//! only to deny. App stage copy/phase/discard hooks invalidate observations.
+//! Full writer/lifecycle coverage, Host input classification and reader/producer
+//! enforcement remain separate activation gates. A complete inventory never
+//! proves legacy physical readers closed;
 //! stable unproved stage evidence and old inode negatives survive later absence.
 mod scan;
 #[cfg(test)]
@@ -36,29 +38,53 @@ pub(crate) struct LegacyCandidate {
 }
 impl LegacyCandidate {
     pub(crate) fn account_folder(&self) -> &[u8] { &self.key.account }
+    #[cfg(test)]
     pub(crate) fn stage_folder(&self) -> &[u8] { &self.key.stage }
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> StageKind { self.kind }
+    #[cfg(test)]
     pub(crate) fn scope_hint(&self) -> Option<&Scope> { self.scope.as_ref() }
+    #[cfg(test)]
     pub(crate) fn client_hint(&self) -> Option<&str> { self.client.as_deref() }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InodeMatch { KnownPrivate, NotListed }
 
 /// Missing from a complete set is still NOT a safe-input/read permission.
+#[cfg(test)]
 pub(crate) struct CatalogLookup { epoch: u64, complete: bool, matched: InodeMatch }
+#[cfg(test)]
 impl CatalogLookup {
     pub(crate) fn epoch(&self) -> u64 { self.epoch }
     pub(crate) fn complete(&self) -> bool { self.complete }
     pub(crate) fn matched(&self) -> InodeMatch { self.matched }
 }
 
-pub(crate) struct CatalogView { epoch: u64, complete: bool, writers: usize, inodes: usize }
+pub(crate) struct CatalogView {
+    epoch:u64,complete:bool,writers:usize,
+    #[cfg(test)] inodes:usize,
+}
 impl CatalogView {
     pub(crate) fn epoch(&self) -> u64 { self.epoch }
     pub(crate) fn complete(&self) -> bool { self.complete }
     pub(crate) fn writers(&self) -> usize { self.writers }
+    #[cfg(test)]
     pub(crate) fn inode_count(&self) -> usize { self.inodes }
+}
+
+/// Negative owner-close veto only. No filesystem/read/closure/deletion authority.
+/// Constructed from an actual fresh bounded scan, never from caller hints/bools.
+pub(crate) struct OwnerCatalogCheck { catalog:Arc<PrivateByteCatalog>,epoch:u64,folder:Vec<u8> }
+impl OwnerCatalogCheck {
+    pub(crate) fn verify(&self) -> Result<()> {
+        let state=self.catalog.lock();
+        if state.closed || state.poisoned || !state.complete || state.active!=0 || state.epoch!=self.epoch
+            || state.stages.values().any(|candidate|candidate.unproved && candidate.account_folder()==self.folder.as_slice())
+        { return Err(Error::Busy); }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -122,22 +148,26 @@ impl PrivateByteCatalog {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
+    #[cfg(test)]
     pub(crate) fn view(&self) -> CatalogView {
         let state = self.lock();
         CatalogView { epoch: state.epoch, complete: state.complete && !state.poisoned,
             writers: state.active, inodes: state.inodes.len() }
     }
+    #[cfg(test)]
     pub(crate) fn lookup_inode(&self, dev: u64, ino: u64) -> CatalogLookup {
         let state = self.lock();
         CatalogLookup { epoch: state.epoch, complete: state.complete && !state.poisoned,
             matched: if state.inodes.contains(&Inode { dev, ino }) { InodeMatch::KnownPrivate } else { InodeMatch::NotListed } }
     }
+    #[cfg(test)]
     pub(crate) fn legacy_candidates(&self) -> Vec<LegacyCandidate> {
         self.lock().stages.values().filter(|entry| entry.unproved).cloned().collect()
     }
 
-    /// Must precede the first supported private inode/namespace mutation.
-    /// The actual owned FS worker, not its waiter, retains the returned token.
+    // Strict test fault harness. Production writers use the real observe-only
+    // StageMutations hook; no uncalled production mutation factory is retained.
+    #[cfg(test)]
     pub(crate) fn begin_mutation(self: &Arc<Self>) -> Result<CatalogMutation> {
         let mut state = self.lock();
         state.complete = false;
@@ -151,6 +181,14 @@ impl PrivateByteCatalog {
     /// Independent anchored scan is the ONLY completeness publisher. No quota or
     /// owner-close/source-settlement permission follows from its result.
     pub(crate) fn refresh(&self) -> Result<CatalogView> { self.refresh_with(|| {}, || {}) }
+
+    pub(crate) fn check_owner(self:&Arc<Self>,folder:&[u8]) -> Result<OwnerCatalogCheck> {
+        let refreshed=self.refresh()?;
+        if !refreshed.complete() || refreshed.writers()!=0 { return Err(Error::Busy); }
+        let check=OwnerCatalogCheck {catalog:self.clone(),epoch:refreshed.epoch(),folder:folder.to_vec()};
+        check.verify()?;
+        Ok(check)
+    }
 
     fn refresh_with(&self, before_scan: impl FnOnce(), after_scan: impl FnOnce()) -> Result<CatalogView> {
         let epoch = {
@@ -203,7 +241,8 @@ impl PrivateByteCatalog {
         }
         // Absence NEVER deletes old inode negatives or unproved legacy candidates.
         state.complete = complete;
-        let view = CatalogView { epoch: state.epoch, complete, writers: state.active, inodes: state.inodes.len() };
+        let view = CatalogView { epoch: state.epoch, complete, writers: state.active,
+            #[cfg(test)] inodes: state.inodes.len() };
         if complete { Ok(view) } else { Err(Error::Integrity) }
     }
 }

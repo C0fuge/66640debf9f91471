@@ -94,3 +94,28 @@ async fn orphan_historical_attempts_and_retirement_journal_also_refuse() {
     let core = Core::open(config(&env)).await.unwrap();
     core.shutdown().await;
 }
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+#[cfg(target_os="linux")]
+async fn unknown_initial_catalog_is_nonfatal_and_normal_autostart_still_runs() {
+    let env=Env::new();
+    let dir=env.plugin_dir("fixture",&["python3","-I","./startup.py","--mode","good"],json!({}));
+    let peer=serde_json::to_string(&host_support::misbehaving_script()).unwrap();
+    std::fs::write(dir.join("startup.py"),format!(
+        "from pathlib import Path\nimport runpy\nPath(__file__).with_name('spawned').write_text('spawned')\nrunpy.run_path({peer},run_name='__main__')\n"
+    )).unwrap();
+    let uploads=env.data_dir.join("accounts/owner/uploads");std::fs::create_dir_all(&uploads).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&uploads,std::fs::Permissions::from_mode(0o700)).unwrap();
+    let orphan=uploads.join("orphan");std::fs::write(&orphan,b"preserve unknown").unwrap();
+    let _db=seed(&env);
+    let core=Core::open(config(&env)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5),async {
+        while !dir.join("spawned").exists() {tokio::time::sleep(Duration::from_millis(10)).await;}
+    }).await.unwrap();
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(5),core.accounts().remove("owner")).await.unwrap(),
+        Err(RuntimeError::SourceInUse)));
+    assert!(core.accounts().get("owner").await.unwrap().is_some());
+    assert_eq!(std::fs::read(orphan).unwrap(),b"preserve unknown");
+    core.shutdown().await;
+}

@@ -406,7 +406,11 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), observed.revocation().cancelled()).await.unwrap();
         assert!(!removing.is_finished(), "prepared claim alone retains the actual storage lease");
         drop(prepared_again);
-        tokio::time::timeout(std::time::Duration::from_secs(5), removing).await.unwrap().unwrap().unwrap();
+        let flock=directory.lock().unwrap();drop(flock); // Independent real proof the claim released its flock.
+        assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5),removing).await.unwrap().unwrap(),
+            Err(crate::runtime::RuntimeError::SourceInUse)));
+        let fresh=f.core.accounts().storage_binding_for("owner").await.unwrap();
+        assert!(fresh.observation()!=observed);drop(fresh);
         // A directory descriptor alone has no storage lease or flock authority.
         drop(directory);
         assert!(observed.is_revoked());
@@ -586,10 +590,13 @@ mod tests {
             if consume {
                 assert!(claim.consume(&f.outbox).unwrap().phase == Phase::Consumed(intent()));
             } else { drop(claim); }
-            // Even a directory already unlinked by removal remains a valid flock probe.
+            // The independent open description proves release even though legacy
+            // Claimed/Consumed bytes are now conservatively retained by owner-close.
             try_flock(&probe).unwrap();
             drop(probe);
-            tokio::time::timeout(std::time::Duration::from_secs(5), remove).await.unwrap().unwrap().unwrap();
+            assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5),remove).await.unwrap().unwrap(),
+                Err(crate::runtime::RuntimeError::SourceInUse)));
+            let fresh=f.core.accounts().storage_binding_for("owner").await.unwrap();drop(fresh);
             f.close().await;
         }
     }

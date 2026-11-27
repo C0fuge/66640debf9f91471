@@ -417,6 +417,8 @@ struct Delivery {
 // ---------------------------------------------------------------------------------------
 
 pub(crate) struct Supervisor {
+    #[cfg(target_os = "linux")]
+    pub(super) directories: Option<Arc<super::directories::AccountDirectories>>,
     pub plugin_id: String,
     pub info: PluginInfo,
     pub config: Arc<HostConfig>,
@@ -1053,11 +1055,22 @@ impl Supervisor {
         );
         let state_dir = self.config.state_dir(account_id);
         let cache_dir = self.config.cache_dir(account_id);
-        for d in [&state_dir, &cache_dir] {
-            if let Err(e) = tokio::fs::create_dir_all(d).await {
-                warn!(plugin = %self.plugin_id, "cannot create {}: {e}", d.display());
-            }
+        if let Err(error) = self.prepare_account_directories(account_id, [&state_dir, &cache_dir]).await {
+            warn!(plugin = %self.plugin_id, account = %account_id, "account directory preparation unavailable: {error}");
+            self.registry.update_account(&self.plugin_id, account_id, |record| {
+                record.spec = spec;
+                // Preserve the start wish when Core closes while directory work
+                // is waiting; shutdown must not persist this account disabled.
+                record.info.wanted = true;
+                record.info.phase = AccountPhase::Stopped;
+                record.info.state = AccountState::Error;
+                record.info.detail = Some("account directory preparation unavailable".into());
+            });
+            if let Some(reply) = reply { let _ = reply.send(Err(error)); }
+            return;
         }
+        // The counted local mkdir work and mutation token have settled before
+        // any account.start request or its asynchronous network wait.
         let params = AccountStartParams {
             account_id: account_id.to_owned(),
             settings,
@@ -1110,6 +1123,25 @@ impl Supervisor {
                 }
             }
         }
+    }
+
+    async fn prepare_account_directories(&self, account_id: &str, paths: [&std::path::Path; 2]) -> Result<(), HostError> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = account_id;
+        #[cfg(target_os = "linux")]
+        if let Some(directories) = &self.directories {
+            for (path, error) in directories.prepare(&self.config, account_id).await? {
+                warn!(plugin = %self.plugin_id, "cannot create {}: {error}", path.display());
+            }
+            return Ok(());
+        }
+        // Public standalone hosts retain their existing unbound behavior.
+        for path in paths {
+            if let Err(error) = tokio::fs::create_dir_all(path).await {
+                warn!(plugin = %self.plugin_id, "cannot create {}: {error}", path.display());
+            }
+        }
+        Ok(())
     }
 
     fn handle_stop(

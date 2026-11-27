@@ -24,16 +24,29 @@ pub(crate) struct ManagedSources {
     admissions: Arc<OwnedJobs>,
     lookups: Arc<OwnedJobs>,
     owner_jobs: Arc<OwnedJobs>,
+    directory_jobs: Arc<OwnedJobs>,
     closed: CancellationToken,
 }
 
 impl ManagedSources {
     pub(crate) fn new(proofs: ManagedProofWriter, config: &HostConfig) -> Arc<Self> {
-        Arc::new(Self { catalog: PrivateByteCatalog::for_core(config), proofs, owners: OwnerBarriers::new(),
-            admissions: OwnedJobs::new(), lookups: OwnedJobs::new(), owner_jobs:OwnedJobs::new(),closed: CancellationToken::new() })
+        let catalog=PrivateByteCatalog::for_core(config);
+        Arc::new(Self { owners: OwnerBarriers::new(catalog.clone()),catalog, proofs,
+            admissions: OwnedJobs::new(), lookups: OwnedJobs::new(), owner_jobs:OwnedJobs::new(),
+            directory_jobs:OwnedJobs::new(),closed: CancellationToken::new() })
+    }
+    pub(crate) async fn initialize_catalog(self:&Arc<Self>) {
+        let owned=self.clone();
+        // Actual scan worker owns Sources and its slot, not a cancellable waiter.
+        // Only descriptive metadata returns; scan failure leaves Unknown and does
+        // not change ordinary startup or the durable managed-record startup gate.
+        if !matches!(self.lookups.run(move||owned.catalog.refresh()).await,Ok(Ok(_))) {
+            tracing::warn!("initial private-byte catalog remains unknown");
+        }
     }
     pub(crate) fn owner_barriers(&self) -> OwnerBarriers { self.owners.clone() }
     pub(crate) fn owner_jobs(&self) -> Arc<OwnedJobs> { self.owner_jobs.clone() }
+    pub(crate) fn directory_jobs(&self) -> Arc<OwnedJobs> { self.directory_jobs.clone() }
     pub(crate) fn stage_mutations(&self) -> StageMutations { self.catalog.mutations() }
     #[cfg(test)]
     pub(crate) fn catalog(&self) -> Arc<PrivateByteCatalog> { self.catalog.clone() }
@@ -59,6 +72,7 @@ impl ManagedSources {
     pub(crate) fn close(&self) {
         self.owners.stop();
         self.owner_jobs.close();
+        self.directory_jobs.close();
         self.catalog.close();
         self.closed.cancel();
         self.admissions.close();
@@ -66,10 +80,11 @@ impl ManagedSources {
 
     pub(crate) async fn drain(&self) -> Result<(), Error> {
         self.close();
+        let directories=self.directory_jobs.drain().await;
         let owners=self.owner_jobs.drain().await;
         let admissions = self.admissions.drain().await;
         let lookups = self.lookups.drain().await;
-        owners.and(admissions).and(lookups)
+        directories.and(owners).and(admissions).and(lookups)
     }
 
     #[cfg(test)]

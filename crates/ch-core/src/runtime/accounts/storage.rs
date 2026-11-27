@@ -388,6 +388,13 @@ impl Accounts {
 
     // Inner Err is a positively completed rollback; outer Err is not rearm proof.
     pub(super) fn delete_row_at(&self,db:&ch_db::Db,row:&AccountRow,root:&Path,gate:&Arc<Gate>) -> Result<Result<bool>> {
+        self.delete_row_checked(db,row,root,gate,||Ok(()))
+    }
+
+    // Core removal supplies the actual fresh catalog veto. Setup rollback's
+    // legacy helper supplies no catalog permission and retains all SQL guards.
+    pub(super) fn delete_row_checked(&self,db:&ch_db::Db,row:&AccountRow,root:&Path,gate:&Arc<Gate>,
+        veto:impl FnOnce()->Result<()>) -> Result<Result<bool>> {
         let tx=db.transaction()?;
         check_owner(&tx,row)?;
         if !self.0.storage.current(root,gate) { return Err(unknown(&row.account_id)); }
@@ -398,6 +405,11 @@ impl Accounts {
             tx.rollback().map_err(ch_db::Error::from)?;
             check_owner(db.conn(),row)?;
             return Ok(Err(RuntimeError::SourceInUse));
+        }
+        if let Err(error)=veto() {
+            tx.rollback().map_err(ch_db::Error::from)?;
+            check_owner(db.conn(),row)?;
+            return Ok(Err(error));
         }
         match ch_db::delete_account(&tx,&row.account_id) {
             Ok(true)=>{ tx.commit().map_err(ch_db::Error::from)?;Ok(Ok(sole)) }

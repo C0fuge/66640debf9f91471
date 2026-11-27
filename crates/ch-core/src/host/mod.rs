@@ -18,6 +18,8 @@ mod config;
 pub mod discovery;
 mod error;
 mod handle;
+#[cfg(target_os = "linux")]
+mod directories;
 pub mod settings;
 mod sink;
 mod state;

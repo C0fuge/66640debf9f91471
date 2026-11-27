@@ -216,9 +216,11 @@ async fn cancelled_metadata_waiter_drops_claim_while_owned_lookup_remains_paused
     entered.await.unwrap();
     caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
     // The metadata worker holds neither claim FD/flock nor account read lease.
-    // The real owned removal can finish while that worker is still paused.
-    tokio::time::timeout(Duration::from_secs(3),f.core.accounts().remove("owner")).await.unwrap().unwrap();
-    assert!(!f.stage().exists());
+    // Prompt refusal BEFORE lookup release proves storage drain completed: the
+    // detached metadata worker owns no lease. Durable Claimed bytes stay unproved.
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(3),f.core.accounts().remove("owner")).await.unwrap(),
+        Err(RuntimeError::SourceInUse)));
+    assert!(f.stage().join("bytes").exists());
     assert_eq!(f.core.managed_sources().census(),(0,0,0));
     release.release();
     f.core.managed_sources().drain().await.unwrap();
@@ -226,7 +228,7 @@ async fn cancelled_metadata_waiter_drops_claim_while_owned_lookup_remains_paused
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
-async fn fallback_lookup_cannot_return_a_recreated_owners_exact_looking_receipt() {
+async fn fallback_lookup_cannot_follow_a_rearmed_generation_with_identical_owner_metadata() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let f=Fixture::new(true).await;
     let claim=f.claim().await;
@@ -242,11 +244,12 @@ async fn fallback_lookup_cannot_return_a_recreated_owners_exact_looking_receipt(
     let outbox=f.outbox.clone();
     let caller=tokio::spawn(async move { outbox.enqueue_managed_file_checked(claim).await });
     entered.await.unwrap(); // Busy/Closed dropped the actual claim before fallback.
-    tokio::time::timeout(Duration::from_secs(3),f.core.accounts().remove("owner")).await.unwrap().unwrap();
-    f.core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
+    // The unproved Claimed root now refuses deletion and rotates the real Gate.
+    // The row itself stays byte-for-byte the same owner comparator, exposing the
+    // same ABA risk without erasing/resetting legacy bytes to force row recreation.
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(3),f.core.accounts().remove("owner")).await.unwrap(),
+        Err(RuntimeError::SourceInUse)));
     let db=f.core.open_db().unwrap();
-    db.conn().execute("UPDATE account SET created_at=?1 WHERE account_id='owner'",
-        [old.owner().created_at]).unwrap();
     let new=ch_db::get_account(db.conn(),"owner").unwrap().unwrap();
     assert_eq!(new.created_at,old.owner().created_at);
     let replacement=f.core.accounts().storage_observation_for("owner").await.unwrap();
@@ -448,9 +451,9 @@ async fn pending_pre_id_work_is_drained_and_committed_winner_is_retained() {
         let sent=sending.await.unwrap();let removed=removal.await.unwrap();
         if phase=="before-writer" {
             assert!(matches!(sent,Err(ManagedAdmissionError::Rejected(_))));
-            removed.unwrap();
-            assert!(f.core.accounts().get("owner").await.unwrap().is_none());
-            assert!(!f.root().exists());
+            assert!(matches!(removed,Err(RuntimeError::SourceInUse)));
+            assert!(f.core.accounts().get("owner").await.unwrap().is_some());
+            assert!(f.stage().join("bytes").exists()); // Claimed is not proof of no previous exposure.
         } else {
             assert_eq!(sent.unwrap().state,OutboxState::Queued);
             assert!(matches!(removed,Err(RuntimeError::SourceInUse)));
@@ -577,6 +580,32 @@ async fn cancelled_remove_and_shutdown_wait_for_actual_destructive_worker() {
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn root_replacement_after_committed_account_delete_preserves_both_directories() {
+    let f=Fixture::new(false).await;
+    let old=f.core.accounts().storage_observation_for("owner").await.unwrap();
+    let root=f.root();let previous=root.with_file_name("removed-owner");
+    let current=root.clone();let keep=previous.clone();
+    f.core.accounts().owner_close_checkpoint(Arc::new(move|phase| {
+        if phase=="before-root-delete" {
+            std::fs::rename(&current,&keep).unwrap();
+            std::fs::create_dir(&current).unwrap();
+            std::fs::write(current.join("replacement"),b"preserve replacement").unwrap();
+        }
+    }));
+    f.core.accounts().remove("owner").await.unwrap();
+    assert!(f.core.accounts().get("owner").await.unwrap().is_none());
+    assert!(old.is_revoked());
+    assert_eq!(std::fs::read(previous.join("uploads").join(STAGE).join("bytes")).unwrap(),b"synthetic bytes");
+    assert_eq!(std::fs::read(root.join("replacement")).unwrap(),b"preserve replacement");
+    // A committed row deletion is not proof of root cleanup. Existing bytes
+    // continue to veto ID reuse, and the original observation stays revoked.
+    assert!(f.core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.is_err());
+    assert!(f.core.accounts().get("owner").await.unwrap().is_none());
+    assert!(old.is_revoked());
+    f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn ordinary_no_source_removal_with_parent_anchored_absence_clears_close_state() {
     let f=Fixture::new(false).await;
     std::fs::remove_dir_all(f.root().parent().unwrap()).unwrap();
@@ -584,5 +613,95 @@ async fn ordinary_no_source_removal_with_parent_anchored_absence_clears_close_st
     assert!(f.core.accounts().get("owner").await.unwrap().is_none());
     assert_eq!(f.core.managed_sources().owner_barriers().closing_count(),0);
     assert_eq!(f.core.managed_sources().census(),(0,0,0));
+    f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn legacy_claimed_and_consumed_deny_by_actual_folder_not_forged_owner_hints() {
+    for consumed in [false,true] {
+        let f=Fixture::new(false).await;
+        f.secrets.set("fixture","owner","session","synthetic").await.unwrap();
+        let mut claim=f.claim().await;
+        if consumed {
+            claim.checked_path().unwrap();f.legacy_receipt(&claim);
+            claim.consume(&f.outbox).unwrap();
+        } else {drop(claim);}
+        let path=f.stage().join("manifest.json");
+        let mut manifest:Manifest=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest.scope.account="forged-account".into();manifest.scope.plugin="forged-plugin".into();
+        manifest.scope.account_created=42;manifest.scope.chat="forged-chat".into();
+        manifest.client_id="ffffffffffffffffffffffffffffffff".into();
+        let mutation=f.core.stage_mutations().begin().unwrap();
+        std::fs::write(&path,serde_json::to_vec(&manifest).unwrap()).unwrap();drop(mutation);
+        assert!(f.core.managed_sources().catalog().refresh().unwrap().complete());
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(5),f.core.accounts().remove("owner")).await.unwrap(),
+            Err(RuntimeError::SourceInUse)));
+        assert!(f.core.accounts().get("owner").await.unwrap().is_some());
+        assert!(f.stage().join("bytes").exists());
+        assert_eq!(f.secrets.snapshot("fixture","owner")["session"],"synthetic");
+        assert_eq!(f.count("managed_source"),0);
+        f.assert_no_wire();f.close().await;
+    }
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn failed_fresh_scan_retains_data_and_later_ready_hint_does_not_clear_unknown() {
+    let f=Fixture::new(false).await;
+    f.secrets.set("fixture","owner","session","synthetic").await.unwrap();
+    let path=f.stage().join("manifest.json");let original=std::fs::read(&path).unwrap();
+    let mutation=f.core.stage_mutations().begin().unwrap();
+    std::fs::write(&path,b"{").unwrap();drop(mutation);
+    for restore in [false,true] {
+        if restore {
+            let mutation=f.core.stage_mutations().begin().unwrap();
+            std::fs::write(&path,&original).unwrap();drop(mutation);
+        }
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(5),f.core.accounts().remove("owner")).await.unwrap(),
+            Err(RuntimeError::SourceInUse)));
+        assert!(f.core.accounts().get("owner").await.unwrap().is_some());
+        assert!(f.stage().join("bytes").exists());
+        assert_eq!(f.secrets.snapshot("fixture","owner")["session"],"synthetic");
+    }
+    f.assert_no_wire();f.close().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_other_owner_claim_invalidates_final_delete_epoch_but_not_folder_identity() {
+    let f=Fixture::new(false).await;
+    f.secrets.set("fixture","owner","session","synthetic").await.unwrap();
+    let other=f.core.accounts().add(NewAccount::new("fixture").id("other").no_start()).await.unwrap();
+    let uploads=f.core.host().config().upload_dir("other");
+    let id="33333333333333333333333333333333";let stage=uploads.join(id);
+    let mutation=f.core.stage_mutations().begin().unwrap();
+    std::fs::create_dir_all(&stage).unwrap();
+    for dir in [&uploads,&stage] {std::fs::set_permissions(dir,std::fs::Permissions::from_mode(0o700)).unwrap();}
+    let bytes=stage.join("bytes");std::fs::write(&bytes,b"synthetic bytes").unwrap();
+    std::fs::set_permissions(&bytes,std::fs::Permissions::from_mode(0o400)).unwrap();
+    let mut manifest:Manifest=serde_json::from_slice(&std::fs::read(f.stage().join("manifest.json")).unwrap()).unwrap();
+    manifest.stage_id=id.into();manifest.client_id="44444444444444444444444444444444".into();
+    manifest.scope.account="other".into();manifest.scope.account_created=other.created_at;
+    manifest.fingerprint=Fingerprint::from(std::fs::metadata(&bytes).unwrap());
+    let metadata=stage.join("manifest.json");std::fs::write(&metadata,serde_json::to_vec(&manifest).unwrap()).unwrap();
+    std::fs::set_permissions(&metadata,std::fs::Permissions::from_mode(0o600)).unwrap();drop(mutation);
+    let (release,hook,entered)=pause("before-delete-tx");f.core.accounts().owner_close_checkpoint(hook);
+    let accounts=f.core.accounts().clone();let deleting=tokio::spawn(async move{accounts.remove("owner").await});
+    tokio::time::timeout(Duration::from_secs(5),entered).await.unwrap().unwrap();
+    // Genuine other-issuer binding/claim publisher starts AFTER the target scan.
+    // No raw epoch, capability, caller proof or fake mutation-completion boolean.
+    let binding=f.core.accounts().storage_binding_for("other").await.unwrap();
+    let claim=VerifiedStageBinding::verify_ready(&binding,id,crate::managed_stage::MAX_BYTES,|_|Ok(())).unwrap()
+        .claim(Intent {caption:String::new(),as_file:true,spoiler:false}).unwrap();
+    drop(binding);release.release();
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(5),deleting).await.unwrap().unwrap(),Err(RuntimeError::SourceInUse)));
+    assert!(f.core.accounts().get("owner").await.unwrap().is_some());
+    assert!(f.stage().join("bytes").exists());
+    assert_eq!(f.secrets.snapshot("fixture","owner")["session"],"synthetic");
+    drop(claim);
+    f.core.accounts().owner_close_checkpoint(Arc::new(|_|{}));
+    // A fresh stable Ready-only target is removable. Other's Claimed bytes stay
+    // retained in their actual physical folder rather than globally misattributed.
+    tokio::time::timeout(Duration::from_secs(5),f.core.accounts().remove("owner")).await.unwrap().unwrap();
+    assert!(f.core.accounts().get("owner").await.unwrap().is_none());
+    assert!(bytes.exists());assert!(f.core.accounts().get("other").await.unwrap().is_some());
     f.assert_no_wire();f.close().await;
 }

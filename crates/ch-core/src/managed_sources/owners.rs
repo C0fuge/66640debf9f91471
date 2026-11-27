@@ -1,8 +1,8 @@
 //! Shared deny-only owner metadata. Closing never proves reader closure or grants IO.
 use super::{Error, StageIdentity};
 use crate::runtime::AccountStorageObservation;
-use crate::managed_stage::{AccountRootAnchor, AccountRootIdentity};
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex, PoisonError, Weak}};
+use crate::managed_stage::{AccountRootAnchor, AccountRootIdentity,catalog::{PrivateByteCatalog,OwnerCatalogCheck}};
+use std::{collections::HashMap,os::unix::ffi::OsStrExt,path::PathBuf,sync::{Arc,Mutex,PoisonError,Weak}};
 
 const RECORDS: usize = 256;
 const CLOSINGS: usize = 256;
@@ -26,10 +26,10 @@ struct Closing { original:AccountStorageObservation, anchor:Option<AccountRootId
 /// Opaque Core-issued negative barrier handle retained by the actual Accounts clone.
 /// Contains no Sources/Accounts backreference, descriptor, storage guard or network task.
 #[derive(Clone)]
-pub(crate) struct OwnerBarriers(Arc<Mutex<State>>);
+pub(crate) struct OwnerBarriers(Arc<Mutex<State>>,Arc<PrivateByteCatalog>);
 
 impl OwnerBarriers {
-    pub(super) fn new() -> Self { Self(Arc::new(Mutex::new(State::default()))) }
+    pub(super) fn new(catalog:Arc<PrivateByteCatalog>) -> Self { Self(Arc::new(Mutex::new(State::default())),catalog) }
 
     pub(super) fn reserve(&self, owner: AccountStorageObservation, stage: String) -> Result<Reservation, Error> {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -75,6 +75,13 @@ pub(crate) struct OwnerClose {
 }
 
 impl OwnerClose {
+    // Runs only inside the already counted actual owner blocking worker, after
+    // old storage leases have drained. Never trusts manifest scope/client hints.
+    pub(crate) fn fresh_catalog(&self) -> crate::managed_stage::Result<OwnerCatalogCheck> {
+        let folder=self.root.file_name().ok_or(crate::managed_stage::Error::Integrity)?.as_bytes();
+        self.barriers.1.check_owner(folder)
+    }
+
     pub(crate) fn matches_anchor(&self, anchor:&AccountRootAnchor) -> bool {
         let state=self.barriers.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.closing.get(&self.root).is_some_and(|entry|
