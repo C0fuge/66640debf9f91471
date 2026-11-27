@@ -590,8 +590,7 @@ mod capture_tests {
         assert!(view.belongs_to(core.host()));
         assert!(core.host().bind_storage(view.clone()).is_err()); // Already once-bound.
         let foreign = crate::host::HostHandle::for_core(core.host().config().clone(), core.ingest().clone(),
-            Arc::new(MemorySecretStore::new()), core.stage_mutations(), core.managed_sources().directory_jobs(),
-            core.managed_sources().lookups());
+            Arc::new(MemorySecretStore::new()), &core.managed_sources());
         assert!(!view.belongs_to(&foreign));
         assert!(foreign.bind_storage(view).is_err());
         let standalone = Accounts::new(core.open_db().unwrap(), core.host().clone(), Arc::new(MemorySecretStore::new()),
