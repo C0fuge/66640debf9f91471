@@ -46,6 +46,13 @@ impl DataDirectoryLock {
     /// not a reusable namespace, account, reader-closure or cleanup permission.
     #[cfg(target_os="linux")]
     pub fn check_current(&self)->io::Result<()> {self.native.check_current()}
+
+    /// Also veto a genuine lock from a different Core data directory. The
+    /// expected directory is opened, never created, and aliases of the same
+    /// actual parent remain supported. Success is only a current negative
+    /// identity check, not managed namespace/mount, reader or cleanup authority.
+    #[cfg(target_os="linux")]
+    pub fn check_for(&self,expected:&Path)->io::Result<()> {self.native.check_for(expected)}
 }
 
 #[cfg(test)]
@@ -136,4 +143,20 @@ mod tests {
         DataDirectoryLock::acquire(&alias).unwrap().check_current().unwrap();
         assert_eq!(std::fs::read(&target).unwrap(),b"synthetic original bytes");
     }
+    #[cfg(target_os="linux")]
+    #[test]
+    fn genuine_lock_is_bound_to_the_actual_core_root_and_alias_retargeting_refuses() {
+        use std::os::unix::fs::symlink;
+        let temp=tempfile::tempdir().unwrap();let first=temp.path().join("first");let second=temp.path().join("second");
+        let one=DataDirectoryLock::acquire(&first).unwrap();let two=DataDirectoryLock::acquire(&second).unwrap();
+        one.check_for(&first).unwrap();one.check_for(&first.join(".")).unwrap();
+        two.check_current().unwrap();assert!(two.check_for(&first).is_err());assert!(one.check_for(&second).is_err());
+        let missing=temp.path().join("missing");assert!(one.check_for(&missing).is_err());assert!(!missing.exists());
+        let alias=temp.path().join("core-alias");symlink(&first,&alias).unwrap();one.check_for(&alias).unwrap();
+        std::fs::remove_file(&alias).unwrap();symlink(&second,&alias).unwrap();
+        one.check_current().unwrap();assert!(one.check_for(&alias).is_err(),"a Core alias changed while the lock's own path stayed valid");
+        one.check_for(&first).unwrap();two.check_for(&second).unwrap();
+        assert!(DataDirectoryLock::acquire(&first).is_err());assert!(DataDirectoryLock::acquire(&second).is_err());
+    }
+
 }

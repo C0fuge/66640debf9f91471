@@ -154,7 +154,7 @@ impl App {
         config.autostart = false;
         let core = Arc::new(Core::open(config).await?);
         #[cfg(target_os="linux")]
-        if let Err(error)=directory_lock.check_current() {
+        if let Err(error)=directory_lock.check_for(core.data_dir()) {
             core.shutdown().await;
             return Err(error.into());
         }

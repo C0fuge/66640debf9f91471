@@ -41,6 +41,14 @@ impl Held {
         let held=Self {file,root,directory};held.check_current()?;Ok(held)
     }
 
+    pub(super) fn check_for(&self,expected:&Path)->io::Result<()> {
+        self.check_current()?;
+        let expected=directory(expected)?;
+        let actual=expected.metadata()?;let original=self.root.metadata()?;
+        if (actual.dev(),actual.ino())!=(original.dev(),original.ino()) {return Err(changed());}
+        self.check_current()
+    }
+
     pub(super) fn check_current(&self)->io::Result<()> {
         let current=directory(&self.directory)?;
         let original=self.root.metadata()?;let named=current.metadata()?;

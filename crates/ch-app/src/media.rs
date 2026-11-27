@@ -246,6 +246,8 @@ struct CacheRead {
     _read_scope: ch_core::managed_stage::StageReadScope,
     // Also retain the real process lock (and isolated demo root) after shutdown
     // aborts an async waiter while its blocking filesystem work still runs.
+    #[cfg(target_os="linux")]
+    owner_root:std::path::PathBuf,
     _directory:crate::DirectoryLifetime,
 }
 impl CacheRead {
@@ -256,9 +258,10 @@ impl CacheRead {
         #[cfg(not(target_os="linux"))]
         let _=core;
         #[cfg(target_os="linux")]
-        directory.0.check_current().map_err(|_|CacheFileError::Changed)?;
+        directory.0.check_for(core.data_dir()).map_err(|_|CacheFileError::Changed)?;
         let file=CacheFile::open(root,path)?;
-        Ok(Self {file,#[cfg(target_os="linux")] _read_scope:read_scope,_directory:directory})
+        Ok(Self {file,#[cfg(target_os="linux")] _read_scope:read_scope,
+            #[cfg(target_os="linux")] owner_root:core.data_dir().to_owned(),_directory:directory})
     }
 }
 impl Worker {
@@ -331,7 +334,9 @@ impl Worker {
             let mut source=source;
             let directory=source._directory.clone();
             #[cfg(target_os="linux")]
-            directory.0.check_current().map_err(|_|SaveFileError::SourceChanged)?;
+            directory.0.check_for(&source.owner_root).map_err(|_|SaveFileError::SourceChanged)?;
+            #[cfg(target_os="linux")]
+            let owner_root=source.owner_root.clone();
             // A native destination may be anywhere, including the configured
             // accounts tree. Invalidate before the first destination probe and
             // retain through actual destination handles closing in publish().
@@ -345,7 +350,7 @@ impl Worker {
                     // Recheck before the separate publication decision. No DB
                     // mutex is held during this real filesystem observation.
                     #[cfg(target_os="linux")]
-                    if directory.0.check_current().is_err() {return false;}
+                    if directory.0.check_for(&owner_root).is_err() {return false;}
                     #[cfg(not(target_os="linux"))]
                     let _directory=directory;
                     let Some(manager)=weak.upgrade()else{return false;};commit_job.begin_commit(&manager)

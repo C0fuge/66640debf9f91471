@@ -359,3 +359,25 @@ async fn active_admission_and_queued_cancellation_bound_actual_rpc_count() {
     for n in 0..8 {wait_state(&app,&thread,&format!("active-{n}"),"cancelled").await;}
     app.shutdown().await;
 }
+
+#[cfg(target_os="linux")]
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn genuinely_held_foreign_directory_lock_cannot_open_this_cores_cached_file() {
+    use std::os::unix::fs::MetadataExt;
+    use ch_core::runtime::DataDirectoryLock;
+    let temp=tempfile::tempdir().unwrap();let cache=temp.path().join("cache");
+    std::fs::create_dir(&cache).unwrap();let path=cache.join("held.bin");
+    std::fs::write(&path,b"isolated root binding").unwrap();let meta=std::fs::metadata(&path).unwrap();
+    let open_handles=||std::fs::read_dir("/proc/self/fd").unwrap().filter_map(|entry|
+        std::fs::metadata(entry.ok()?.path()).ok())
+        .filter(|m|m.dev()==meta.dev()&&m.ino()==meta.ino()).count();
+    let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new()));config.autostart=false;
+    let core=Core::open(config).await.unwrap();
+    let foreign=(Arc::new(DataDirectoryLock::acquire(&temp.path().join("foreign")).unwrap()),None);
+    foreign.0.check_current().unwrap();
+    assert!(matches!(CacheRead::open(&core,foreign.clone(),&cache,&path),Err(CacheFileError::Changed)));
+    assert_eq!(open_handles(),0,"a genuine foreign lock never authorizes opening the cached byte FD");
+    let directory=(Arc::new(DataDirectoryLock::acquire(temp.path()).unwrap()),None);
+    let source=CacheRead::open(&core,directory,&cache,&path).unwrap();assert_eq!(open_handles(),1);
+    drop(source);assert_eq!(open_handles(),0);foreign.0.check_current().unwrap();core.shutdown().await;
+}
