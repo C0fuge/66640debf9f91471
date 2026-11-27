@@ -327,6 +327,8 @@ impl Core {
     /// Stop every plugin gracefully (§4.5), persist the accounts' final state, checkpoint the
     /// WAL. Accounts stay wanted in the database and resume on the next open.
     pub async fn shutdown(&self) {
+        #[cfg(target_os="linux")]
+        self.sink.close_work();
         #[cfg(target_os = "linux")]
         self.managed_sources.close();
         self.managed_proofs.close();
@@ -362,11 +364,14 @@ impl Core {
         if self.managed_sources.drain().await.is_err() {
             warn!("draining managed local admission jobs failed");
         }
-        match self.sink.with_ingest(|i| i.db().checkpoint()).await {
+        #[cfg(target_os="linux")]
+        if let Err(e)=self.sink.checkpoint_after_close().await {warn!("ingest shutdown/checkpoint: {e}");}
+        #[cfg(not(target_os="linux"))]
+        {match self.sink.with_ingest(|i| i.db().checkpoint()).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => warn!("WAL checkpoint: {e}"),
             Err(e) => warn!("WAL checkpoint: {e}"),
-        }
+        }}
         info!("core shut down");
     }
 }

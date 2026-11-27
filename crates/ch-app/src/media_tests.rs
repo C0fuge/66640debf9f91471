@@ -293,6 +293,40 @@ async fn replaced_real_directory_lock_refuses_cache_open_and_late_save_choice() 
     }
 }
 
+#[cfg(target_os="linux")]
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn dropped_app_and_shutdown_waiter_keep_real_directory_lock_until_ingest_fd_closes() {
+    let (app,thread)=fixture("good").await;let app=Arc::new(app);
+    let _temporary=app._demo.clone().unwrap(); // Keep only the isolated directory, not its lock.
+    let root=app.core.data_dir().to_owned();
+    let path=app.core.host().config().cache_dir(&thread.account_id).join("cached.bin");
+    let mutations=app.core.stage_mutations();
+    let (entered,ready)=tokio::sync::oneshot::channel();let (resume,paused)=std::sync::mpsc::channel();
+    let core=app.core.clone();
+    let caller=tokio::spawn(async move {
+        core.ingest().with_ingest(move|_| {
+            let readers=mutations.read_scope().unwrap();let file=std::fs::File::open(path).unwrap();
+            entered.send(()).unwrap();let _=paused.recv();
+            assert_eq!(file.metadata().unwrap().len(),19);
+            drop(file);drop(readers);
+        }).await
+    });
+    tokio::time::timeout(Duration::from_secs(5),ready).await.unwrap().unwrap();
+    caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
+    let closing=app.clone();let waiter=tokio::spawn(async move {closing.shutdown().await;});
+    let stopped=app.shutdown_signal();
+    tokio::time::timeout(Duration::from_secs(5),stopped.cancelled()).await.unwrap();
+    waiter.abort();assert!(waiter.await.unwrap_err().is_cancelled());drop(app);
+    assert!(ch_core::runtime::DataDirectoryLock::acquire(&root).is_err());
+    resume.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10),async {
+        loop {
+            if let Ok(lock)=ch_core::runtime::DataDirectoryLock::acquire(&root) {drop(lock);break;}
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+}
+
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn changed_attachment_and_disabled_account_cannot_publish_late_selection() {
     for disabled in [false,true] {

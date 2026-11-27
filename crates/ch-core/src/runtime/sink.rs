@@ -28,6 +28,17 @@ pub struct IngestSink {
     ingest: Arc<Mutex<Ingest>>,
     bus: ChangeBus,
     owners: Option<super::LogicalOwners>,
+    #[cfg(target_os="linux")]
+    jobs:Arc<crate::managed_sources::OwnedJobs>,
+    #[cfg(target_os="linux")]
+    closing:tokio::sync::Mutex<CloseState>,
+}
+
+#[cfg(target_os="linux")]
+enum CloseState {
+    Open,
+    Running(tokio::task::JoinHandle<std::result::Result<(),String>>),
+    Done(std::result::Result<(),String>),
 }
 
 impl std::fmt::Debug for IngestSink {
@@ -43,12 +54,16 @@ impl IngestSink {
             ingest: Arc::new(Mutex::new(ingest)),
             bus,
             owners: None,
+            #[cfg(target_os="linux")]
+            jobs:crate::managed_sources::OwnedJobs::new(),
+            #[cfg(target_os="linux")]
+            closing:tokio::sync::Mutex::new(CloseState::Open),
         }
     }
 
     #[cfg(target_os = "linux")]
     pub(crate) fn for_core(ingest: Ingest, bus: ChangeBus, owners: super::LogicalOwners) -> Self {
-        Self { ingest: Arc::new(Mutex::new(ingest)), bus, owners: Some(owners) }
+        let mut sink=Self::new(ingest,bus);sink.owners=Some(owners);sink
     }
 
     pub(crate) fn shared_ingest(&self) -> Arc<Mutex<Ingest>> {
@@ -58,17 +73,61 @@ impl IngestSink {
     /// Run `f` with the ingest (the main writer) on a blocking task. Services use it for
     /// core-initiated effects (`apply_*`) and to read through the main connection; publish the
     /// result with [`ChangeBus::publish_local`].
+    /// Linux Core owns bounded admitted work through caller loss, closes new
+    /// callbacks on shutdown and drains actual workers before its checkpoint.
+    /// A returned metadata value grants no managed-file or cleanup authority.
     pub async fn with_ingest<R, F>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut Ingest) -> R + Send + 'static,
         R: Send + 'static,
     {
         let ingest = Arc::clone(&self.ingest);
+        #[cfg(target_os="linux")]
+        {
+            self.jobs.run_wait_until(&self.jobs.stopped(),move|| {
+                let mut g=ingest.lock().unwrap_or_else(PoisonError::into_inner);
+                f(&mut g)
+            }).await.map_err(|_|super::error::RuntimeError::Task("ingest work unavailable".into()))
+        }
+        #[cfg(not(target_os="linux"))]
+        {
         Ok(tokio::task::spawn_blocking(move || {
             let mut g = ingest.lock().unwrap_or_else(PoisonError::into_inner);
             f(&mut g)
         })
         .await?)
+        }
+    }
+
+    #[cfg(target_os="linux")]
+    pub(crate) fn close_work(&self) {self.jobs.close();}
+
+    // The private close task survives loss of any shutdown waiter. Its real
+    // worker drain precedes the hardcoded checkpoint; no caller can submit work
+    // through this path after ordinary admission closes.
+    #[cfg(target_os="linux")]
+    pub(crate) async fn checkpoint_after_close(&self)->std::result::Result<(),String> {
+        self.jobs.close();
+        let mut state=self.closing.lock().await;
+        if matches!(*state,CloseState::Open) {
+            let jobs=self.jobs.clone();let ingest=self.ingest.clone();
+            *state=CloseState::Running(tokio::spawn(async move {
+                let drained=jobs.drain().await.map_err(|_|"ingest worker drain failed".to_owned());
+                let checkpoint=tokio::task::spawn_blocking(move|| {
+                    let ingest=ingest.lock().unwrap_or_else(PoisonError::into_inner);
+                    ingest.db().checkpoint().map_err(|e|e.to_string())
+                }).await.map_err(|_|"ingest checkpoint worker failed".to_owned()).and_then(|r|r);
+                drained.and(checkpoint)
+            }));
+        }
+        if let CloseState::Running(task)=&mut *state {
+            let result=task.await.map_err(|_|"ingest close task failed".to_owned()).and_then(|r|r);
+            *state=CloseState::Done(result);
+        }
+        match &*state {
+            CloseState::Done(result)=>result.clone(),
+            _=>Err("ingest close unavailable".into()),
+        }
     }
 
     /// Replace the ingest options (a user setting changed). The path filter is kept when
@@ -249,5 +308,43 @@ mod tests {
         core.shutdown().await;
         assert!(!filter("owner",path.to_str().unwrap()));
         assert!(!filter("owner",root.join("missing.bin").to_str().unwrap()));
+    }
+
+    #[cfg(target_os="linux")]
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn lost_ingest_and_close_waiters_still_require_actual_descriptor_and_worker_drop() {
+        use crate::{host::MemorySecretStore,runtime::{Core,CoreConfig}};
+        use std::{sync::{atomic::{AtomicBool,Ordering},mpsc},time::Duration};
+        let temp=tempfile::tempdir().unwrap();
+        let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new()));config.autostart=false;
+        let core=Arc::new(Core::open(config).await.unwrap());
+        let path=temp.path().join("probe.bin");std::fs::write(&path,b"isolated metadata bytes").unwrap();
+        let mutations=core.stage_mutations();let catalog=core.managed_sources().catalog();
+        let (entered,ready)=tokio::sync::oneshot::channel();let (resume,paused)=mpsc::channel();
+        let c=core.clone();
+        let caller=tokio::spawn(async move {
+            c.ingest().with_ingest(move|_| {
+                let readers=mutations.read_scope().unwrap();
+                let file=std::fs::File::open(path).unwrap();
+                entered.send(()).unwrap();let _=paused.recv();
+                assert_eq!(file.metadata().unwrap().len(),23);
+                drop(file);drop(readers);
+            }).await
+        });
+        tokio::time::timeout(Duration::from_secs(5),ready).await.unwrap().unwrap();
+        caller.abort();assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(catalog.exclude_readers_for_test().is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(20),core.ingest().checkpoint_after_close()).await.is_err());
+        assert!(matches!(&*core.ingest().closing.lock().await,CloseState::Running(_)));
+        let called=Arc::new(AtomicBool::new(false));let captured=called.clone();
+        let refused=tokio::time::timeout(Duration::from_secs(1),core.ingest().with_ingest(move|_|captured.store(true,Ordering::Release))).await;
+        assert!(matches!(refused,Ok(Err(_))));assert!(!called.load(Ordering::Acquire));
+        let mut second=Box::pin(core.shutdown());
+        assert!(tokio::time::timeout(Duration::from_millis(20),&mut second).await.is_err());
+        assert!(catalog.exclude_readers_for_test().is_err());
+        resume.send(()).unwrap();tokio::time::timeout(Duration::from_secs(5),second).await.unwrap();
+        assert!(catalog.exclude_readers_for_test().is_ok());
+        core.shutdown().await; // Rejoins cached completion, never polls a finished handle twice.
+        assert!(core.ingest().with_ingest(|_|()).await.is_err());
     }
 }

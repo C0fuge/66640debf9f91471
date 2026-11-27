@@ -41,9 +41,9 @@ impl OwnedJobs {
         recv.await.map_err(|_| Error::Task)
     }
 
-    // Directory-only admission: one existing supervisor await, no queued
-    // blocking closure until a slot is actually held. Ordinary admission keeps
-    // its existing try-only Busy behavior above.
+    // Admission from an existing async request: no queued blocking closure until
+    // a slot is actually held. Directory and ingest workers use this bounded
+    // wait; ordinary source admission keeps its try-only Busy behavior above.
     pub(crate) fn stopped(&self) -> CancellationToken { self.closed.clone() }
 
     pub(crate) async fn run_wait_until<R,F>(&self, revoked:&CancellationToken,work:F) -> Result<R,Error>
