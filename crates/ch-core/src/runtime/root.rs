@@ -19,9 +19,10 @@ use crate::ingest::{Ingest, IngestOptions};
 /// The database file inside the data directory.
 pub const DB_FILE: &str = "hub.db";
 
-// Temporary fail-closed composition boundary, not restoration. No production
-// writer creates these records yet. A future coherent restore + Host guard must
-// replace this check together; no setting can bypass historical source protection.
+// Non-Linux legacy composition retains its fail-closed startup boundary. Linux
+// restores bounded negative barriers before Host construction, without replay or
+// source-read/closure permissions. No setting bypasses historical protection.
+#[cfg(not(target_os = "linux"))]
 fn require_unmanaged_startup(db: &Db) -> Result<()> {
     let protected: bool = db.conn().query_row(
         "SELECT EXISTS(SELECT 1 FROM managed_source LIMIT 1)
@@ -156,6 +157,7 @@ impl Core {
                 // The first open migrates; the second finds the schema current.
                 let a = Db::open(&p)?;
                 // Before constructing Host/Accounts or spawning any background task.
+                #[cfg(not(target_os = "linux"))]
                 require_unmanaged_startup(&a)?;
                 let b = Db::open(&p)?;
                 // Ordinary storage historically tolerates unavailable WAL. Do not
@@ -183,6 +185,8 @@ impl Core {
         let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(), proof_db);
         #[cfg(target_os = "linux")]
         let managed_sources = crate::managed_sources::ManagedSources::new(managed_proofs.clone(), &host_config);
+        #[cfg(target_os = "linux")]
+        managed_sources.restore_negative(sink.shared_ingest(),&host_config).await?;
         #[cfg(target_os = "linux")]
         managed_sources.initialize_catalog().await;
         #[cfg(target_os = "linux")]

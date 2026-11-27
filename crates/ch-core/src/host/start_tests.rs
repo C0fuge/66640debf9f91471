@@ -141,7 +141,18 @@ async fn known_active() -> (tempfile::TempDir, Core, Arc<Registry>, Arc<Conn>, m
 
 #[tokio::test]
 async fn actual_external_frame_rejects_stale_catalog_and_original_native_run() {
-    let (temp,core,registry,conn,mut frames)=known_active().await;
+    let (temp,core)=fixture().await;
+    let registry=core.host().test_registry();
+    registry.set_plugin_state("fixture",PluginState::Running {api_version:"1.2.0".into(),
+        plugin_version:None,capabilities:Arc::new(Default::default())});
+    let scope=core.host().capture_start("fixture","owner").await.unwrap();
+    assert!(registry.set_start("fixture","owner",AccountSpec::default(),&scope));
+    let (conn,mut frames)=connection(&registry);
+    let (id,reply)=conn.request(PendingKind::AccountStart("owner".into(),scope),"account.start",
+        serde_json::json!({}),Duration::from_secs(1),None,&conn).unwrap();
+    assert!(matches!(frames.try_recv(),Ok(Out::Frame(_))));
+    resolve(&conn,&registry,RequestId::Number(id),Ok(serde_json::json!({})));
+    reply.await.unwrap().unwrap();
     let sources=core.managed_sources();
     let barriers=sources.owner_barriers();
     let mut sup=supervisor(&core,registry);

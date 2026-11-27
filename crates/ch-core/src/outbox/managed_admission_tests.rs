@@ -271,6 +271,49 @@ async fn complete_catalog_allows_independent_external_files_and_aliases_with_a_r
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn actual_managed_admission_reopens_without_replay_or_false_closure_from_sql_labels() {
+    let f=Fixture::new(true).await;
+    let item=f.outbox.enqueue_managed_file_checked(f.claim().await).await.unwrap();
+    f.outbox.shutdown().await;f.core.shutdown().await;
+    let outside=f.temp.path().join("independent.bin");std::fs::write(&outside,b"outside").unwrap();
+    for (source_state,outbox_state) in [("retained","queued"),("retiring","sending"),("released","sent")] {
+        let db=f.core.open_db().unwrap();
+        db.conn().execute("UPDATE managed_source SET state=?1",[source_state]).unwrap();
+        db.conn().execute("UPDATE outbox SET state=?1",[outbox_state]).unwrap();
+        let mut config=CoreConfig::new(f.temp.path(),f.secrets.clone());
+        config.host=f.core.host().config().clone();config.autostart=false;
+        let core=Core::open(config).await.unwrap();
+        assert_eq!(core.managed_sources().census(),(0,0,1));
+        let outbox=Outbox::for_core(&core,OutboxPolicy::default());outbox.start().unwrap();
+        core.accounts().start("owner").await.unwrap();
+        for path in [f.stage().join("bytes"),outside.clone()] {
+            assert_input_barrier(core.host().call_raw("fixture","messages.send_file",
+                serde_json::json!({"account_id":"owner","path":path}),None).await.unwrap_err());
+            f.assert_no_wire();
+        }
+        // Positive native text control also gives the real worker a chance to
+        // observe online status. It must never reset/replay the managed row.
+        let error=core.host().call_raw("fixture","messages.edit",
+            serde_json::json!({"account_id":"owner","text":"text still works"}),None).await.unwrap_err();
+        assert_eq!(error.error_code(),Some(ch_protocol::ErrorCode::MethodNotFound));
+        assert_eq!(std::fs::read_to_string(f.temp.path().join("wire")).unwrap(),"messages.edit");
+        std::fs::remove_file(f.temp.path().join("wire")).unwrap();
+        assert_eq!(outbox.get(item.id).unwrap().state.as_str(),outbox_state);
+        assert_eq!(outbox.get(item.id).unwrap().attempts,0);
+        assert!(matches!(core.accounts().remove("owner").await,Err(RuntimeError::SourceInUse)));
+        assert!(f.stage().join("bytes").exists());
+        assert!(core.accounts().get("owner").await.unwrap().is_some());
+        assert!(matches!(f.core.accounts().remove("owner").await,Err(RuntimeError::Host(HostError::ShuttingDown))));
+        let unrelated=format!("unrelated-{source_state}");
+        core.accounts().add(NewAccount::new("fixture").id(&unrelated).no_start()).await.unwrap();
+        core.accounts().remove(&unrelated).await.unwrap();
+        assert!(core.accounts().get(&unrelated).await.unwrap().is_none());
+        assert_eq!(f.count("managed_dispatch"),0);
+        outbox.shutdown().await;core.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn exact_legacy_receipt_precedes_spent_changed_bytes_and_missing_run() {
     let f=Fixture::new(false).await;
     let mut claim=f.claim().await;

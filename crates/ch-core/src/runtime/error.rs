@@ -27,8 +27,8 @@ pub enum RuntimeError {
     /// The database failed.
     #[error(transparent)]
     Db(#[from] ch_db::Error),
-    /// Durable managed lifetime records require recovery and Host protection that
-    /// this composition does not yet provide. No source is assumed safe or absent.
+    /// Durable lifetime records cannot be safely bounded/identified by this
+    /// composition. No source is assumed safe or absent and no records are pruned.
     #[error("managed lifetime recovery is not available in this build")]
     ManagedLifetimeRecoveryUnavailable,
     /// Local source lifetime remains unresolved; no account data was deleted.

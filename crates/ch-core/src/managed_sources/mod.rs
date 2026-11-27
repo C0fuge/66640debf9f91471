@@ -11,6 +11,7 @@ use crate::runtime::{AccountStorageObservation, ManagedProofWriter};
 
 mod work;
 mod owners;
+mod restore;
 pub(crate) use work::{OwnedJobs,BlockingWork};
 pub(crate) use owners::{OwnerBarriers,OwnerClose, Reservation};
 
@@ -43,6 +44,19 @@ impl ManagedSources {
         if !matches!(self.lookups.run(move||owned.catalog.refresh()).await,Ok(Ok(_))) {
             tracing::warn!("initial private-byte catalog remains unknown");
         }
+    }
+    // Before Host construction/discovery/autostart. The actual bounded metadata
+    // worker installs only negative namespace barriers, never fresh storage Gates.
+    pub(crate) async fn restore_negative(&self,ingest:Arc<std::sync::Mutex<crate::ingest::Ingest>>,
+        config:&HostConfig) -> crate::runtime::Result<()> {
+        let config=config.clone();let barriers=self.owners.clone();
+        self.lookups.run(move|| {
+            let recovered={
+                let ingest=ingest.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                restore::load(ingest.db().conn(),&config)?
+            };
+            barriers.restore(recovered).map_err(|_|crate::runtime::RuntimeError::ManagedLifetimeRecoveryUnavailable)
+        }).await.map_err(|_|crate::runtime::RuntimeError::ManagedLifetimeRecoveryUnavailable)?
     }
     pub(crate) fn owner_barriers(&self) -> OwnerBarriers { self.owners.clone() }
     pub(crate) fn owner_jobs(&self) -> Arc<OwnedJobs> { self.owner_jobs.clone() }

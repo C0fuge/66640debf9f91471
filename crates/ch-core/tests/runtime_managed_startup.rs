@@ -1,5 +1,5 @@
-//! Until coherent managed recovery/Host guards exist, durable lifetime records
-//! must stop startup before plugin discovery or autostart. Everything is synthetic.
+//! Malformed/unscoped/over-budget lifetime records stop startup before discovery
+//! or autostart. Valid Linux records restore negative-only barriers. Synthetic data.
 
 mod host_support;
 
@@ -36,7 +36,7 @@ async fn refused(env: &Env) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_source_state_stops_autostart_and_empty_store_still_runs() {
+async fn malformed_sources_in_every_state_stop_autostart_and_empty_store_still_runs() {
     let env = Env::new();
     let dir = env.plugin_dir("fixture", &["python3", "-I", "./startup.py", "--mode", "good"], json!({}));
     let fixture = serde_json::to_string(&host_support::misbehaving_script()).unwrap();
@@ -93,6 +93,25 @@ async fn orphan_historical_attempts_and_retirement_journal_also_refuse() {
     db.conn().pragma_update(None, "foreign_keys", "ON").unwrap();
     let core = Core::open(config(&env)).await.unwrap();
     core.shutdown().await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+#[cfg(target_os="linux")]
+async fn over_budget_negative_restoration_refuses_before_discovery_or_autostart() {
+    let env=Env::new();
+    let _dir=env.plugin_dir("fixture",&["python3","-I","-c","pass"],json!({}));
+    let db=seed(&env);
+    let host=env.config();
+    for id in 1..=257 {
+        let stage=format!("{id:032x}");
+        db.conn().execute("INSERT INTO managed_source(stage_id,client_id,account_id,plugin_id,
+            account_created_at,chat_id,path,fingerprint_json,intent_json,created_at,updated_at)
+            VALUES(?1,?1,'owner','fixture',0,'chat',?2,'{}','{}',0,0)",
+            [stage.as_str(),host.upload_dir("owner").join(&stage).join("bytes").to_str().unwrap()]).unwrap();
+    }
+    refused(&env).await;
+    assert_eq!(db.conn().query_row("SELECT count(*) FROM managed_source",[],|r|r.get::<_,i64>(0)).unwrap(),257);
+    assert!(!db.conn().query_row("SELECT installed FROM plugin WHERE plugin_id='fixture'",[],|r|r.get::<_,bool>(0)).unwrap());
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]

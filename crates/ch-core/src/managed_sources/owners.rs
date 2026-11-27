@@ -18,6 +18,9 @@ struct State {
     stopped: bool,
     pending: HashMap<String, AccountStorageObservation>,
     records: HashMap<String, Record>,
+    // Restored namespaces are negative-only. No newly minted Gate/epoch may
+    // convert historical uncertainty into reader, dispatch or removal authority.
+    recovered: HashMap<String,PathBuf>,
     // Namespace keys, not one accumulating entry for every revoked Gate generation.
     closing: HashMap<PathBuf, Closing>,
 }
@@ -30,6 +33,14 @@ pub(crate) struct OwnerBarriers(Arc<Mutex<State>>,Arc<PrivateByteCatalog>);
 
 impl OwnerBarriers {
     pub(super) fn new(catalog:Arc<PrivateByteCatalog>) -> Self { Self(Arc::new(Mutex::new(State::default())),catalog) }
+    pub(super) fn restore(&self,recovered:super::restore::Recovered) -> Result<(),Error> {
+        let mut state=self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.stopped || !state.pending.is_empty() || !state.records.is_empty() || !state.recovered.is_empty() {
+            return Err(Error::Conflict);
+        }
+        state.recovered=recovered.roots;
+        Ok(())
+    }
 
     pub(crate) async fn prepare_generic(&self, jobs:&super::OwnedJobs, method:&str,
         params:&serde_json::Value) -> Result<Option<crate::managed_stage::catalog::ExternalInputs>,Error> {
@@ -37,6 +48,7 @@ impl OwnerBarriers {
         {
             let state=self.0.lock().unwrap_or_else(PoisonError::into_inner);
             if state.stopped { return Err(Error::Closed); }
+            if !state.recovered.is_empty() { return Err(Error::Busy); }
             if state.pending.is_empty() && state.records.is_empty() { return Ok(None); }
         }
         let paths=input_paths(method,params)?;
@@ -55,6 +67,7 @@ impl OwnerBarriers {
         if !file_input(method, params) { return Ok(publish()); }
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if state.stopped { return Err(Error::Closed); }
+        if !state.recovered.is_empty() { return Err(Error::Busy); }
         if !state.pending.is_empty() || !state.records.is_empty() {
             let paths=input_paths(method,params)?;
             let result=self.1.external_frame(external.ok_or(Error::Busy)?, &paths,publish)
@@ -72,8 +85,8 @@ impl OwnerBarriers {
         if state.stopped || owner.is_revoked() || state.closing.contains_key(owner.namespace()) {
             return Err(Error::Closed);
         }
-        if state.pending.contains_key(&stage) || state.records.contains_key(&stage) { return Err(Error::Conflict); }
-        if state.pending.len()+state.records.len() >= RECORDS { return Err(Error::Busy); }
+        if state.pending.contains_key(&stage) || state.records.contains_key(&stage) || state.recovered.contains_key(&stage) { return Err(Error::Conflict); }
+        if state.pending.len()+state.records.len()+state.recovered.len() >= RECORDS { return Err(Error::Busy); }
         state.pending.insert(stage.clone(),owner.clone());
         Ok(Reservation { state:Arc::downgrade(&self.0),owner,stage,settled:false })
     }
@@ -98,7 +111,7 @@ impl OwnerBarriers {
     pub(crate) fn census(&self) -> (usize,usize,usize) {
         let state=self.0.lock().unwrap();
         (state.pending.len(),state.records.values().filter(|r|r.id.is_some()).count(),
-            state.records.values().filter(|r|r.id.is_none()).count())
+            state.records.values().filter(|r|r.id.is_none()).count()+state.recovered.len())
     }
     #[cfg(test)]
     pub(crate) fn closing_count(&self) -> usize { self.0.lock().unwrap().closing.len() }
@@ -158,6 +171,7 @@ impl OwnerClose {
         let state=self.barriers.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.pending.values().any(|owner|owner.namespace()==self.root.as_path())
             || state.records.values().any(|record|record.owner.namespace()==self.root.as_path())
+            || state.recovered.values().any(|root|root==&self.root)
     }
 
     // Caller is Accounts' owned removal under its membership/lifecycle and old
