@@ -29,7 +29,7 @@ fn writer() -> (tempfile::TempDir, ManagedProofWriter) {
     let normal = Db::open(&path).unwrap();
     seed(&normal);
     let ingest = Arc::new(Mutex::new(Ingest::new(normal, IngestOptions::default())));
-    let proof = ManagedProofWriter::new(ingest, Some(Db::open_full_sync(path).unwrap()));
+    let proof = ManagedProofWriter::new(ingest,Some(Db::open_full_sync(path).unwrap()),super::super::reference_queue::ReferenceQueue::new());
     (tmp, proof)
 }
 
@@ -159,7 +159,7 @@ async fn unavailable_full_connection_does_not_disable_ordinary_ingest() {
     let ingest = Arc::new(Mutex::new(Ingest::new(normal, IngestOptions::default())));
     // Only the private Core constructor can select the factory's unavailable
     // result. There is no public injection, fallback connection, or lazy reopen.
-    let writer = ManagedProofWriter::new(Arc::clone(&ingest), None);
+    let writer = ManagedProofWriter::new(Arc::clone(&ingest),None,super::super::reference_queue::ReferenceQueue::new());
     assert!(matches!(writer.with_transaction(|_| -> Result<(), ()> {
         panic!("unavailable writer must never run callback")
     }).await, Err(ManagedProofError::DurabilityUnavailable)));

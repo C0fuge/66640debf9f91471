@@ -28,6 +28,7 @@ pub struct IngestSink {
     ingest: Arc<Mutex<Ingest>>,
     bus: ChangeBus,
     owners: Option<super::LogicalOwners>,
+    references:super::reference_queue::ReferenceQueue,
     #[cfg(target_os="linux")]
     jobs:Arc<crate::managed_sources::OwnedJobs>,
     #[cfg(target_os="linux")]
@@ -54,6 +55,7 @@ impl IngestSink {
             ingest: Arc::new(Mutex::new(ingest)),
             bus,
             owners: None,
+            references:super::reference_queue::ReferenceQueue::new(),
             #[cfg(target_os="linux")]
             jobs:crate::managed_sources::OwnedJobs::new(),
             #[cfg(target_os="linux")]
@@ -70,6 +72,8 @@ impl IngestSink {
         Arc::clone(&self.ingest)
     }
 
+    pub(super) fn reference_queue(&self)->super::reference_queue::ReferenceQueue {self.references.clone()}
+
     /// Run `f` with the ingest (the main writer) on a blocking task. Services use it for
     /// core-initiated effects (`apply_*`) and to read through the main connection; publish the
     /// result with [`ChangeBus::publish_local`].
@@ -82,9 +86,11 @@ impl IngestSink {
         R: Send + 'static,
     {
         let ingest = Arc::clone(&self.ingest);
+        let references=self.references.clone();
         #[cfg(target_os="linux")]
         {
             self.jobs.run_wait_until(&self.jobs.stopped(),move|| {
+                let _references=references.read();
                 let mut g=ingest.lock().unwrap_or_else(PoisonError::into_inner);
                 f(&mut g)
             }).await.map_err(|_|super::error::RuntimeError::Task("ingest work unavailable".into()))
@@ -92,6 +98,7 @@ impl IngestSink {
         #[cfg(not(target_os="linux"))]
         {
         Ok(tokio::task::spawn_blocking(move || {
+            let _references=references.read();
             let mut g = ingest.lock().unwrap_or_else(PoisonError::into_inner);
             f(&mut g)
         })
@@ -199,10 +206,11 @@ impl crate::host::OwnedEventSink for IngestSink {
         let pid = plugin_id.to_owned();
         let name = event.name();
         let checked = origin.clone();
-        let domain = owners.clone(); let ingest = self.ingest.clone();
+        let domain = owners.clone(); let ingest = self.ingest.clone();let references=self.references.clone();
         #[cfg(test)]
         let checkpoint = owners.take_checkpoint("event");
         let r = match owners.run_metadata(&origin, move || {
+            let _references=references.read();
             #[cfg(test)]
             let _completion = checkpoint.map(|checkpoint| checkpoint.enter());
             let ingest = ingest.lock().unwrap_or_else(PoisonError::into_inner);
@@ -346,5 +354,41 @@ mod tests {
         assert!(catalog.exclude_readers_for_test().is_ok());
         core.shutdown().await; // Rejoins cached completion, never polls a finished handle twice.
         assert!(core.ingest().with_ingest(|_|()).await.is_err());
+    }
+
+    #[cfg(target_os="linux")]
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn real_normal_and_full_metadata_jobs_share_the_queue_and_survive_waiter_loss() {
+        use crate::{host::MemorySecretStore,runtime::{Core,CoreConfig}};
+        use std::time::Duration;
+        let temp=tempfile::tempdir().unwrap();
+        let mut config=CoreConfig::new(temp.path(),Arc::new(MemorySecretStore::new()));config.autostart=false;
+        let core=Arc::new(Core::open(config).await.unwrap());
+        let queue=core.ingest().reference_queue();let exclusive=queue.exclusive_for_test().await;
+        let c=core.clone();let normal=tokio::spawn(async move {
+            c.ingest().with_ingest(|ing|ing.db().conn().execute(
+                "INSERT INTO settings(key,value_json,updated_at) VALUES('queue-normal','true',0)",[])).await
+        });
+        let c=core.clone();let full=tokio::spawn(async move {
+            c.managed_proofs().with_transaction(|scope|->rusqlite::Result<()> {
+                scope.transaction().execute("INSERT INTO settings(key,value_json,updated_at) VALUES('queue-full','true',0)",[])?;
+                Ok(())
+            }).await
+        });
+        // Observe actual worker entry into the real lock wait, not a supplied
+        // result/closure flag. Both jobs are admitted before their callers drop.
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while queue.waiting_for_test()<2 {tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        let db=core.open_db().unwrap();
+        let count=||db.conn().query_row("SELECT count(*) FROM settings WHERE key IN ('queue-normal','queue-full')",[],|r|r.get::<_,i64>(0)).unwrap();
+        assert_eq!(count(),0);assert!(!normal.is_finished());assert!(!full.is_finished());
+        normal.abort();full.abort();assert!(normal.await.unwrap_err().is_cancelled());assert!(full.await.unwrap_err().is_cancelled());
+        assert_eq!(count(),0);drop(exclusive);
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while count()!=2 {tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        core.shutdown().await;
+        assert_eq!(count(),2);assert_eq!(queue.waiting_for_test(),0);
     }
 }

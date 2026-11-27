@@ -83,6 +83,7 @@ struct State {
 
 struct Inner {
     ingest: Arc<Mutex<Ingest>>,
+    references:super::reference_queue::ReferenceQueue,
     db: Mutex<Option<Db>>,
     slots: Arc<Semaphore>,
     #[cfg(target_os="linux")]
@@ -110,10 +111,11 @@ pub struct ManagedProofWriter {
 pub(crate) struct NativeProofTicket { _slot:Arc<OwnedSemaphorePermit>,issuer:Arc<()> }
 
 impl ManagedProofWriter {
-    pub(super) fn new(ingest: Arc<Mutex<Ingest>>, db: Option<Db>) -> Self {
+    pub(super) fn new(ingest: Arc<Mutex<Ingest>>, db: Option<Db>,references:super::reference_queue::ReferenceQueue) -> Self {
         Self {
             inner: Arc::new(Inner {
                 ingest,
+                references,
                 db: Mutex::new(db),
                 slots: Arc::new(Semaphore::new(JOB_LIMIT as usize)),
                 #[cfg(target_os="linux")]
@@ -234,6 +236,7 @@ impl Inner {
     ) -> Result<Result<R, E>, ManagedProofError> {
         // The global order is ingest -> private FULL connection. No async work or
         // source registry/FS locks are permitted inside this writer reservation.
+        let _references=self.references.read();
         let ingest = self.ingest.lock().unwrap_or_else(PoisonError::into_inner);
         if !ingest.db().conn().is_autocommit() {
             return Err(ManagedProofError::ActiveTransaction);

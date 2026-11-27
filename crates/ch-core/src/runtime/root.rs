@@ -197,7 +197,7 @@ impl Core {
         let sink = Arc::new(IngestSink::for_core(Ingest::new(ingest_db, opts), bus.clone(), logical_owners.clone()));
         #[cfg(not(target_os = "linux"))]
         let sink = Arc::new(IngestSink::new(Ingest::new(ingest_db, opts), bus.clone()));
-        let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(), proof_db);
+        let managed_proofs = ManagedProofWriter::new(sink.shared_ingest(),proof_db,sink.reference_queue());
         #[cfg(target_os = "linux")]
         let managed_sources = crate::managed_sources::ManagedSources::new(managed_proofs.clone(),catalog);
         #[cfg(target_os = "linux")]
