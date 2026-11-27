@@ -18,6 +18,7 @@ mod config;
 pub mod discovery;
 mod error;
 mod handle;
+mod removal;
 mod start_scope;
 #[cfg(target_os = "linux")]
 mod directories;
@@ -31,6 +32,8 @@ pub use config::HostConfig;
 pub use discovery::{Discovered, DiscoveryProblem, discover, resolve_entry};
 pub use error::{HostError, SecretError};
 pub use handle::HostHandle;
+#[cfg(target_os = "linux")]
+pub(crate) use removal::RemovalStop;
 pub use sink::{EventSink, MemorySecretStore, NullSink, SecretStore};
 pub use state::{
     AccountInfo, AccountPhase, AccountSpec, PluginInfo, PluginSnapshot, PluginState, StateChange,

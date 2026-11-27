@@ -38,6 +38,7 @@ use super::sink::{EventSink, SecretStore};
 use super::state::{AccountInfo, AccountPhase, AccountSpec, PluginInfo, PluginState, StateChange};
 use super::transport::{Frame, FrameError, FrameReader, encode};
 use super::start_scope::StartScope;
+use super::removal::{Decision, Evidence, RemovalStop, Request as LifecycleRequest};
 
 // ---------------------------------------------------------------------------------------
 // Host-wide registry (shared by the handle, the supervisors and their readers)
@@ -48,6 +49,7 @@ pub(crate) struct AccountRecord {
     pub info: AccountInfo,
     pub spec: AccountSpec,
     start: Option<StartScope>,
+    removal: Evidence,
     // One interval of successful account.start on this process. Status events
     // and duplicate starts preserve it; callers only receive child tokens.
     run: Option<CancellationToken>,
@@ -57,6 +59,7 @@ impl AccountRecord {
     #[cfg(test)]
     pub(super) fn same_stopped_record(&self, other: &Self) -> bool {
         self.info == other.info && self.info.phase == AccountPhase::Stopped
+            && self.removal.same(&other.removal)
             && self.run.is_none() && other.run.is_none()
             && self.spec.settings == other.spec.settings && self.spec.ghost == other.spec.ghost
             && serde_json::to_value(&self.spec.auto_download).unwrap() == serde_json::to_value(&other.spec.auto_download).unwrap()
@@ -171,6 +174,7 @@ impl Registry {
                     spec: AccountSpec::default(),
                     run: None,
                     start: None,
+                    removal: Evidence::default(),
                 });
             let before = rec.info.clone();
             f(rec);
@@ -230,7 +234,7 @@ impl Registry {
         // even creating a local record. No unscoped helper can resurrect it.
         if !scope.live() { return false; }
         let record = entry.accounts.entry(account.to_owned()).or_insert_with(|| AccountRecord {
-            info: AccountInfo::new(plugin, account), spec: AccountSpec::default(), run: None, start: None,
+            info: AccountInfo::new(plugin, account), spec: AccountSpec::default(), run: None, start: None, removal: Evidence::default(),
         });
         if record.info.phase == AccountPhase::Stopped
             && !record.start.as_ref().is_some_and(|old| old.same_owner(scope)) {
@@ -266,6 +270,47 @@ impl Registry {
             .is_some_and(|record| record.start.as_ref().is_some_and(|current| current.same(scope)))
     }
 
+    // This latch is independent of live-scope event adoption and local phase.
+    fn begin_lifecycle(&self, plugin: &str, account: &str, request: LifecycleRequest, start: bool) -> bool {
+        let mut state = self.lock();
+        let Some(record) = state.get_mut(plugin).and_then(|entry| entry.accounts.get_mut(account)) else { return false; };
+        if start { record.removal.start(request); } else { record.removal.stop(request); }
+        true
+    }
+
+    fn finish_lifecycle(&self, plugin: &str, account: &str, request: &LifecycleRequest, success: bool) {
+        let mut state = self.lock();
+        if let Some(record) = state.get_mut(plugin).and_then(|entry| entry.accounts.get_mut(account)) {
+            record.removal.finish(request, success);
+        }
+    }
+
+    pub(super) fn removal_decision(&self, plugin: &str, account: &str, connection: Option<&Arc<()>>) -> Decision {
+        let state = self.lock();
+        let Some(record) = state.get(plugin).and_then(|entry| entry.accounts.get(account)) else { return Decision::Local; };
+        match record.removal.decision(connection) {
+            Decision::Local if matches!(record.info.phase, AccountPhase::Starting | AccountPhase::Stopping | AccountPhase::Running) => Decision::Refuse,
+            decision => decision,
+        }
+    }
+
+    pub(super) fn forget_unexposed_wish(&self, plugin: &str, account: &str) {
+        let mut state = self.lock();
+        if let Some(record) = state.get_mut(plugin).and_then(|entry| entry.accounts.get_mut(account)) {
+            record.info.wanted = false;
+            record.revoke_run();
+        }
+    }
+
+    fn shutdown_confirmed(&self, plugin: &str, connection: &Arc<()>) {
+        let mut state = self.lock();
+        if let Some(entry) = state.get_mut(plugin) {
+            for record in entry.accounts.values_mut() {
+                record.removal.shutdown_confirmed(connection);
+            }
+        }
+    }
+
     fn refuse_unexposed_start(&self, plugin: &str, account: &str, scope: &StartScope) {
         self.update_start(plugin, account, scope, false, |record| {
             record.info.phase = AccountPhase::Stopped;
@@ -289,6 +334,11 @@ pub(crate) enum Command {
     StopAccount {
         account_id: String,
         reply: oneshot::Sender<Result<(), HostError>>,
+    },
+    StopAccountForRemoval {
+        account_id: String,
+        queued: super::removal::Command,
+        reply: oneshot::Sender<RemovalStop>,
     },
     Call {
         request_id: Option<Arc<std::sync::OnceLock<i64>>>,
@@ -314,6 +364,7 @@ enum PendingKind {
     Shutdown,
     AccountStart(String, StartScope),
     AccountStop(String),
+    RemovalStop(String),
     Call,
 }
 
@@ -338,6 +389,8 @@ static NEXT_REQUEST_ID: AtomicI64 = AtomicI64::new(1);
 
 struct Conn {
     plugin_id: String,
+    identity: Arc<()>,
+    registry: std::sync::Weak<Registry>,
     pending: Mutex<HashMap<i64, Pending>>,
     writer: mpsc::Sender<Out>,
     /// Pings missed in a row (reset by every pong).
@@ -417,6 +470,16 @@ impl Conn {
         let (tx, rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel::<()>();
         let frame = encode(&Request::new(id, method, params)).ok()?;
+        let lifecycle = match &kind {
+            PendingKind::AccountStart(account, _) => Some((account.clone(), true)),
+            PendingKind::AccountStop(account) | PendingKind::RemovalStop(account) => Some((account.clone(), false)),
+            _ => None,
+        };
+        let registry = if let Some((account, start)) = &lifecycle {
+            let registry = self.registry.upgrade()?;
+            if !registry.begin_lifecycle(&self.plugin_id, account, LifecycleRequest::new(&self.identity, id), *start) { return None; }
+            Some(registry)
+        } else { None };
         self.pending().insert(
             id,
             Pending {
@@ -430,6 +493,9 @@ impl Conn {
         );
         if !self.send_frame(frame) {
             self.pending().remove(&id);
+            if let (Some(registry), Some((account, _))) = (&registry, &lifecycle) {
+                registry.finish_lifecycle(&self.plugin_id, account, &LifecycleRequest::new(&self.identity, id), false);
+            }
             return None;
         }
         if let Some(token) = cancel {
@@ -452,7 +518,8 @@ impl Conn {
     /// Fail every pending request (process died).
     fn fail_all(&self, registry: &Registry, reason: &str) {
         let drained: Vec<(i64, Pending)> = self.pending().drain().collect();
-        for (_, p) in drained {
+        for (id, p) in drained {
+            fail_lifecycle(self, registry, id, &p.kind);
             match &p.kind {
                 PendingKind::AccountStart(acc, scope) => {
                     registry.update_start(&self.plugin_id, acc, scope, false, |r| {
@@ -461,7 +528,7 @@ impl Conn {
                         r.info.detail = Some(reason.to_owned());
                     });
                 }
-                PendingKind::AccountStop(acc) => {
+                PendingKind::AccountStop(acc) | PendingKind::RemovalStop(acc) => {
                     registry.update_account(&self.plugin_id, acc, |r| {
                         r.info.phase = AccountPhase::Stopped;
                         r.info.state = AccountState::Disconnected;
@@ -650,6 +717,9 @@ impl Supervisor {
                             });
                             let _ = reply.send(Ok(()));
                         }
+                        Command::StopAccountForRemoval { account_id, queued, reply } => {
+                            let _ = reply.send(self.local_removal_stop(&account_id, &queued));
+                        }
                         Command::Call { reply, .. } => {
                             let _ = reply.send(Err(self.not_running()));
                         }
@@ -754,6 +824,8 @@ impl Supervisor {
         ));
         let conn = Arc::new(Conn {
             plugin_id: self.plugin_id.clone(),
+            identity: Arc::new(()),
+            registry: Arc::downgrade(&self.registry),
             pending: Mutex::new(HashMap::new()),
             writer: writer_tx,
             ping_misses: AtomicU32::new(0),
@@ -832,6 +904,13 @@ impl Supervisor {
                             });
                             queued_starts.retain(|(id, _, _, _)| id != &account_id);
                             let _ = reply.send(Ok(()));
+                        }
+                        Some(Command::StopAccountForRemoval { account_id, queued, reply }) => {
+                            let outcome = self.local_removal_stop(&account_id, &queued);
+                            if outcome == RemovalStop::Confirmed {
+                                queued_starts.retain(|(id, _, _, _)| id != &account_id);
+                            }
+                            let _ = reply.send(outcome);
                         }
                         Some(Command::Call { reply, .. }) => {
                             let _ = reply.send(Err(self.not_running()));
@@ -939,6 +1018,9 @@ impl Supervisor {
                     Some(Command::StopAccount { account_id, reply }) => {
                         self.handle_stop(&conn, account_id, reply);
                     }
+                    Some(Command::StopAccountForRemoval { account_id, queued, reply }) => {
+                        self.handle_removal_stop(&conn, account_id, queued, reply);
+                    }
                     Some(Command::Call { method, params, cancel, request_id, reply }) => {
                         // A queued call can outlive the account run that authorized it.
                         if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
@@ -1021,6 +1103,7 @@ impl Supervisor {
         };
         let mut fatal = None;
         for (id, p) in expired {
+            fail_lifecycle(conn, &self.registry, id, &p.kind);
             match p.kind {
                 PendingKind::Ping => {
                     if conn.stalled.load(Ordering::Acquire) {
@@ -1048,7 +1131,7 @@ impl Supervisor {
                     });
                     let _ = p.reply.send(Err(timeout_error(p.method)));
                 }
-                PendingKind::AccountStop(acc) => {
+                PendingKind::AccountStop(acc) | PendingKind::RemovalStop(acc) => {
                     warn!(plugin = %self.plugin_id, account = %acc, "account.stop timed out; marking stopped");
                     conn.send_cancel(id);
                     self.registry.update_account(&self.plugin_id, &acc, |r| {
@@ -1253,6 +1336,53 @@ impl Supervisor {
         Ok(())
     }
 
+    fn local_removal_stop(&self, account: &str, queued: &super::removal::Command) -> RemovalStop {
+        let Some(_reservation) = queued.admit() else { return RemovalStop::Refused; };
+        if !matches!(self.registry.removal_decision(&self.plugin_id, account, None), Decision::Local) {
+            return RemovalStop::Refused;
+        }
+        self.registry.forget_unexposed_wish(&self.plugin_id, account);
+        RemovalStop::Confirmed
+    }
+
+    fn handle_removal_stop(&self, conn: &Arc<Conn>, account: String, queued: super::removal::Command,
+        reply: oneshot::Sender<RemovalStop>) {
+        let Some(reservation) = queued.admit() else { let _ = reply.send(RemovalStop::Refused); return; };
+        match self.registry.removal_decision(&self.plugin_id, &account, Some(&conn.identity)) {
+            Decision::Local => {
+                self.registry.forget_unexposed_wish(&self.plugin_id, &account);
+                let _ = reply.send(RemovalStop::Confirmed); return;
+            }
+            Decision::Refuse => { let _ = reply.send(RemovalStop::Refused); return; }
+            Decision::Dispatch => {}
+        }
+        self.registry.update_account(&self.plugin_id, &account, |record| {
+            record.info.wanted = false;
+            record.info.phase = AccountPhase::Stopping;
+        });
+        let sent = conn.request(PendingKind::RemovalStop(account.clone()), "account.stop",
+            serde_json::json!({"account_id":account}), self.config.request_timeout("account.stop"),
+            None, conn);
+        drop(reservation); // Actual request owns its reply independently of the caller.
+        let Some((id, response)) = sent else { let _ = reply.send(RemovalStop::Refused); return; };
+        let request = LifecycleRequest::new(&conn.identity, id);
+        let registry = self.registry.clone(); let plugin = self.plugin_id.clone();
+        tokio::spawn(async move {
+            let positive = match response.await {
+                Ok(Ok(value)) => value.is_object(),
+                Ok(Err(error)) => error.code() == ErrorCode::UnknownAccount,
+                Err(_) => {
+                    registry.finish_lifecycle(&plugin, &account, &request, false);
+                    false
+                }
+            };
+            let outcome = if positive && matches!(registry.removal_decision(&plugin, &account, None), Decision::Local) {
+                RemovalStop::Confirmed
+            } else { RemovalStop::Refused };
+            let _ = reply.send(outcome);
+        });
+    }
+
     fn handle_stop(
         &self,
         conn: &Arc<Conn>,
@@ -1324,6 +1454,14 @@ impl Supervisor {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "start_tests.rs"]
 mod start_tests;
+
+fn fail_lifecycle(conn: &Conn, registry: &Registry, id: i64, kind: &PendingKind) {
+    let account = match kind {
+        PendingKind::AccountStart(account, _) | PendingKind::AccountStop(account) | PendingKind::RemovalStop(account) => account,
+        _ => return,
+    };
+    registry.finish_lifecycle(&conn.plugin_id, account, &LifecycleRequest::new(&conn.identity, id), false);
+}
 
 fn timeout_error(method: &str) -> ErrorObject {
     ErrorObject::new(ErrorCode::Timeout, format!("{method} timed out"))
@@ -1615,6 +1753,15 @@ fn resolve(
     };
     trace!(plugin = %conn.plugin_id, id = n, method = p.method, ok = result.is_ok(), "response");
     match &p.kind {
+        PendingKind::Shutdown if result.as_ref().is_ok_and(Value::is_object) => registry.shutdown_confirmed(&conn.plugin_id, &conn.identity),
+        PendingKind::AccountStart(account, _) => registry.finish_lifecycle(&conn.plugin_id, account,
+            &LifecycleRequest::new(&conn.identity, n), result.as_ref().is_ok_and(Value::is_object)),
+        PendingKind::AccountStop(account) | PendingKind::RemovalStop(account) => registry.finish_lifecycle(&conn.plugin_id, account,
+            &LifecycleRequest::new(&conn.identity, n), result.as_ref().is_ok_and(Value::is_object)
+                || result.as_ref().is_err_and(|error| error.code() == ErrorCode::UnknownAccount)),
+        _ => {}
+    }
+    match &p.kind {
         PendingKind::Ping => {
             conn.ping_misses.store(0, Ordering::Release);
         }
@@ -1632,7 +1779,7 @@ fn resolve(
                 }
             });
         }
-        PendingKind::AccountStop(acc) => {
+        PendingKind::AccountStop(acc) | PendingKind::RemovalStop(acc) => {
             registry.update_account(&conn.plugin_id, acc, |r| {
                 r.info.phase = AccountPhase::Stopped;
                 r.info.wanted = false;

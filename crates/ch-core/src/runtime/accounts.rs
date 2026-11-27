@@ -471,7 +471,11 @@ impl Accounts {
                 return Err(RuntimeError::SourceInUse);
             }
         };
-        runtime.block_on(self.stop_on_host(&row));
+        if runtime.block_on(self.0.host.stop_for_removal(&row.plugin_id, &row.account_id))
+            != crate::host::RemovalStop::Confirmed {
+            let _=self.rearm_refused(scope,&row,&root,&gate,anchor,&close);
+            return Err(RuntimeError::SourceInUse);
+        }
         #[cfg(test)] self.at_owner_close("before-delete-tx");
         let sole=match self.owner_db(scope,|db|self.delete_row_checked(db,&row,&root,&gate,||
             catalog.verify().map_err(|_|RuntimeError::SourceInUse)))? {

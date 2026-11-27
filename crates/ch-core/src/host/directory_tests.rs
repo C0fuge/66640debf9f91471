@@ -2,29 +2,35 @@ use super::*;
 use crate::{host::{AccountPhase, AccountSpec, MemorySecretStore, NullSink}, runtime::{Core, CoreConfig, NewAccount}};
 use std::{fs, sync::{Condvar, Mutex, atomic::{AtomicUsize, Ordering}}, time::Duration};
 
-struct Fixture { _temp: tempfile::TempDir, core: Arc<Core> }
+struct Fixture { _temp: tempfile::TempDir, core: Arc<Core>, secrets: Arc<MemorySecretStore> }
 impl Fixture {
-    async fn new() -> Self {
+    async fn new() -> Self { Self::configured(None).await }
+    async fn configured(mode: Option<&str>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path().join("data");
         let plugin = data.join("plugins/fixture");
         fs::create_dir_all(&plugin).unwrap();
-        fs::write(plugin.join("peer.py"), include_bytes!("../../tests/fixtures/account_directories.py")).unwrap();
+        let peer: &[u8] = if mode.is_some() { include_bytes!("../../tests/fixtures/removal_stop.py") }
+            else { include_bytes!("../../tests/fixtures/account_directories.py") };
+        fs::write(plugin.join("peer.py"), peer).unwrap();
         fs::write(plugin.join("plugin.json"), serde_json::json!({
             "id":"fixture","name":"Fixture","version":"0.0.1","api_version":"1.2.0",
             "entry":["python3","-I","./peer.py"],"brand_color":"#123456",
             "multi_account":true,"auth_methods":["none"]
         }).to_string()).unwrap();
-        let mut config = CoreConfig::new(&data, Arc::new(MemorySecretStore::new()));
+        let secrets = Arc::new(MemorySecretStore::new());
+        let mut config = CoreConfig::new(&data, secrets.clone());
         config.host = HostConfig::fast(&data, 50);
+        if matches!(mode, Some("delayed-start" | "delayed-stop")) { config.host.timeout_scale = 0.1; }
         for key in ["CH_DATA_DIR", "HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"] {
             config.host.env.insert(key.into(), temp.path().join(key).to_string_lossy().into_owned());
         }
         config.host.env.insert("CH_TEST_ACCOUNT_STARTS".into(), temp.path().join("starts.log").to_string_lossy().into_owned());
+        if let Some(mode) = mode { config.host.env.insert("CH_TEST_REMOVAL_MODE".into(), mode.into()); }
         config.autostart = false;
         let core = Arc::new(Core::open(config).await.unwrap());
         core.accounts().add(NewAccount::new("fixture").id("owner").no_start()).await.unwrap();
-        Self { _temp: temp, core }
+        Self { _temp: temp, core, secrets }
     }
     fn directories(&self) -> Arc<crate::host::directories::AccountDirectories> {
         self.core.host().0.directories.as_ref().unwrap().clone()
@@ -330,9 +336,11 @@ async fn equal_birth_recreated_owner_rejects_original_queued_scope_and_actual_re
                 info.phase == AccountPhase::Stopped && info.detail.as_deref() == Some("Account start was cancelled; start the account again"))).await;
             assert_eq!(f.starts(), vec!["owner"]);
         } else {
+            // Ordinary stop's legitimate placeholder is independent of strict
+            // destructive removal, which does not manufacture a local record.
+            f.core.host().stop_account("fixture", "owner").await.unwrap();
             let command = f.core.host().ensure_supervisor("fixture").unwrap();
-            // Core.remove's ordinary no-supervisor stop legitimately created a
-            // Stopped placeholder. The stale start must preserve every field,
+            // The stale start must preserve every field of this placeholder,
             // not mistake its pre-existing presence for stale resurrection.
             for missing in [false, true] {
                 if missing { f.core.host().0.registry.lock().get_mut("fixture").unwrap().accounts.remove("owner"); }
@@ -481,3 +489,6 @@ async fn refused_removal_rearm_never_heals_future_replay_without_a_fresh_explici
     assert!(old.is_revoked());
     f.close().await;
 }
+
+#[path = "removal_tests.rs"]
+mod removal_tests;

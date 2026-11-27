@@ -383,6 +383,36 @@ impl HostHandle {
         rx.await.map_err(|_| HostError::ShuttingDown)?
     }
 
+    // Removal alone requires native logical lifecycle confirmation. This is
+    // not a source-reader/process closure certificate and grants no I/O access.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn stop_for_removal(&self, plugin: &str, account: &str) -> super::removal::RemovalStop {
+        use super::removal::{Decision, RemovalStop};
+        let command = match self.supervisor(plugin) {
+            Ok(Some(command)) => command,
+            Ok(None) | Err(HostError::UnknownPlugin(_)) => {
+                if matches!(self.0.registry.removal_decision(plugin, account, None), Decision::Local) {
+                    self.0.registry.forget_unexposed_wish(plugin, account);
+                    return RemovalStop::Confirmed;
+                }
+                return RemovalStop::Refused;
+            }
+            Err(_) => return RemovalStop::Refused,
+        };
+        let queued = super::removal::Wait::new();
+        let (send, receive) = oneshot::channel();
+        let wait = async {
+            command.send(Command::StopAccountForRemoval { account_id: account.into(),
+                queued: queued.command(), reply: send }).await.ok()?;
+            receive.await.ok()
+        };
+        let outcome = tokio::time::timeout(self.0.config.request_timeout("account.stop"), wait).await;
+        match outcome {
+            Ok(Some(outcome)) => outcome,
+            _ => RemovalStop::Refused,
+        }
+    }
+
     /// Call a core→plugin method with raw JSON params. Before anything is sent, the host
     /// checks the registry: the method must be core→plugin and not a lifecycle method, the
     /// plugin must declare its capability, and no present gated parameter may lack its
